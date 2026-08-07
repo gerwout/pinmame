@@ -134,7 +134,7 @@ static struct {
   int    coinPulse;     /* TRAP ticks left on a coin one-shot */
   UINT8  coinBits;      /* which coin slot is pulsing */
   UINT8  lastCoin;      /* previous key level, for edge detect */
-  int    troughState;   /* trough contact as last presented to the ROM */
+  int    troughEdge;    /* a physical event wants the trough contact driven */
   int    lastTilt;      /* previous falta level, for edge detect */
   int    phaseT1;       /* mains half-cycle presented on the 8035's T1 pin */
   int    gatePhase;     /* phase the bytes arriving now were selected for */
@@ -603,7 +603,10 @@ static INTERRUPT_GEN(rfranco_trap) {
      the player drains, which is the DRAIN key since there is no ball model.
      Without this the trough reads "ball present" for ever and the game ends
      every ball the instant it starts one (0x0A2C -> 0x1121). */
-  if (locals.solAcc & (1u << 9)) locals.ballInTrough = 0;
+  if (locals.solAcc & (1u << 9)) {
+    locals.ballInTrough = 0;
+    locals.troughEdge = 1;
+  }
 
   memset(locals.lampAcc, 0, sizeof(locals.lampAcc));
   locals.solAcc = 0;
@@ -709,7 +712,10 @@ static SWITCH_UPDATE(RFRANCO) {
     }
     locals.lastCoin = coins;
 
-    if (inp & 0x0040) locals.ballInTrough = 1;   /* DRAIN key: ball returns */
+    if (inp & 0x0040) {                          /* DRAIN key: ball returns */
+      if (!locals.ballInTrough) locals.troughEdge = 1;
+      locals.ballInTrough = 1;
+    }
     if (inp & 0x0080) v |= 0x80;                 /* pulsador partidas */
     if (locals.coinPulse) v |= locals.coinBits;
     mask |= 0xb0;                                /* coins and start button */
@@ -731,11 +737,11 @@ static SWITCH_UPDATE(RFRANCO) {
 
      Two state model: the game empties the trough by firing SALIDA BOLAS (see
      rfranco_trap) and the DRAIN key refills it, which is what ends the ball.
-     Applied on change only, so a front end that owns the contact itself is not
-     fought every frame while the two transitions the hardware really makes
-     always reach the ROM. */
-  if (locals.troughState != locals.ballInTrough) {
-    locals.troughState = locals.ballInTrough;
+     Only those two physical events drive the contact - the state is not
+     reasserted every frame - so a front end that owns the contact itself keeps
+     control of it in between. */
+  if (locals.troughEdge) {
+    locals.troughEdge = 0;
     if (locals.ballInTrough) v |= 0x40;
     mask |= 0x40;
   }
@@ -747,8 +753,13 @@ static SWITCH_UPDATE(RFRANCO) {
      bits 0-3 of the cabinet row, so switch 21 is borrowed as the front end's
      way in; it is edge triggered, like the contact. */
   if (coreGlobals.swMatrix[2] & 0x01) tilt = 1;
-  if (tilt && !locals.lastTilt)
-    cpu_set_irq_line(RFRANCO_CPU, I8085_RST65_LINE, PULSE_LINE);
+  /* Level, not a pulse. RST 6.5 is a level sensitive input, and the ROM leaves
+     it masked except for the single NOP at 0x194D, so a pulse is armed and
+     disarmed again long before the CPU can look: the core's own request flag is
+     cleared by the falling edge (i8085_set_RST65). Hold the line for as long as
+     the contact is closed and the request survives to the next unmask window. */
+  if (tilt != locals.lastTilt)
+    cpu_set_irq_line(RFRANCO_CPU, I8085_RST65_LINE, tilt ? ASSERT_LINE : CLEAR_LINE);
   locals.lastTilt = tilt;
 }
 
@@ -823,6 +834,7 @@ void rfranco_unscramble_sound_rom(void) {
 static MACHINE_INIT(RFRANCO) {
   memset(&locals, 0, sizeof locals);
   locals.ballInTrough = 1;      /* a ball rests in the outhole at power up */
+  locals.troughEdge = 1;        /* ... and the ROM has to be told so */
   /* RIM must sample SID at the instant it executes, because the switch data is
      being clocked in a bit at a time - a value pushed in ahead of time would be
      stale. */
