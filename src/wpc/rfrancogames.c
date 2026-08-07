@@ -16,18 +16,24 @@
     core_gameData = &name##GameData; \
   }
 
-/* TODO(phase 3): placeholder layout. The display board (ref. 53/3307) carries
-   30 HDSP-3400 digits driven by a 74159 digit select and two 7447 segment
-   decoders behind an 8279. The manual's test mode refers to four player
-   displays plus a credits display; the exact digit ordering has to come out of
-   the display protocol trace before this can be made accurate. */
+/* Display board 53/3307: 30 HDSP-3400 digits behind an 8279, a 74159 digit
+   select and two 7447 segment decoders. Sixteen scan positions each drive an
+   anode pair - one digit from D1..D14 (7447 IC5, the display byte's low
+   nibble) and one from D15..D30 (IC7, high nibble). Players 1 and 3 take the
+   low nibble, 2 and 4 the high one; players 1-2 use even RAM addresses and 3-4
+   odd ones. Address 0/1 is the least significant digit and is the fixed
+   trailing zero, since the smallest playfield award is 10 points.
+
+   Segment indices: 0-6 player 1, 8-14 player 2, 16-22 player 3, 24-30 player 4,
+   32/33 credits tens/units. Row and column positions are cosmetic, taken from
+   the component placement drawing. There is no ball-in-play display on this
+   board - 4x7 score digits plus 2 credit digits is exactly 30. */
 static core_tLCDLayout rfrancoDisp[] = {
-  { 0, 0, 0, 6, CORE_SEG7},
-  { 0,16, 6, 6, CORE_SEG7},
-  { 3, 0,12, 6, CORE_SEG7},
-  { 3,16,18, 6, CORE_SEG7},
-  { 6, 8,24, 2, CORE_SEG7},
-  { 6,14,26, 2, CORE_SEG7},
+  { 0, 0,  0, 7, CORE_SEG7},   /* player 1  - top left     */
+  { 0,18, 16, 7, CORE_SEG7},   /* player 3  - top right    */
+  { 3, 0,  8, 7, CORE_SEG7},   /* player 2  - bottom left  */
+  { 3,15, 32, 2, CORE_SEG7},   /* credits   - centre       */
+  { 3,18, 24, 7, CORE_SEG7},   /* player 4  - bottom right */
   {0}
 };
 

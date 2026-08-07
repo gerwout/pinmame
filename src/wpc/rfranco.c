@@ -91,6 +91,9 @@ static struct {
   int    phaseT1;       /* mains half-cycle presented on the 8035's T1 pin */
   UINT8  lampAcc[7];    /* lamps gated during the current frame */
   UINT32 solAcc;        /* coils gated during the current frame */
+  UINT8  i8279ram[16];  /* display RAM behind the 8279 */
+  int    i8279addr;
+  int    inhibitA, inhibitB;
 } locals;
 
 /*------------------------------------
@@ -149,27 +152,14 @@ static WRITE_HANDLER(rfranco_clk_w) {
     locals.swShift >>= 1;          /* LSB first - see rfranco_sid_r */
     locals.swShiftPos--;
   }
-  /* Advance the display chain.
-
-     Per frame the game runs OUT / RAL / SIM nine times (0x241C-0x2426). The
-     first OUT has no SIM before it, so it clocks in the stale trailing level
-     left by the previous frame; the remaining eight are each preceded by a SIM
-     carrying E's bits b7..b0. Eight bits is exactly what the 74164 holds, so
-     gating on "a SIM happened since the last clock" both drops that stale
-     leading bit and excludes the switch scan's sixteen clocks, which issue no
-     SIMs at all. */
-  if (!locals.simSinceClock) return;
-  locals.simSinceClock = 0;
-  locals.dispShift = (locals.dispShift << 1) | locals.sodState;
-  locals.dispShiftPos++;
-  if (locals.dispShiftPos >= 8) {
-    /* TODO(phase 3): a complete byte has reached the 74164/8279. Decode it
-       into coreGlobals.segments once the 8279 command/data split is known. */
-#ifdef RFRANCO_TRACE_DISPLAY
-    fprintf(stderr, "DISPWORD %02X\n", locals.dispShift & 0xff);
-#endif
-    locals.dispShiftPos = 0;
-  }
+  /* The 74164 simply accumulates whatever SOD holds at each clock. Nine clocks
+     per frame: the first shifts in the stale trailing level from the previous
+     frame, which then falls off the end, leaving the register holding the
+     payload byte exactly. Nothing needs to distinguish the two serial chains
+     here - the switch scan's clocks disturb the register harmlessly, because it
+     is reloaded from scratch every frame and only ever committed when LOAD
+     pulses (see rfranco_sound_w). */
+  locals.dispShift = (UINT16)((locals.dispShift << 1) | locals.sodState);
 }
 
 /*------------------------------
@@ -179,7 +169,72 @@ static WRITE_HANDLER(rfranco_clk_w) {
    takes the reply and clears RST5.5 on the main CPU. The game's handshake is
    at 0x196C: store the command, unmask RST5.5 with SIM, EI, then HALT until
    the latch answers. */
+/*------------------------------
+/  8279 display controller
+/-------------------------------*/
+/* 16 x 8 display RAM. Each byte holds two digits: the high nibble goes to the
+   7447 driving D15..D30 (OUT A) and the low nibble to the one driving D1..D14
+   (OUT B), with the 74159 selecting one anode pair per RAM address. Digits are
+   raw BCD; 0x0F blanks (the 7447 shows nothing for 15). */
+static const INT8 rfranco_digit[16][2] = {  /* {OUT A, OUT B}, -1 = not wired */
+  { 14,  6 }, { 30, 22 }, { 13,  5 }, { 29, 21 },
+  { 12,  4 }, { 28, 20 }, { 11,  3 }, { 27, 19 },
+  { 10,  2 }, { 26, 18 }, {  9,  1 }, { 25, 17 },
+  {  8,  0 }, { 24, 16 }, { 33, -1 }, { 32, -1 },
+};
+
+static void rfranco_8279_refresh(int addr) {
+  UINT8 d = locals.i8279ram[addr & 0x0f];
+  INT8 a = rfranco_digit[addr & 0x0f][0];
+  INT8 b = rfranco_digit[addr & 0x0f][1];
+  if (a >= 0) locals.segments[a].w = core_bcd2seg7[d >> 4];
+  if (b >= 0) locals.segments[b].w = core_bcd2seg7[d & 0x0f];
+}
+
+/* Called when LOAD pulses, which is the rising edge of the 8279's /WR. A0 is
+   whatever level SOD was left at: 0x2417 finishes with D=0xC0 (high = command)
+   and 0x2432 with D=0x40 (low = data). */
+static void rfranco_8279_w(UINT8 data, int a0) {
+  int i;
+  if (a0) {                                   /* command */
+    switch (data & 0xe0) {
+      case 0x80:                              /* write display RAM at addr */
+        locals.i8279addr = data & 0x0f;
+        break;
+      case 0xa0:                              /* display write inhibit */
+        locals.inhibitA = (data & 0x04) ? 1 : 0;
+        locals.inhibitB = (data & 0x08) ? 1 : 0;
+        break;
+      case 0xc0:                              /* clear */
+        for (i = 0; i < 16; i++) {
+          locals.i8279ram[i] = 0xff;          /* all ones = blank on a 7447 */
+          rfranco_8279_refresh(i);
+        }
+        break;
+      default:                                /* mode set, clock, read FIFO */
+        break;
+    }
+    return;
+  }
+  /* data write - the inhibit bits mask off one nibble so the two players
+     sharing a RAM address can be written independently */
+  {
+    UINT8 cur = locals.i8279ram[locals.i8279addr];
+    UINT8 val = cur;
+    if (!locals.inhibitA) val = (UINT8)((val & 0x0f) | (data & 0xf0));
+    if (!locals.inhibitB) val = (UINT8)((val & 0xf0) | (data & 0x0f));
+    locals.i8279ram[locals.i8279addr] = val;
+    rfranco_8279_refresh(locals.i8279addr);
+  }
+}
+
 static WRITE_HANDLER(rfranco_sound_w) {
+  /* Command 0xAA is the display strobe. The sound CPU's handler for it pulses
+     P1.5, which becomes LOAD on the display board and clocks the 74164's byte
+     into the 8279. 0x2417 sends it at the end of every frame and it is issued
+     from nowhere else in the ROM. */
+  if (data == 0xaa)
+    rfranco_8279_w((UINT8)(locals.dispShift & 0xff), locals.sodState);
   locals.soundCmd = data;
   locals.soundPending = 1;
   cpu_set_irq_line(RFRANCO_SCPU, 0, ASSERT_LINE);
