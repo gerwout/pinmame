@@ -50,6 +50,15 @@
      table has them the other way round. The ROM wins, since it is what the
      machine's own contact test reports.
 
+   Solenoid numbering is the IC7 4028 output + 1; see the coil decode in
+   rfranco_scpu_movx_w. 17-20 are synthesised - the two bumpers and the two
+   ball ejectors have no CPU connection at all.
+
+   Status: playable. A coin gives a credit, the start button starts a game and
+   serves a ball, playfield contacts score, the score and credit displays read
+   correctly, lamps and coils follow the ROM's own tables, the two mains phases
+   are multiplexed, and all four operator modes on the door switches work.
+
    Sets:
      supstarf  "Super Star" set 1 (m31-a-01187.ic19). 9 operator adjustment
                zones; this is the revision the factory manual documents.
@@ -118,15 +127,12 @@ static struct {
   /* Serial display chain: SOD feeds a 74164 (IC1) on the display board which
      in turn drives the 8279. The game clocks 9 bits per frame. */
   UINT16 dispShift;
-  int    dispShiftPos;
   int    sodState;
   int    cbInstalled;
-  int    simSinceClock;    /* SOE asserted since the previous shift clock */
 
   /* 8212 command/ack latches between the two CPUs at 0x8000. */
   UINT8  soundCmd;      /* main -> sound, latched in IC6 */
   UINT8  soundReply;    /* sound -> main, latched in IC5 */
-  int    soundPending;
   int    soundTrigger;  /* trigger the main CPU is currently stalled on */
   int    soundSeq;      /* rotating index into the trigger block */
   UINT8  scpuP1;        /* 8035 port 1 latch */
@@ -155,10 +161,9 @@ static struct {
 /*------------------------------------
 /  Serial switch input on the SID pin
 /-------------------------------------*/
-/* The game reloads the shift registers by pulsing the clock with the parallel
-   load asserted, then reads 16 bits MSB first, inverting as it goes because the
-   contacts are active low (see the loop at 0x18A6 in the game ROM). We present
-   the current playfield state and let it clock through. */
+/* The scan at 0x18A6 reads 16 bits, first bit first, inverting as it goes
+   because the contacts are active low, and clocks the chain on with an OUT
+   between each. */
 static int rfranco_sid_r(void) {
   /* Present the bit as-is: PinMAME's 1 = closed is what the hardware puts on
      SID, and the ROM's CMA at 0x18A9 turns it into its own 0 = closed. The
@@ -198,10 +203,6 @@ static void rfranco_load_w(void) {
 /--------------------------------------*/
 static void rfranco_sod_w(int state) {
   locals.sodState = state ? 1 : 0;
-  /* SOE is only ever asserted by the display routine (SIM at 0x2424 and
-     0x242A); the switch scan never touches it. That is what tells the two
-     serial chains apart, since the shared OUT strobe cannot. */
-  locals.simSinceClock = 1;
 }
 
 /*-------------------------------------------------
@@ -312,16 +313,16 @@ static void rfranco_8279_w(UINT8 data, int a0) {
 }
 
 static WRITE_HANDLER(rfranco_sound_w) {
-  /* Command 0xAA is the display strobe. The sound CPU's handler for it pulses
-     P1.5, which becomes LOAD on the display board and clocks the 74164's byte
-     into the 8279. 0x2417 sends it at the end of every frame and it is issued
-     from nowhere else in the ROM. */
+  /* Command 0xAA is the LOAD strobe. The sound CPU's handler for it pulses
+     P1.5, which reaches the display board as the 8279's /WR (JA12) and the
+     driver board as the 74165 parallel load (JE-4), so it commits the display
+     byte and captures the playfield contacts at the same instant. 0x2417 sends
+     it at the end of every transfer and it is issued from nowhere else. */
   if (data == 0xaa) {
     rfranco_8279_w((UINT8)(locals.dispShift & 0xff), locals.sodState);
     rfranco_load_w();
   }
   locals.soundCmd = data;
-  locals.soundPending = 1;
   cpu_set_irq_line(RFRANCO_SCPU, 0, ASSERT_LINE);
 
   /* The 8212 holds the 8085 in wait states through its READY input until the
@@ -388,7 +389,6 @@ static READ_HANDLER(rfranco_scpu_movx_r) {
   if (RFRANCO_LATCH_SELECTED(locals.scpuP2)) {
     /* reading IC6 takes the command and drops the sound CPU's interrupt */
     cpu_set_irq_line(RFRANCO_SCPU, 0, CLEAR_LINE);
-    locals.soundPending = 0;
     /* releases the main CPU from its READY stall */
     cpu_trigger(locals.soundTrigger);
     return locals.soundCmd;
@@ -407,9 +407,19 @@ static READ_HANDLER(rfranco_scpu_movx_r) {
       case 0x0e:  /* port A - cabinet inputs, active low */
         return ~coreGlobals.swMatrix[2];
       case 0x0f: {
-        /* Port B bits 7/6 are the ajuste and test switches; 1 = switch down.
-           Both down is normal play, which is what the ROM's boot dispatch at
-           0x00BB decodes as 0xC0. */
+        /* Port B bits 7/6 are the test and ajuste switches on the door; 1 is
+           switch down. The boot dispatch at 0x00BB masks them to 0xC0 and
+           branches on the result, giving the manual's four positions - all
+           four verified against what the machine actually does:
+             0xC0 both down    juego, the normal game
+             0x80              test de luces, which is also the way in to the
+                               RAM audit zones (0x312C)
+             0x40              borrado: zeroes the credits once and waits
+                               (0x00C7)
+             0x00 both up      ajustes, the nine adjustment zones (0x3255).
+                               Inside that mode 0x40/0x80 means "the button
+                               steps to the next zone" and 0x00 means "the
+                               button changes the value" (0x33AA). */
         static const UINT8 doorsw[4] = { 0xc0, 0x80, 0x40, 0x00 };
         return doorsw[core_getDip(0) & 0x03];
       }
