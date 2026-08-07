@@ -88,6 +88,9 @@ static struct {
   int    soundPending;
   UINT8  scpuP1;        /* 8035 port 1 latch */
   UINT8  scpuP2;        /* 8035 port 2 latch - selects latch / PSG1 / PSG2 */
+  int    coinPulse;     /* TRAP ticks left on a coin one-shot */
+  UINT8  coinBits;      /* which coin slot is pulsing */
+  UINT8  lastCoin;      /* previous key level, for edge detect */
   int    phaseT1;       /* mains half-cycle presented on the 8035's T1 pin */
   UINT8  lampAcc[7];    /* lamps gated during the current frame */
   UINT32 solAcc;        /* coils gated during the current frame */
@@ -435,6 +438,7 @@ static INTERRUPT_GEN(rfranco_trap) {
   locals.solenoids = locals.solAcc;
   memset(locals.lampAcc, 0, sizeof(locals.lampAcc));
   locals.solAcc = 0;
+  if (locals.coinPulse) locals.coinPulse--;
   locals.phaseT1 ^= 1;
   cpu_set_irq_line(RFRANCO_CPU, IRQ_LINE_NMI, PULSE_LINE);
 }
@@ -476,12 +480,37 @@ static int rfranco_m2sw(int col, int row) { return col * 10 + row + 1; }
 
 static SWITCH_UPDATE(RFRANCO) {
   if (inports) {
-    /* Coins, ball drain and start sit in swMatrix[2] bits 4-7, which is what
-       the sound CPU hands back as IC2 port A. */
-    CORE_SETKEYSW(inports[RFRANCO_COMINPORT], 0xf0, 2);
-    /* Falta (tilt) is not a matrix switch at all - it reaches the CPU on JD1
-       and fires RST 6.5 (vector 0x0034 -> 0x0286). */
-    if (inports[RFRANCO_COMINPORT] & 0x0100)
+    UINT16 inp = inports[RFRANCO_COMINPORT];
+    UINT8  coins = (UINT8)(inp & 0x30);
+    UINT8  v;
+
+    /* The coin contacts have to be a pulse, not a level. 0x0545 latches the
+       coin, then waits for the contact to OPEN within 20 TRAP ticks; if it is
+       still closed it falls through to 0x055C and jumps to the fault handler,
+       which wedges the machine for good. Holding a coin key down is the
+       obvious thing for a user to do, so turn the key press into a one-shot. */
+    if (coins & ~locals.lastCoin) {
+      locals.coinBits = (UINT8)(coins & ~locals.lastCoin);
+      locals.coinPulse = 10;
+    }
+    locals.lastCoin = coins;
+
+    /* Caida de bolas is closed whenever a ball is sitting in the trough, which
+       is the rest state - and both the start path at 0x0508 and the fault
+       recovery at 0x030F require it. Left open, 0x030F/0x0331 ping-pong
+       forever: the TRAP handler keeps ticking so the machine looks alive while
+       the foreground program is dead.
+       TODO: drive this from a real trough model rather than assuming a ball is
+       always present. */
+    v = 0x40;
+    if (inp & 0x0040) v &= (UINT8)~0x40;   /* key lifts the ball out */
+    if (inp & 0x0080) v |= 0x80;           /* pulsador partidas */
+    if (locals.coinPulse) v |= locals.coinBits;
+    CORE_SETKEYSW(v, 0xf0, 2);
+
+    /* Falta (tilt) is not a matrix switch - it reaches the CPU on JD1 and
+       fires RST 6.5 (vector 0x0034 -> 0x0286). */
+    if (inp & 0x0100)
       cpu_set_irq_line(RFRANCO_CPU, I8085_RST65_LINE, PULSE_LINE);
   }
 }
