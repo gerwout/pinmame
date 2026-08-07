@@ -321,7 +321,12 @@ static READ_HANDLER(rfranco_scpu_movx_r) {
         return 0xff;
     }
   }
-  /* TODO(phase 6): IC3/PSG1 (P2.6 low) is the lamp and coil output device. */
+  if (!(locals.scpuP2 & 0x40)) {
+    /* PSG1 is read back too: the REST opcode saves a voice's volume register
+       before muting it (sound ROM 0x2A5). */
+    AY8910Write(0, 0, offset & 0x0f);
+    return AY8910Read(0);
+  }
   return 0xff;
 }
 
@@ -364,9 +369,11 @@ static WRITE_HANDLER(rfranco_scpu_movx_w) {
       default:
         AY8910Write(0, 0, offset & 0x0f);
         AY8910Write(0, 1, data);
-        return;
+        break;
     }
   }
+  /* Not "else": P2 = 0x9F pulls both selects low at once, which the sound ROM
+     uses at 0x39B to zero registers 8/9/10 on both chips. */
   if (!(locals.scpuP2 & 0x20)) {          /* PCS2 = IC2, the input PSG */
     AY8910Write(1, 0, offset & 0x0f);
     AY8910Write(1, 1, data);
@@ -383,10 +390,20 @@ static READ_HANDLER(rfranco_scpu_t1_r) {
 
 static WRITE_HANDLER(rfranco_scpu_p1_w) {
   locals.scpuP1 = data;
-  /* TODO(phase 6): P1 carries BDIR/BC1 for the two AY-3-8910s. */
+  /* P1 does NOT carry BDIR/BC1 - those come from IC17 (7400) fed by /WR35,
+     /RD35 and ALE, which is why a single MOVX both latches the AY register
+     number and writes it. P1 drives the 74S138 (IC8) and the 7438 (IC15)
+     display strobe gates; P1.6 is an independent latched output toggled only
+     by sound commands 0x96 and 0x69. */
 }
 
 static WRITE_HANDLER(rfranco_scpu_p2_w) {
+  /* P2.4 is the system /RESET net: it reaches both AY-3-8910s (pin 23), the
+     8212 latches and the main board. The sound CPU asserts it at 0x0BA, holds
+     it across its ~1.94s power-up timer delay, and releases it at 0x0C7 - so
+     the 8035 holds the rest of the machine in reset while it starts up. */
+  if ((locals.scpuP2 ^ data) & 0x10)
+    cpu_set_reset_line(RFRANCO_CPU, (data & 0x10) ? CLEAR_LINE : ASSERT_LINE);
   locals.scpuP2 = data;
 }
 
@@ -545,7 +562,7 @@ static MACHINE_INIT(RFRANCO) {
 
 MACHINE_DRIVER_START(RFRANCO)
   MDRV_IMPORT_FROM(PinMAME)
-  MDRV_CPU_ADD_TAG("mcpu", 8085A, RFRANCO_CPUFREQ)
+  MDRV_CPU_ADD_TAG("mcpu", 8085A, RFRANCO_CPUFREQ / 2)  /* core wants the internal clock */
   MDRV_CPU_MEMORY(rfranco_readmem, rfranco_writemem)
   MDRV_CPU_PORTS(NULL, rfranco_writeport)
   MDRV_CPU_VBLANK_INT(rfranco_vblank, 1)
