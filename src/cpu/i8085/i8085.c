@@ -211,6 +211,7 @@ typedef struct {
 	INT8	filler; /* align on dword boundary */
 	int 	(*irq_callback)(int);
 	void	(*sod_callback)(int state);
+	int 	(*sid_callback)(void);
 }	i8085_Regs;
 
 int i8085_ICount = 0;
@@ -219,6 +220,41 @@ static i8085_Regs I;
 static UINT8 ZS[256];
 static UINT8 ZSP[256];
 static UINT8 RIM_IEN = 0; //AT: IEN status latch used by the RIM instruction
+
+/* Build the value RIM returns. The 8085 RIM byte is:
+ *   bit 0-2  RST5.5/6.5/7.5 interrupt masks
+ *   bit 3    IE (interrupt enable)
+ *   bit 4-6  RST5.5/6.5/7.5 pending flags
+ *   bit 7    SID (serial input data pin)
+ * I.IM only holds the masks and IE in the right places; the pending flags live
+ * in I.IREQ and SID has to be sampled from the driver at the moment RIM runs.
+ * The old code returned I.IM raw, which put IM_TRAP where the RST5.5 pending
+ * flag belongs and IM_SOD where RST7.5 pending belongs, and never reported SID
+ * unless a driver had pushed it in with i8085_set_SID().
+ */
+#define RIM_I55 0x10
+#define RIM_I65 0x20
+#define RIM_I75 0x40
+
+static UINT8 i8085_get_RIM(void)
+{
+	UINT8 result = I.IM & (IM_M55 | IM_M65 | IM_M75 | IM_IE);
+
+	if( I.IREQ & IM_M55 ) result |= RIM_I55;
+	if( I.IREQ & IM_M65 ) result |= RIM_I65;
+	if( I.IREQ & IM_M75 ) result |= RIM_I75;
+
+	/* Prefer a live read through the pull callback; fall back to whatever a
+	   driver last pushed in via i8085_set_SID(). */
+	if( I.sid_callback )
+	{
+		if( (*I.sid_callback)() ) result |= IM_SID;
+	}
+	else if( I.IM & IM_SID )
+		result |= IM_SID;
+
+	return result;
+}
 static UINT8 ROP(void)
 {
 	return cpu_readop(I.PC.w.l++);
@@ -378,9 +414,9 @@ INLINE void execute_one(int opcode)
 			break;
 
 		case 0x20:
-			if( I.cputype ) { //!! misses fixes from newer MAME
+			if( I.cputype ) {
 						/* RIM	*/
-				I.AF.b.h = I.IM;
+				I.AF.b.h = i8085_get_RIM();
 				I.AF.b.h |= RIM_IEN; RIM_IEN = 0; //AT: read and clear IEN status latch
 /*				survival_prot ^= 0x01; */
 			} else {
@@ -456,7 +492,7 @@ INLINE void execute_one(int opcode)
 			if( I.cputype ) { I.AF.b.l |= VF; }
 			break;
 
-		case 0x30: //!! misses new port from MAME
+		case 0x30:
 			if( I.cputype ) {
 						/* SIM	*/
 				if (I.AF.b.h & 0x40) //SOE - only when bit 0x40 is set!
@@ -472,6 +508,22 @@ INLINE void execute_one(int opcode)
 				// overwrite RST5.5-7.5 interrupt masks only when bit 0x08 of the accumulator is set
 				if (I.AF.b.h & 0x08)
 					I.IM = (I.IM & ~(IM_M55+IM_M65+IM_M75)) | (I.AF.b.h & (IM_M55+IM_M65+IM_M75));
+
+				/* bit 4 (R7.5) resets the RST7.5 flip-flop. RST7.5 is edge
+				   triggered and latches in I.IREQ, so unlike RST5.5/6.5 it is
+				   never cleared by the line going low - only by SIM or by the
+				   interrupt being taken. Without this the latch sticks and the
+				   handler re-enters forever. */
+				if (I.AF.b.h & 0x10)
+				{
+					I.IREQ &= ~IM_M75;
+					/* also drop it if it was scheduled but not yet taken */
+					if (I.ISRV == IM_M75)
+					{
+						I.ISRV = 0;
+						I.IRQ2 = 0;
+					}
+				}
 			} else {
 						/* NOP undocumented */
 			}
@@ -1403,12 +1455,20 @@ void i8085_init(void)
 void i8085_reset(void *param)
 {
 	int cputype_bak = I.cputype; //AT: backup cputype(0=8080, 1=8085)
+	/* Callbacks are wiring set up once by the driver, not CPU state - they
+	   must survive a reset. The memset below would otherwise drop them. */
+	int  (*irq_cb_bak)(int)     = I.irq_callback;
+	void (*sod_cb_bak)(int)     = I.sod_callback;
+	int  (*sid_cb_bak)(void)    = I.sid_callback;
 
 	init_tables();
 	memset(&I, 0, sizeof(i8085_Regs)); //AT: this also resets I.cputype so 8085 features were never ever used!
 	change_pc16(I.PC.d);
 
 	I.cputype = cputype_bak; //AT: restore cputype
+	I.irq_callback = irq_cb_bak;
+	I.sod_callback = sod_cb_bak;
+	I.sid_callback = sid_cb_bak;
 }
 
 /****************************************************************************
@@ -1531,6 +1591,17 @@ void i8085_set_SID(int state)
 /****************************************************************************/
 /* Set a callback to be called at SOD output change 						*/
 /****************************************************************************/
+/****************************************************************************/
+/* Set a callback used to sample the SID input when RIM executes			*/
+/* Preferred over i8085_set_SID(): the 8085 latches SID at the moment RIM	*/
+/* runs, so hardware that shifts serial data in (e.g. a switch matrix on a	*/
+/* 74165 chain) has to be read at that instant rather than pushed in advance.*/
+/****************************************************************************/
+void i8085_set_SID_callback(int (*callback)(void))
+{
+	I.sid_callback = callback;
+}
+
 void i8085_set_SOD_callback(void (*callback)(int state))
 {
 	I.sod_callback = callback;
