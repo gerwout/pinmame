@@ -33,8 +33,13 @@
      11-18  connector JG, read as a byte at 0x4000. In bus order (AD0 first)
             10 puntos, bumper dcho, diana izq, rampa especial izq, diana dcha,
             rampa especial dcha, 100 puntos, bumper izq.
+            11 and 17 are each two contacts wired in parallel: 11 is the
+            manual's 24+25, the two slingshot contacts, and 17 is 10+21, the
+            two 100 puntos lanes. The ROM's contact test flags both pairs.
      21-28  cabinet inputs, returned by the sound CPU from AY IC2 port A.
-            21 is borrowed for falta (see SWITCH_UPDATE); 22-24 are unused,
+            The ROM only ever looks at bits 4-7, so the four spare bits are
+            borrowed: 21 is falta (see SWITCH_UPDATE) and 23/24 lift the two
+            operator door switches (see rfranco_scpu_movx_r). 22 is unused.
             25 monedero 25, 26 monedero 100, 27 caida de bolas, 28 pulsador
             partidas.
      31-38  first 74165 byte: pasillo inferior dcho, pasillo inferior izq,
@@ -52,22 +57,49 @@
 
    Solenoid numbering is the IC7 4028 output + 1; see the coil decode in
    rfranco_scpu_movx_w. 17-20 are synthesised - the two bumpers and the two
-   ball ejectors have no CPU connection at all.
+   slingshots have no CPU connection at all.
 
-   Status: playable. A coin gives a credit, the start button starts a game and
-   serves a ball, playfield contacts score, the score and credit displays read
+   One caveat on solenoid 2. The ROM gates 4028 output 1 when it awards a
+   replay, and nothing anywhere gates output 0. That much is measured: award a
+   special and the coil decode reports output 1. What is on that output is
+   another matter. The driver schematic (manual page 17), read by the 4028
+   output pin numbers printed on it (pin 3 = Q0 ... pin 5 = Q9), assigns Q0 to
+   JL6 TACA and Q1 to JL10 N.C., and the JL connector table on page 16 gives
+   pin 10 no wire at all. Taken at face value that would mean the machine's
+   knocker is on an output the program never drives, and the output it does
+   drive goes nowhere.
+   The driver takes TACA to be output 1 anyway: a replay that never bangs is
+   not a credible machine, both firmware revisions gate output 1, and the same
+   manual's own errata already transposes two adjacent rows of exactly this
+   kind of table twice (JA reversed, IC5 pins 10/11 swapped). It is an
+   inference, not a measurement, and only a real board can settle it.
+
+   Status: playable, on both sets. A coin gives a credit, the start button
+   starts a game and serves a ball, playfield contacts score, the drop target
+   banks light their specials, collecting one awards a replay and bangs the
+   knocker, each ball ends into the next with its bonus paid, the last ball ends
+   the game and the final score is held; the score and credit displays read
    correctly, lamps and coils follow the ROM's own tables, the two mains phases
    are multiplexed, and all four operator modes on the door switches work.
+   tools/rfranco_game.py plays that sequence and asserts on it for both sets.
 
    Sets:
      supstarf  "Super Star" set 1 (m31-a-01187.ic19). 9 operator adjustment
                zones; this is the revision the factory manual documents.
      supstarfa "Super Star" set 2 (27c128.ic19). The NEWER firmware despite the
-               set ordering inherited from MAME: it carries 25 adjustment zones,
-               set 1's nine unchanged and sixteen more, and reserves an extra
-               0x30 bytes of NVRAM (its stack base drops from C7FF to C7CF).
+               set ordering inherited from MAME: it carries 19 adjustment zones,
+               set 1's nine unchanged plus ten more numbered 10-19, and reserves
+               an extra 0x30 bytes of NVRAM (its stack base drops from C7FF to
+               C7CF). Its jump table at 0x349D has 25 entries, but the zone
+               counter at C01D is BCD - 0x33DD steps it and forces 0x0A to 0x10 -
+               so entries 9..14 can never be selected and are filled with the
+               address of the zone 9 handler. The ten new zones are listed in
+               docs/vpx-table-reference.md; two change how the game plays out of
+               the box, the 100 puntos lane paying 1000 rather than set 1's 100
+               (zone 15) and a diana paying 30000 (zone 14, which set 1 has
+               fixed at the same value).
 
-               Both sets play identically here, but set 2 has one behaviour set 1
+               Both sets play the same game, but set 2 has one behaviour set 1
                does not, and it is worth knowing about because it looks like a
                display fault when it fires. See the note on the contact watchdog
                below.
@@ -879,7 +911,7 @@ MEMORY_END
 static PORT_READ_START(rfranco_scpu_readport)
   {0x00, 0xff, rfranco_scpu_movx_r},
   {I8039_t1, I8039_t1, rfranco_scpu_t1_r},
-MEMORY_END
+PORT_END
 
 static PORT_WRITE_START(rfranco_scpu_writeport)
   {0x00, 0xff, rfranco_scpu_movx_w},
