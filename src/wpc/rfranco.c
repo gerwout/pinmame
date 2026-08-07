@@ -104,7 +104,11 @@ static int rfranco_sid_r(void) {
     locals.swShift = (coreGlobals.swMatrix[1] << 8) | coreGlobals.swMatrix[2];
     locals.swShiftPos = 16;
   }
-  bit = (locals.swShift & 0x8000) ? 1 : 0;
+  /* The playfield contacts are active low and the ROM inverts with CMA right
+     after RIM (0x18A9), so a switch PinMAME reports as closed must appear here
+     as a 0. Returning the matrix bit unchanged makes every switch read back as
+     permanently closed, which sends the game straight into its error path. */
+  bit = (locals.swShift & 0x8000) ? 0 : 1;
   return bit;
 }
 
