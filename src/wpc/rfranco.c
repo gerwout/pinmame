@@ -127,13 +127,34 @@ static WRITE_HANDLER(rfranco_clk_w) {
     locals.swShift <<= 1;
     locals.swShiftPos--;
   }
-  /* advance the display chain, sampling whatever SOD currently holds */
+  /* Advance the display chain.
+
+     NOTE(phase 3): the framing here is still wrong and the captured words come
+     out as zero. Two known problems:
+
+     1. Ordering. The game clocks first and drives the data bit afterwards
+            241C: OUT (0xFF)   ; clock
+            2424: SIM          ; then set SOD
+        so sampling SOD at the clock edge picks up the *previous* bit. The
+        74164 latches on the rising edge, so the bit that matters is the one
+        SOD holds at the next OUT.
+
+     2. This handler cannot tell the two serial chains apart. OUT is the shared
+        strobe: 0x18B3 clocks the switch shift registers, 0x241C clocks the
+        display, and both land here, so the 16 switch pulses per pass corrupt
+        the 9 bit display framing. The port number is not a reliable
+        discriminator either (the whole I/O space is one decode), so this needs
+        to key off which routine is active - most likely by tracking SOE from
+        the SIM callback, which is only asserted during display writes. */
   locals.dispShift = (locals.dispShift << 1) | locals.sodState;
   locals.dispShiftPos++;
   if (locals.dispShiftPos >= 9) {
     /* TODO(phase 3): a complete 9 bit word has arrived at the 74164/8279.
        Decode it into coreGlobals.segments once the display protocol is
        established. */
+#ifdef RFRANCO_TRACE_DISPLAY
+    fprintf(stderr, "DISPWORD %03X\n", locals.dispShift & 0x1ff);
+#endif
     locals.dispShiftPos = 0;
   }
 }
