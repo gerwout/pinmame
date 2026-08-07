@@ -40,7 +40,7 @@ static core_tLCDLayout rfrancoDisp[] = {
 /*-------------------------------------------------------------------
 / Super Star (1986)
 /-------------------------------------------------------------------*/
-INITGAME(supstarf, rfrancoDisp, 5, 4)
+INITGAME(supstarf, rfrancoDisp, 5, 0)
 RFRANCO_ROMSTART(supstarf,
   "m31-a-01187.ic19", CRC(ab8b1148) SHA1(496d3c9664386ae64e94462db2fdd36811a68a87),
   "2532.ic4",         CRC(d6d7eee2) SHA1(60e497c8845320eea01662d894d0b16349ebb7e4))
@@ -53,7 +53,7 @@ CORE_GAMEDEFNV(supstarf, "Super Star", 1986, "Recreativos Franco (Spain)", gl_mR
    ROM had data line D5 stuck high, and clearing that bit reproduces the good
    dump exactly across all 4096 bytes, so the physical part held this content.
    MAME still carries its own copy flagged BAD_DUMP. */
-INITGAME(supstarfa, rfrancoDisp, 5, 4)
+INITGAME(supstarfa, rfrancoDisp, 5, 0)
 RFRANCO_ROMSTART(supstarfa,
   "27c128.ic19", CRC(9a440461) SHA1(e2f8dcf95084f755d3a34d77ba2649602687a610),
   "2532.ic4",    CRC(d6d7eee2) SHA1(60e497c8845320eea01662d894d0b16349ebb7e4))

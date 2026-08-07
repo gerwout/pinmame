@@ -391,21 +391,15 @@ static WRITE_HANDLER(rfranco_scpu_p2_w) {
 }
 
 /*-- AY-3-8910 --*/
-/* PSG1 port A/B read the operator switch bank I1 and connector JO; PSG2's
-   ports drive lamp columns through the driver board's 4028 decoders. */
-static WRITE_HANDLER(rfranco_ay0_porta_w) { coreGlobals.tmpLampMatrix[0] = data; }
-static WRITE_HANDLER(rfranco_ay0_portb_w) { coreGlobals.tmpLampMatrix[1] = data; }
-static READ_HANDLER(rfranco_ay1_porta_r)  { return core_getDip(0); }
-static READ_HANDLER(rfranco_ay1_portb_r)  { return core_getDip(1); }
-
+/* PSG1 (chip 0, CPU board IC3) is the output device and PSG2 (chip 1, IC2) the
+   input device - see rfranco_scpu_movx_r/w, which intercept registers 0x0E/0x0F
+   for both. Nothing is wired here: the I/O ports never reach AY8910Write. */
 struct AY8910interface RFRANCO_ay8910Int = {
-  2,                        /* 2 chips */
+  2,                        /* 2 chips: 0 = PSG1/IC3 (outputs), 1 = PSG2/IC2 */
   RFRANCO_CPUFREQ / 6,      /* clocked from 8035 T0 = XTAL/6 */
   { 30, 30 },               /* volume */
-  { 0, rfranco_ay1_porta_r },
-  { 0, rfranco_ay1_portb_r },
-  { rfranco_ay0_porta_w, 0 },
-  { rfranco_ay0_portb_w, 0 },
+  { 0, 0 }, { 0, 0 },       /* I/O ports are handled in rfranco_scpu_movx_r/w */
+  { 0, 0 }, { 0, 0 },
 };
 
 /*-----------
@@ -446,6 +440,13 @@ static INTERRUPT_GEN(rfranco_vblank) {
   /*-- display --*/
   if ((locals.vblankCount % RFRANCO_DISPLAYSMOOTH) == 0)
     memcpy(coreGlobals.segments, locals.segments, sizeof(locals.segments));
+
+  /* core_updateSw is the only caller of the SWITCH_UPDATE handler, so without
+     this the cabinet inputs never reach swMatrix at all. Pass TRUE because the
+     flippers are not CPU driven here - the ROM never energises the flipper
+     supply relay on JL3, the buttons feed the coils directly through the
+     interconnect board - so the flipper solenoids have to be synthesised. */
+  core_updateSw(TRUE);
 }
 
 /* Switch numbering. The driver keeps its four hardware bytes in swMatrix rows
