@@ -171,7 +171,9 @@ static struct {
   UINT8  scpuP2;        /* 8035 port 2 latch - selects latch / PSG1 / PSG2 */
   int    coinPulse;     /* TRAP ticks left on a coin one-shot */
   UINT8  coinBits;      /* which coin slot is pulsing */
+  UINT8  coinDriven;    /* coin bits this driver last wrote into the matrix */
   UINT8  lastCoin;      /* previous key level, for edge detect */
+  UINT8  lastStart;     /* previous start key level, for edge detect */
   int    troughEdge;    /* a physical event wants the trough contact driven */
   int    lastTilt;      /* previous falta level, for edge detect */
   int    phaseT1;       /* mains half-cycle presented on the 8035's T1 pin */
@@ -738,10 +740,19 @@ static SWITCH_UPDATE(RFRANCO) {
      m_fHandleKeyboard and libpinmame clears g_fHandleKeyboard, so under either
      of them core_updateSw passes no input ports at all - and the two things
      that keep this ROM out of its fault loops, the ball trough and the coin
-     one-shot, both live here. */
+     one-shot, both live here.
+
+     Nothing below writes a bit unless that bit has just changed. Rewriting the
+     whole cabinet row every frame - which this used to do - means anything
+     else that sets one of those switches is stamped back out at the next
+     vblank, before the ROM has had a chance to look: it polls the row through
+     the sound CPU, so a switch that survives less than one frame is a coin
+     toss. That made the start button unusable from outside the keyboard, and
+     it is what made "insert coin, press start" work about half the time. */
   if (inports) {
     UINT16 inp = inports[RFRANCO_COMINPORT];
     UINT8  coins = (UINT8)(inp & 0x30);
+    UINT8  start = (UINT8)((inp & 0x0080) ? 0x80 : 0);
 
     /* The coin contacts have to be a pulse, not a level. 0x0545 latches the
        coin, then waits for the contact to OPEN within 20 TRAP ticks; if it is
@@ -758,17 +769,22 @@ static SWITCH_UPDATE(RFRANCO) {
       if (!locals.ballInTrough) locals.troughEdge = 1;
       locals.ballInTrough = 1;
     }
-    if (inp & 0x0080) v |= 0x80;                 /* pulsador partidas */
-    if (locals.coinPulse) v |= locals.coinBits;
-    mask |= 0xb0;                                /* coins and start button */
+    if (start != locals.lastStart) {              /* pulsador partidas */
+      v |= start; mask |= 0x80;
+      locals.lastStart = start;
+    }
     if (inp & 0x0100) tilt = 1;
   }
-  else if (locals.coinPulse) {
-    /* A front end without keyboard input pulses the coin contact itself; keep
-       running down any one-shot that is already armed so the two paths cannot
-       leave a coin latched. */
-    v |= locals.coinBits;
-    mask |= 0x30;
+
+  /* The coin one-shot, from either path: the keyboard arms it above, and a
+     front end that drives the contact itself never does - but if one is armed
+     it has to be run down here, or the two paths could leave a coin latched. */
+  {
+    UINT8 coinNow = (UINT8)(locals.coinPulse ? locals.coinBits : 0);
+    if (coinNow != locals.coinDriven) {
+      v = (UINT8)((v & ~0x30) | coinNow); mask |= 0x30;
+      locals.coinDriven = coinNow;
+    }
   }
 
   /* Caida de bolas is closed whenever a ball is sitting in the outhole. That is
