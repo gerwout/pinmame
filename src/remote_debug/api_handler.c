@@ -539,22 +539,24 @@ static void handle_api_debugger_trace(const http_request_t *req, http_response_t
 
 static void handle_api_debugger_breakpoints(const http_request_t *req, http_response_t *resp)
 {
-	char cmd_buf[32], addr_buf[32], bank_buf[32], cond_buf[32], ignore_buf[32];
+	char cmd_buf[32], addr_buf[32], bank_buf[32], cond_buf[32], ignore_buf[32], cpu_buf[32];
 	get_query_param(req->query, "cmd", cmd_buf, (int)sizeof(cmd_buf));
 	if (strcmp(cmd_buf, "add") == 0) {
-		int bank;
+		int bank, cpu;
 		UINT32 ignore;
 		get_query_param(req->query, "addr", addr_buf, (int)sizeof(addr_buf));
 		get_query_param(req->query, "bank", bank_buf, (int)sizeof(bank_buf));
 		get_query_param(req->query, "cond", cond_buf, (int)sizeof(cond_buf));
 		get_query_param(req->query, "ignore", ignore_buf, (int)sizeof(ignore_buf));
+		get_query_param(req->query, "cpu", cpu_buf, (int)sizeof(cpu_buf));
 		if (!addr_buf[0]) {
 			respond_error(resp, 400, "missing parameter: addr");
 			return;
 		}
 		bank = bank_buf[0] ? (int)parse_hex(bank_buf) : -1;
+		cpu = cpu_buf[0] ? parse_int(cpu_buf) : -1;
 		ignore = ignore_buf[0] ? (UINT32)parse_int(ignore_buf) : 0;
-		if (remote_debug_breakpoint_add_ex(parse_hex(addr_buf), bank, cond_buf, ignore) != 0) {
+		if (remote_debug_breakpoint_add_ex(parse_hex(addr_buf), bank, cpu, cond_buf, ignore) != 0) {
 			respond_error(resp, 400, "bad condition or breakpoint table full");
 			return;
 		}
@@ -1120,20 +1122,22 @@ static void handle_api_monitor_log(const http_request_t *req, http_response_t *r
 
 static void handle_api_debugger_instrument(const http_request_t *req, http_response_t *resp)
 {
-	char cmd_buf[32], addr_buf[32], bank_buf[32];
+	char cmd_buf[32], addr_buf[32], bank_buf[32], cpu_buf[32];
 	char *body = NULL;
 	int len = 0;
 	get_query_param(req->query, "cmd", cmd_buf, (int)sizeof(cmd_buf));
 	if (strcmp(cmd_buf, "add") == 0) {
-		int bank;
+		int bank, cpu;
 		get_query_param(req->query, "addr", addr_buf, (int)sizeof(addr_buf));
 		get_query_param(req->query, "bank", bank_buf, (int)sizeof(bank_buf));
+		get_query_param(req->query, "cpu", cpu_buf, (int)sizeof(cpu_buf));
 		if (!addr_buf[0]) {
 			respond_error(resp, 400, "missing parameter: addr");
 			return;
 		}
 		bank = bank_buf[0] ? (int)parse_hex(bank_buf) : -1;
-		if (remote_debug_instrument_add(parse_hex(addr_buf), bank) != 0) {
+		cpu = cpu_buf[0] ? parse_int(cpu_buf) : -1;
+		if (remote_debug_instrument_add(parse_hex(addr_buf), bank, cpu) != 0) {
 			respond_error(resp, 400, "instrumentation table full");
 			return;
 		}
@@ -1323,20 +1327,22 @@ static void handle_api_debugger_coverage(const http_request_t *req, http_respons
 
 static void handle_api_debugger_tracepoints(const http_request_t *req, http_response_t *resp)
 {
-	char cmd_buf[32], addr_buf[32], bank_buf[32];
+	char cmd_buf[32], addr_buf[32], bank_buf[32], cpu_buf[32];
 	char *body = NULL;
 	int len = 0;
 	get_query_param(req->query, "cmd", cmd_buf, (int)sizeof(cmd_buf));
 	if (strcmp(cmd_buf, "add") == 0) {
-		int bank;
+		int bank, cpu;
 		get_query_param(req->query, "addr", addr_buf, (int)sizeof(addr_buf));
 		get_query_param(req->query, "bank", bank_buf, (int)sizeof(bank_buf));
+		get_query_param(req->query, "cpu", cpu_buf, (int)sizeof(cpu_buf));
 		if (!addr_buf[0]) {
 			respond_error(resp, 400, "missing parameter: addr");
 			return;
 		}
 		bank = bank_buf[0] ? (int)parse_hex(bank_buf) : -1;
-		if (remote_debug_tracepoint_add(parse_hex(addr_buf), bank) != 0) {
+		cpu = cpu_buf[0] ? parse_int(cpu_buf) : -1;
+		if (remote_debug_tracepoint_add(parse_hex(addr_buf), bank, cpu) != 0) {
 			respond_error(resp, 400, "tracepoint table full");
 			return;
 		}
@@ -1417,7 +1423,7 @@ static const api_route_t api_routes[] = {
 	{"/api/debugger/command", handle_api_debugger_command,
 	 "?cmd=... - classic command (BP/BC/WP/WC/G/S/F/QUIT/HELP)"},
 	{"/api/debugger/breakpoints", handle_api_debugger_breakpoints,
-	 "?cmd=add&addr=HEX[&bank=HEX][&cond=REG==HEX][&ignore=N] | ?cmd=clear"},
+	 "?cmd=add&addr=HEX[&bank=HEX][&cpu=N][&cond=REG==HEX][&ignore=N] | ?cmd=clear"},
 	{"/api/debugger/watchpoints", handle_api_debugger_watchpoints,
 	 "?cmd=add&addr=HEX[&len=N][&mode=1|2|3][&bank=HEX][&cond=eq|ne|lt|gt|le|ge&val=HEX] | ?cmd=clear"},
 	{"/api/debugger/points", handle_api_debugger_points,
@@ -1436,13 +1442,13 @@ static const api_route_t api_routes[] = {
 	{"/api/debugger/nvram/dump", handle_api_debugger_nvram_dump,
 	 "raw 8KB WPC CMOS RAM dump"},
 	{"/api/debugger/instrument", handle_api_debugger_instrument,
-	 "PC hit counting; ?cmd=add&addr=HEX[&bank=HEX] | ?cmd=clear | list"},
+	 "PC hit counting; ?cmd=add&addr=HEX[&bank=HEX][&cpu=N] | ?cmd=clear | list"},
 	{"/api/debugger/exectrace", handle_api_debugger_exectrace,
 	 "instruction trace ring; ?cmd=start|stop|clear | list (last N executed)"},
 	{"/api/debugger/coverage", handle_api_debugger_coverage,
 	 "code coverage; ?cmd=start|stop|clear | summary | ?addr=HEX[&size=N][&bank=HEX] region"},
 	{"/api/debugger/tracepoints", handle_api_debugger_tracepoints,
-	 "log-and-continue points; ?cmd=add&addr=HEX[&bank=HEX] | ?cmd=clear | list+log"},
+	 "log-and-continue points; ?cmd=add&addr=HEX[&bank=HEX][&cpu=N] | ?cmd=clear | list+log"},
 	{"/api/debugger/scan", handle_api_debugger_scan,
 	 "value scan; ?cmd=new&addr=HEX[&size=N][&cpu=N] | ?cmd=filter&op=eq|ne|changed|unchanged|inc|dec[&val=HEX]"},
 	{"/api/switches", handle_api_switches,
