@@ -79,6 +79,8 @@ static struct {
   UINT16 dispShift;
   int    dispShiftPos;
   int    sodState;
+  int    cbInstalled;
+  int    simSinceClock;    /* SOE asserted since the previous shift clock */
 
   /* 8212 command/ack latches between the two CPUs at 0x8000. */
   UINT8  soundCmd;      /* main -> sound, latched in IC6 */
@@ -111,6 +113,10 @@ static int rfranco_sid_r(void) {
 /--------------------------------------*/
 static void rfranco_sod_w(int state) {
   locals.sodState = state ? 1 : 0;
+  /* SOE is only ever asserted by the display routine (SIM at 0x2424 and
+     0x242A); the switch scan never touches it. That is what tells the two
+     serial chains apart, since the shared OUT strobe cannot. */
+  locals.simSinceClock = 1;
 }
 
 /*-------------------------------------------------
@@ -122,6 +128,13 @@ static void rfranco_sod_w(int state) {
    irrelevant, the whole I/O space is one decode). Each pulse advances both the
    switch shift register and the display shift register. */
 static WRITE_HANDLER(rfranco_clk_w) {
+  /* MACHINE_INIT runs before the CPU cores are initialised, so callbacks
+     installed there are lost. Install them on first use instead. */
+  if (!locals.cbInstalled) {
+    locals.cbInstalled = 1;
+    i8085_set_SID_callback(rfranco_sid_r);
+    i8085_set_SOD_callback(rfranco_sod_w);
+  }
   /* advance the switch chain */
   if (locals.swShiftPos > 0) {
     locals.swShift <<= 1;
@@ -129,31 +142,22 @@ static WRITE_HANDLER(rfranco_clk_w) {
   }
   /* Advance the display chain.
 
-     NOTE(phase 3): the framing here is still wrong and the captured words come
-     out as zero. Two known problems:
-
-     1. Ordering. The game clocks first and drives the data bit afterwards
-            241C: OUT (0xFF)   ; clock
-            2424: SIM          ; then set SOD
-        so sampling SOD at the clock edge picks up the *previous* bit. The
-        74164 latches on the rising edge, so the bit that matters is the one
-        SOD holds at the next OUT.
-
-     2. This handler cannot tell the two serial chains apart. OUT is the shared
-        strobe: 0x18B3 clocks the switch shift registers, 0x241C clocks the
-        display, and both land here, so the 16 switch pulses per pass corrupt
-        the 9 bit display framing. The port number is not a reliable
-        discriminator either (the whole I/O space is one decode), so this needs
-        to key off which routine is active - most likely by tracking SOE from
-        the SIM callback, which is only asserted during display writes. */
+     Per frame the game runs OUT / RAL / SIM nine times (0x241C-0x2426). The
+     first OUT has no SIM before it, so it clocks in the stale trailing level
+     left by the previous frame; the remaining eight are each preceded by a SIM
+     carrying E's bits b7..b0. Eight bits is exactly what the 74164 holds, so
+     gating on "a SIM happened since the last clock" both drops that stale
+     leading bit and excludes the switch scan's sixteen clocks, which issue no
+     SIMs at all. */
+  if (!locals.simSinceClock) return;
+  locals.simSinceClock = 0;
   locals.dispShift = (locals.dispShift << 1) | locals.sodState;
   locals.dispShiftPos++;
-  if (locals.dispShiftPos >= 9) {
-    /* TODO(phase 3): a complete 9 bit word has arrived at the 74164/8279.
-       Decode it into coreGlobals.segments once the display protocol is
-       established. */
+  if (locals.dispShiftPos >= 8) {
+    /* TODO(phase 3): a complete byte has reached the 74164/8279. Decode it
+       into coreGlobals.segments once the 8279 command/data split is known. */
 #ifdef RFRANCO_TRACE_DISPLAY
-    fprintf(stderr, "DISPWORD %03X\n", locals.dispShift & 0x1ff);
+    fprintf(stderr, "DISPWORD %02X\n", locals.dispShift & 0xff);
 #endif
     locals.dispShiftPos = 0;
   }
