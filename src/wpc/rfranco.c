@@ -66,6 +66,38 @@
                set ordering inherited from MAME: it carries 25 adjustment zones,
                set 1's nine unchanged and sixteen more, and reserves an extra
                0x30 bytes of NVRAM (its stack base drops from C7FF to C7CF).
+
+               Both sets play identically here, but set 2 has one behaviour set 1
+               does not, and it is worth knowing about because it looks like a
+               display fault when it fires. See the note on the contact watchdog
+               below.
+
+   Set 2's stuck contact watchdog (there is no equivalent in set 1):
+
+     The routine at 0x3ABF, called from the game loop at 0x0713, watches four
+     momentary contacts - 11 (10 puntos), 12 (bumper dcho), 18 (bumper izq) and
+     47 (picabolas) - and keeps a two byte counter for each in the NVRAM block at
+     C7E0..C7E7, which is inside the C7CF..C7FF area that set 1 uses as stack.
+     Each pass, a contact that reads OPEN resets its counter to 0x60 and a
+     contact that reads CLOSED increments it (0x3B27). When a counter runs past
+     0x7F the strike byte goes to 1 and the routine jumps to the falta handler at
+     0x028E. Set 2 gates its reset path on the same four contacts as well, at
+     0x0340 and 0x034A.
+
+     So a contact held closed for about 128 consecutive passes - measured here as
+     ~27 s from a cold zero filled NVRAM, ~7 s once the counters carry their 0x60
+     idle value - faults the machine. That is correct behaviour: a welded contact
+     on a bumper or a rollover would otherwise score for ever.
+
+     What it looks like is a display bug. The falta handler latches C01C = 0xFF,
+     then 0x031F calls 0x2A1A, which fills all sixteen 8279 display RAM bytes
+     with 0xEE, and then 0x0330 waits for a ball to return to the trough. Every
+     digit therefore shows the 7447's pattern for 14 and stays there. If set 2
+     ever appears to stop updating the score, read C01C before suspecting the
+     8279 model: 0xFF means the ROM faulted, and the first thing to check is
+     whether the front end is holding one of those four contacts closed. Set 1
+     tolerates the same stuck contact indefinitely, which is why this only ever
+     shows up on set 2.
  ************************************************************************************************/
 
 #include "driver.h"
