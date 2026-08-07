@@ -13,7 +13,6 @@
 #define RFRANCO_MEMREG_SCPU REGION_CPU2
 
 #define RFRANCO_DISPLAYSMOOTH 2 /* Smooth the display over this number of VBLANKS */
-#define RFRANCO_SOLSMOOTH     4 /* Smooth the solenoids over this number of VBLANKS */
 
 /*-- Standard input ports --
    The playfield switches arrive as two bytes shifted in serially on SID (see
@@ -27,7 +26,7 @@
        is the only route a coin can reach the game. */ \
     COREPORT_BITDEF(  0x0010, IPT_COIN1,   IP_KEY_DEFAULT) \
     COREPORT_BITDEF(  0x0020, IPT_COIN2,   KEYCODE_3) \
-    COREPORT_BIT(     0x0040, "Caida de bola",  KEYCODE_HOME) \
+    COREPORT_BIT(     0x0040, "Drain (caida de bolas)", KEYCODE_HOME) \
     COREPORT_BITDEF(  0x0080, IPT_START1,  IP_KEY_DEFAULT) \
     COREPORT_BIT(     0x0100, "Falta (Tilt)",   KEYCODE_INSERT) \
   PORT_START /* 1 */ \
@@ -59,6 +58,10 @@
       ROM_LOAD(n2, 0x0000, 0x1000, chk2)
 
 #define RFRANCO_ROMEND ROM_END
+
+/* The 2532 at IC4 has its data pins wired to the 8035's AD0-AD7 in reverse
+   order. Undo that once per game start, from each set's DRIVER_INIT. */
+extern void rfranco_unscramble_sound_rom(void);
 
 extern MACHINE_DRIVER_EXTERN(RFRANCO);
 

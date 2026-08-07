@@ -20,15 +20,35 @@
               generates the shared shift clock.
 
    Interrupts:
-     TRAP    - mains phase detection (zero cross). Non-maskable. NOTE: this is
-               load bearing at boot - see the comment on the reset path below.
+     TRAP    - mains phase detection (zero cross), 100 Hz. Non-maskable. NOTE:
+               this is load bearing at boot - see the comment on the reset path
+               below.
      RST5.5  - 8212 latch, raised when the sound CPU has taken a command
-     RST6.5  - periodic housekeeping
-     RST7.5  - display/lamp refresh tick
+     RST6.5  - falta (tilt), JD1
+     RST7.5  - power fail / emergency stop. Not driven; its handler clears the
+               display and halts.
 
-   Status: work in progress. Boot, memory map, serial switch input and the
-   sound handshake are implemented. Display decoding, lamps and solenoids are
-   not yet mapped - see the TODOs below.
+   Switch numbering is col*10 + row + 1, and so is lamp numbering:
+
+     11-18  connector JG, read as a byte at 0x4000. In bus order (AD0 first)
+            10 puntos, bumper dcho, diana izq, rampa especial izq, diana dcha,
+            rampa especial dcha, 100 puntos, bumper izq.
+     21-28  cabinet inputs, returned by the sound CPU from AY IC2 port A.
+            21 is borrowed for falta (see SWITCH_UPDATE); 22-24 are unused,
+            25 monedero 25, 26 monedero 100, 27 caida de bolas, 28 pulsador
+            partidas.
+     31-38  first 74165 byte: pasillo inferior dcho, pasillo inferior izq,
+            diana izq 1, diana izq 3, diana izq 2, diana izq 4, diana izq 5,
+            diana dcha 5.
+     41-48  second 74165 byte: diana dcha 4, 3, 2, 1, pasillo superior dcho,
+            pasillo superior izq, picabolas, (unwired - IC5's floating SER).
+
+     The order is the ROM's own, taken from the zone 9 contact test table at
+     0x34A2 and cross checked against the manual's contact list. It agrees with
+     the manual's 74165 wiring at fifteen of the sixteen positions: the ROM has
+     JM7 = diana izquierda 3 and JM8 = diana izquierda 2 where the manual's IC6
+     table has them the other way round. The ROM wins, since it is what the
+     machine's own contact test reports.
 
    Sets:
      supstarf  "Super Star" set 1 (m31-a-01187.ic19). 9 operator adjustment
@@ -52,13 +72,34 @@
    sees both half cycles, so the interrupt arrives at 100 Hz. */
 #define RFRANCO_TRAPFREQ 100
 
-/* Housekeeping / refresh ticks. Both are driven from the same phase reference
-   on the real board via the driver-board dividers; rates still to be measured
-   against hardware. */
-#define RFRANCO_RST75FREQ 400
+/* RST 5.5 and RST 6.5 are real signals (the 8212 latch and the tilt contact on
+   JD1). RST 7.5 is deliberately NOT driven: its handler at 0x0244 clears the
+   display, sends sound command 0xCC and then spins forever at 0x026A, so it is
+   the power-fail / emergency stop input, not a refresh tick. The ROM opens a
+   one-instruction window for it on every TRAP pass (SIM #0B, EI, NOP, DI at
+   0x182F) and resets its latch with SIM #1D at 0x194C. */
 
-/* Trigger used to model the 8212's READY handshake - see rfranco_sound_w. */
+/* Triggers used to model the 8212's READY handshake - see rfranco_sound_w. One
+   is not enough: the deadlock guard behind each byte is a timer that cannot be
+   cancelled, so with a single trigger number a stale guard from an earlier byte
+   releases a later stall early and the transfer slips. Rotating through a block
+   of them keeps every guard bound to the byte that armed it. */
 #define RFRANCO_SOUND_TRIGGER 1701
+#define RFRANCO_SOUND_TRIGGERS 32
+/* Long enough that it never fires while the sound CPU is merely busy (one byte
+   takes about 65us of 8035 time) and short enough that a sound CPU which is
+   never going to answer does not wedge the machine. */
+#define RFRANCO_SOUND_GUARD_US 1000
+
+/* Pseudo solenoids. The two bumpers and the two ball ejectors have no CPU
+   connection at all: board 53/3311 ("CONTROL BUMPER Y EXPULSOR") fires each
+   coil straight from its own playfield switch through an RC one-shot. They are
+   synthesised here so the machine's most visible mechanics are observable. */
+#define RFRANCO_SOL_BUMPER_L 17
+#define RFRANCO_SOL_BUMPER_R 18
+#define RFRANCO_SOL_EJECT_L  19
+#define RFRANCO_SOL_EJECT_R  20
+#define RFRANCO_PSEUDO_FRAMES 6   /* vblanks a synthesised coil stays visible */
 
 /*----------------
 /  Local variables
@@ -86,16 +127,28 @@ static struct {
   UINT8  soundCmd;      /* main -> sound, latched in IC6 */
   UINT8  soundReply;    /* sound -> main, latched in IC5 */
   int    soundPending;
+  int    soundTrigger;  /* trigger the main CPU is currently stalled on */
+  int    soundSeq;      /* rotating index into the trigger block */
   UINT8  scpuP1;        /* 8035 port 1 latch */
   UINT8  scpuP2;        /* 8035 port 2 latch - selects latch / PSG1 / PSG2 */
   int    coinPulse;     /* TRAP ticks left on a coin one-shot */
   UINT8  coinBits;      /* which coin slot is pulsing */
   UINT8  lastCoin;      /* previous key level, for edge detect */
+  int    troughState;   /* trough contact as last presented to the ROM */
+  int    lastTilt;      /* previous falta level, for edge detect */
   int    phaseT1;       /* mains half-cycle presented on the 8035's T1 pin */
-  UINT8  lampAcc[7];    /* lamps gated during the current frame */
-  UINT32 solAcc;        /* coils gated during the current frame */
+  int    gatePhase;     /* phase the bytes arriving now were selected for */
+  UINT8  lampAcc[CORE_STDLAMPCOLS]; /* lamps gated during the current half cycle */
+  UINT8  lampPhase[2][CORE_STDLAMPCOLS]; /* last complete image of each phase */
+  UINT32 solAcc;        /* coils gated during the current half cycle */
+  UINT32 solPhase[2];
+  UINT32 solSticky;     /* coils gated since the last vblank */
+  int    ballInTrough;  /* caida de bolas contact - see RFRANCO SWITCH_UPDATE */
+  UINT8  lastJG;        /* previous JG contacts, for the pseudo coil one-shots */
+  int    pseudoSol[4];  /* vblanks left on each synthesised coil */
   UINT8  i8279ram[16];  /* display RAM behind the 8279 */
   int    i8279addr;
+  int    i8279autoinc;
   int    inhibitA, inhibitB;
 } locals;
 
@@ -202,11 +255,19 @@ static void rfranco_8279_w(UINT8 data, int a0) {
   if (a0) {                                   /* command */
     switch (data & 0xe0) {
       case 0x80:                              /* write display RAM at addr */
+        /* bit 4 is AI. The game uses both settings: 0x90 (address 0, AI set)
+           ahead of the 16 byte fills at 0x2A46 and 0x24A8, and 0x8n with AI
+           clear when it re-addresses before every single digit (0x25B9). */
         locals.i8279addr = data & 0x0f;
+        locals.i8279autoinc = (data & 0x10) ? 1 : 0;
         break;
       case 0xa0:                              /* display write inhibit */
-        locals.inhibitA = (data & 0x04) ? 1 : 0;
-        locals.inhibitB = (data & 0x08) ? 1 : 0;
+        /* 101x IWa IWb BLa BLb - bit 3 inhibits OUT A (the byte's high nibble)
+           and bit 2 inhibits OUT B (the low nibble). The game sends 0xA8 for
+           the odd players and 0xA4 for the even ones (0x2456), which is what
+           puts players 1/3 on OUT B and 2/4 on OUT A. */
+        locals.inhibitA = (data & 0x08) ? 1 : 0;
+        locals.inhibitB = (data & 0x04) ? 1 : 0;
         break;
       case 0xc0:                              /* clear */
         for (i = 0; i < 16; i++) {
@@ -222,12 +283,13 @@ static void rfranco_8279_w(UINT8 data, int a0) {
   /* data write - the inhibit bits mask off one nibble so the two players
      sharing a RAM address can be written independently */
   {
-    UINT8 cur = locals.i8279ram[locals.i8279addr];
-    UINT8 val = cur;
+    UINT8 val = locals.i8279ram[locals.i8279addr];
     if (!locals.inhibitA) val = (UINT8)((val & 0x0f) | (data & 0xf0));
     if (!locals.inhibitB) val = (UINT8)((val & 0xf0) | (data & 0x0f));
     locals.i8279ram[locals.i8279addr] = val;
     rfranco_8279_refresh(locals.i8279addr);
+    if (locals.i8279autoinc)
+      locals.i8279addr = (locals.i8279addr + 1) & 0x0f;
   }
 }
 
@@ -255,9 +317,20 @@ static WRITE_HANDLER(rfranco_sound_w) {
      PinMAME's 8085 core has no READY line, so stall the main CPU on a trigger
      instead and let the sound CPU release it when it reads the latch. The
      timed trigger is a safety net: if the sound CPU has masked its interrupt
-     and will never read, we must not deadlock. */
-  cpu_spinuntil_trigger(RFRANCO_SOUND_TRIGGER);
-  cpu_triggertime(TIME_IN_USEC(100), RFRANCO_SOUND_TRIGGER);
+     and will never read, we must not deadlock.
+
+     Each byte takes its own trigger number, because cpu_triggertime cannot be
+     cancelled. With one shared number the guards armed by earlier bytes fire
+     during later stalls and release them before the sound CPU has read - the
+     8085 then runs ahead and overwrites the latch. Measured with the transfer
+     traced on both sides, that lost the whole second half of every frame:
+     the 8085 sent ... F5 ... 2F ... 2F but the sound CPU forwarded the coil
+     half as ten copies of the trailing 0xFF, so no coil and no IC3 lamp ever
+     reached the driver board. */
+  locals.soundSeq = (locals.soundSeq + 1) % RFRANCO_SOUND_TRIGGERS;
+  locals.soundTrigger = RFRANCO_SOUND_TRIGGER + locals.soundSeq;
+  cpu_spinuntil_trigger(locals.soundTrigger);
+  cpu_triggertime(TIME_IN_USEC(RFRANCO_SOUND_GUARD_US), locals.soundTrigger);
 }
 
 static READ_HANDLER(rfranco_sound_r) {
@@ -297,7 +370,7 @@ static READ_HANDLER(rfranco_scpu_movx_r) {
     cpu_set_irq_line(RFRANCO_SCPU, 0, CLEAR_LINE);
     locals.soundPending = 0;
     /* releases the main CPU from its READY stall */
-    cpu_trigger(RFRANCO_SOUND_TRIGGER);
+    cpu_trigger(locals.soundTrigger);
     return locals.soundCmd;
   }
   /* PSG read path. P2.5 low selects PCS2 = IC2 (PSG2), which is the input
@@ -333,6 +406,60 @@ static READ_HANDLER(rfranco_scpu_movx_r) {
   return 0xff;
 }
 
+/*----------------------------------------------
+/  Lamp matrix: three 4028s times two mains phases
+/-----------------------------------------------*/
+/* The game keeps its lamp image in NVRAM as eight pairs of bytes at C219,
+   one pair per (decoder, code range), FASE A first and FASE B second:
+
+       C219/C21C  IC1 codes 0-7     C21F/C222  IC1 codes 8-9 (bits 7,6)
+       C225/C228  IC2 codes 0-7     C22B/C22E  IC2 codes 8-9
+       C231/C234  IC7 codes 0-7     C237/C23A  IC7 codes 8-9   (coils)
+       C23D/C240  IC3 codes 0-7     C243/C246  IC3 codes 8-9
+
+   Within a byte bit 7 is code 0 and bit 0 is code 7, because the serialiser at
+   0x1A02 rotates left and emits the carry with an index that counts up from 0.
+
+   Each (decoder, phase, code) is one physical lamp, so keep the layout: codes
+   0-7 of each decoder/phase pair get a column of their own, and the code 8/9
+   bits - only IC2 has anything wired there - share the last two columns.
+
+       col 0  IC1 FASE A   1 luz falta   2 jugador 3   3 jugador 4
+                           4-8 loteria 90/80/70/60/50
+       col 1  IC1 FASE B  11 luz falta  12 jugador 1  13 jugador 2
+                          14-18 loteria 00/10/20/30/40
+       col 2  IC2 FASE A  21-28 avance 10000..80000
+       col 3  IC2 FASE B  31-35 bola 1..5  36 fin de juego
+                          37 bola extra   38 especial picabolas
+       col 4  IC3 FASE A  41 bumper dcho  42 especial dcho
+                          43 bola extra diana dcha  44 pasillo dcho
+                          45 pulsador partidas
+       col 5  IC3 FASE B  51 bumper izq   52 especial izq
+                          53 bola extra diana izq   54 pasillo izq
+       col 6  codes 8/9   61-64 IC1 (unused)  65 avance 90000  66 avance 100000
+                          67 avance doble     68 avance triple
+       col 7  codes 8/9   71-74 IC3 (unused)
+
+   The map is the manual's IC1/IC2/IC3 tables (page 17) read from the bottom up,
+   which the ROM confirms at every point that can be checked: 0x16C4 lights IC2
+   FASE B code (ball-1), 0x16A1 lights IC1 code 1/2 for the player number,
+   0x042B sets IC3 FASE A code 4 (the start button lamp) when a credit is
+   available, 0x0174 sets IC2 FASE B code 5 (fin de juego) on game over, and
+   0x151B alternates IC3 code 3 between the two phases (pasillo dcho/izq). */
+#define RFRANCO_IC1 0
+#define RFRANCO_IC2 1
+#define RFRANCO_IC3 2
+
+static void rfranco_gate(int dec, int phase, int code) {
+  if (code > 9) return;                 /* 10-15 select no output */
+  if (code < 8)
+    locals.lampAcc[dec * 2 + phase] |= (UINT8)(1 << code);
+  else if (dec != RFRANCO_IC3)
+    locals.lampAcc[6] |= (UINT8)(1 << (dec * 4 + phase * 2 + (code - 8)));
+  else
+    locals.lampAcc[7] |= (UINT8)(1 << (phase * 2 + (code - 8)));
+}
+
 static WRITE_HANDLER(rfranco_scpu_movx_w) {
   if (RFRANCO_LATCH_SELECTED(locals.scpuP2)) {
     /* strobing IC5 is the ack the main CPU is halted waiting for */
@@ -357,17 +484,23 @@ static WRITE_HANDLER(rfranco_scpu_movx_w) {
      than sampling instantaneously. */
   if (!(locals.scpuP2 & 0x40)) {
     int hi = data >> 4, lo = data & 0x0f;
-    int a  = locals.phaseT1;              /* FASE A this frame? */
+    int ph = locals.gatePhase ? 0 : 1;    /* 0 = FASE A, 1 = FASE B */
     switch (offset & 0x0f) {
       case 0x0e:
-        if (hi < 10) locals.lampAcc[a ? 5 : 6] |= 1 << hi;        /* IC1 */
-        if (lo < 8)  locals.lampAcc[a ? 2 : 4] |= 1 << lo;        /* IC2 Q0-Q7 */
-        else if (lo < 10)
-          locals.lampAcc[3] |= 1 << ((lo - 8) + (a ? 0 : 2));     /* IC2 Q8/Q9 */
+        rfranco_gate(RFRANCO_IC1, ph, hi);
+        rfranco_gate(RFRANCO_IC2, ph, lo);
         return;
       case 0x0f:
+        /* IC7, connector JL. Solenoid number is the 4028 output + 1:
+             1 (n.c.)   2 taca      3 bobina monedero  4 contador 25
+             5 contador 100        6 relay flippers    7 bancada izquierda
+             8 picabolas           9 bancada derecha  10 salida bolas
+           Confirmed against the ROM: 0x055F fires 4 on a 25 pta coin, 0x15A6
+           holds 3 through attract to enable the coin slot, 0x1639/0x1656 fire
+           9 and 7 to reset whichever target bank is down, 0x1682 fires 10 to
+           serve the ball and 0x1754 fires 2 when a replay is awarded. */
         if (hi < 10) locals.solAcc |= 1u << hi;                   /* IC7 coils */
-        if (lo < 10) locals.lampAcc[a ? 0 : 1] |= 1 << lo;        /* IC3 */
+        rfranco_gate(RFRANCO_IC3, ph, lo);
         return;
       default:
         AY8910Write(0, 0, offset & 0x0f);
@@ -432,24 +565,66 @@ struct AY8910interface RFRANCO_ay8910Int = {
    detects the bad magic, sends sound command 0xBB, seeds C000 with 0x55 and
    resets. So without TRAP running the machine simply never comes up. */
 static INTERRUPT_GEN(rfranco_trap) {
-  /* One frame's worth of lamp/coil selects has been gated by now; commit it and
-     start the next half cycle. */
-  memcpy((void *)coreGlobals.tmpLampMatrix, locals.lampAcc, sizeof(locals.lampAcc));
-  locals.solenoids = locals.solAcc;
+  /* One half cycle's worth of lamp/coil selects has been gated by now. Only the
+     phase that was live carries any selects: the other phase's thyristors are
+     conducting on their own supply and its lamps stay lit right through. So
+     keep a snapshot per phase and publish the union, rather than replacing the
+     whole matrix every pass - that made every lamp flicker on and off at 50 Hz
+     and left whichever phase vblank happened to miss looking dark. */
+  int i, p = locals.gatePhase ? 0 : 1;
+  memcpy(locals.lampPhase[p], locals.lampAcc, sizeof(locals.lampAcc));
+  locals.solPhase[p] = locals.solAcc;
+  for (i = 0; i < CORE_STDLAMPCOLS; i++)
+    coreGlobals.tmpLampMatrix[i] = (UINT8)(locals.lampPhase[0][i] | locals.lampPhase[1][i]);
+  locals.solSticky |= locals.solPhase[0] | locals.solPhase[1];
+
+  /* SALIDA BOLAS (IC7 code 9) is the outhole kicker. Once it has been gated the
+     ball is out of the trough, so the contact opens - and it stays open until
+     the player drains, which is the DRAIN key since there is no ball model.
+     Without this the trough reads "ball present" for ever and the game ends
+     every ball the instant it starts one (0x0A2C -> 0x1121). */
+  if (locals.solAcc & (1u << 9)) locals.ballInTrough = 0;
+
   memset(locals.lampAcc, 0, sizeof(locals.lampAcc));
   locals.solAcc = 0;
   if (locals.coinPulse) locals.coinPulse--;
+
+  /* The bytes that will be gated during the half cycle starting now were built
+     by 0x1996 one TRAP ago, from the phase the sound CPU reported to the 0xDD
+     issued then - 0x19E6 sends 0xDD, stores the reply in C04F and immediately
+     blasts the buffer prepared on the previous pass. So the phase that selected
+     the data now arriving is the one before the current one. */
+  locals.gatePhase = locals.phaseT1;
   locals.phaseT1 ^= 1;
   cpu_set_irq_line(RFRANCO_CPU, IRQ_LINE_NMI, PULSE_LINE);
-}
-
-static INTERRUPT_GEN(rfranco_rst75) {
-  cpu_set_irq_line(RFRANCO_CPU, I8085_RST75_LINE, ASSERT_LINE);
 }
 
 /*-------------------------------
 /  copy local data to interface
 /--------------------------------*/
+/* The bumpers and the two ball ejectors are fired by board 53/3311 straight
+   from their own playfield contacts; the CPU never sees them as outputs and
+   only reads the contacts for scoring. Synthesise a one-shot on each so they
+   are visible - and so a front end has something to drive. */
+static void rfranco_pseudo_sol(void) {
+  static const struct { UINT8 mask; int sol; } wired[4] = {
+    { 0x80, RFRANCO_SOL_BUMPER_L },   /* JG7  AD7 contacto bumper izq   (sw 18) */
+    { 0x02, RFRANCO_SOL_BUMPER_R },   /* JG6  AD1 contacto bumper dcho  (sw 12) */
+    { 0x08, RFRANCO_SOL_EJECT_L },    /* JG2  AD3 rampa especial izq    (sw 14) */
+    { 0x20, RFRANCO_SOL_EJECT_R },    /* JG4  AD5 rampa especial dcha   (sw 16) */
+  };
+  UINT8 jg = coreGlobals.swMatrix[1], closed = (UINT8)(jg & ~locals.lastJG);
+  int i;
+  locals.lastJG = jg;
+  for (i = 0; i < 4; i++) {
+    if (closed & wired[i].mask) locals.pseudoSol[i] = RFRANCO_PSEUDO_FRAMES;
+    if (locals.pseudoSol[i]) {
+      locals.pseudoSol[i]--;
+      locals.solenoids |= 1u << (wired[i].sol - 1);
+    }
+  }
+}
+
 static INTERRUPT_GEN(rfranco_vblank) {
   locals.vblankCount++;
 
@@ -457,6 +632,11 @@ static INTERRUPT_GEN(rfranco_vblank) {
   memcpy((void*)coreGlobals.lampMatrix, (void*)coreGlobals.tmpLampMatrix,
          sizeof(coreGlobals.tmpLampMatrix));
   /*-- solenoids --*/
+  /* TRAP runs at 100 Hz against a 60 Hz vblank, so take everything gated since
+     the last frame rather than only the newest half cycle. */
+  locals.solenoids = locals.solSticky;
+  locals.solSticky = 0;
+  rfranco_pseudo_sol();
   coreGlobals.solenoids = locals.solenoids;
   /*-- display --*/
   if ((locals.vblankCount % RFRANCO_DISPLAYSMOOTH) == 0)
@@ -471,18 +651,32 @@ static INTERRUPT_GEN(rfranco_vblank) {
 }
 
 /* Switch numbering. The driver keeps its four hardware bytes in swMatrix rows
-   1-4, so expose them as the usual col*10 + row + 1: 11-18 are the JG contacts
-   read at 0x4000, 21-28 the cabinet inputs that come back through the sound
-   CPU, and 31-38 / 41-48 the two 74165 bytes. Declaring this explicitly rather
-   than relying on core.c's default keeps the numbering the driver's own. */
+   1-4, so expose them as the usual col*10 + row + 1 (see the table at the top
+   of this file). Declaring this explicitly rather than relying on core.c's
+   default keeps the numbering the driver's own. */
 static int rfranco_sw2m(int no) { return (no / 10) * 8 + (no % 10) - 1; }
 static int rfranco_m2sw(int col, int row) { return col * 10 + row + 1; }
 
+/* Lamps use the same col*10 + row + 1 scheme, so a lamp number and a switch
+   number are read the same way and both agree with what the debug interface
+   reports. Without this the base machine driver's sequential numbering would
+   apply and column 0 - the whole IC1 group - would land on lamp numbers 0 and
+   below, unreachable through vp_getLamp. */
+static int rfranco_lamp2m(int no) { return (no / 10) * 8 + (no % 10) + 7; }
+static int rfranco_m2lamp(int col, int row) { return col * 10 + row + 1; }
+
 static SWITCH_UPDATE(RFRANCO) {
+  UINT8 v = 0, mask = 0;
+  int tilt = 0;
+
+  /* Everything here has to work with inports == NULL. VPinMAME clears
+     m_fHandleKeyboard and libpinmame clears g_fHandleKeyboard, so under either
+     of them core_updateSw passes no input ports at all - and the two things
+     that keep this ROM out of its fault loops, the ball trough and the coin
+     one-shot, both live here. */
   if (inports) {
     UINT16 inp = inports[RFRANCO_COMINPORT];
     UINT8  coins = (UINT8)(inp & 0x30);
-    UINT8  v;
 
     /* The coin contacts have to be a pulse, not a level. 0x0545 latches the
        coin, then waits for the contact to OPEN within 20 TRAP ticks; if it is
@@ -495,24 +689,47 @@ static SWITCH_UPDATE(RFRANCO) {
     }
     locals.lastCoin = coins;
 
-    /* Caida de bolas is closed whenever a ball is sitting in the trough, which
-       is the rest state - and both the start path at 0x0508 and the fault
-       recovery at 0x030F require it. Left open, 0x030F/0x0331 ping-pong
-       forever: the TRAP handler keeps ticking so the machine looks alive while
-       the foreground program is dead.
-       TODO: drive this from a real trough model rather than assuming a ball is
-       always present. */
-    v = 0x40;
-    if (inp & 0x0040) v &= (UINT8)~0x40;   /* key lifts the ball out */
-    if (inp & 0x0080) v |= 0x80;           /* pulsador partidas */
+    if (inp & 0x0040) locals.ballInTrough = 1;   /* DRAIN key: ball returns */
+    if (inp & 0x0080) v |= 0x80;                 /* pulsador partidas */
     if (locals.coinPulse) v |= locals.coinBits;
-    CORE_SETKEYSW(v, 0xf0, 2);
-
-    /* Falta (tilt) is not a matrix switch - it reaches the CPU on JD1 and
-       fires RST 6.5 (vector 0x0034 -> 0x0286). */
-    if (inp & 0x0100)
-      cpu_set_irq_line(RFRANCO_CPU, I8085_RST65_LINE, PULSE_LINE);
+    mask |= 0xb0;                                /* coins and start button */
+    if (inp & 0x0100) tilt = 1;
   }
+  else if (locals.coinPulse) {
+    /* A front end without keyboard input pulses the coin contact itself; keep
+       running down any one-shot that is already armed so the two paths cannot
+       leave a coin latched. */
+    v |= locals.coinBits;
+    mask |= 0x30;
+  }
+
+  /* Caida de bolas is closed whenever a ball is sitting in the outhole. That is
+     the rest state, and both the start path at 0x0508 and the fault recovery at
+     0x030F require it - left open, 0x030F/0x0331 ping-pong for ever and the
+     foreground program is dead while the TRAP handler keeps ticking, so the
+     machine looks alive.
+
+     Two state model: the game empties the trough by firing SALIDA BOLAS (see
+     rfranco_trap) and the DRAIN key refills it, which is what ends the ball.
+     Applied on change only, so a front end that owns the contact itself is not
+     fought every frame while the two transitions the hardware really makes
+     always reach the ROM. */
+  if (locals.troughState != locals.ballInTrough) {
+    locals.troughState = locals.ballInTrough;
+    if (locals.ballInTrough) v |= 0x40;
+    mask |= 0x40;
+  }
+
+  if (mask) CORE_SETKEYSW(v, mask, 2);
+
+  /* Falta (tilt) is not a matrix switch on the real board - it reaches the CPU
+     on JD1 and fires RST 6.5 (vector 0x0034 -> 0x0286). The ROM never reads
+     bits 0-3 of the cabinet row, so switch 21 is borrowed as the front end's
+     way in; it is edge triggered, like the contact. */
+  if (coreGlobals.swMatrix[2] & 0x01) tilt = 1;
+  if (tilt && !locals.lastTilt)
+    cpu_set_irq_line(RFRANCO_CPU, I8085_RST65_LINE, PULSE_LINE);
+  locals.lastTilt = tilt;
 }
 
 /*----------------
@@ -565,12 +782,16 @@ MEMORY_END
        003: SEL RB0 / MOV R7,A / JMP $028   (external interrupt)
        007: STOP TCNT                       (timer)
    Do it once, after the ROMs are loaded. */
-static void rfranco_unscramble_sound_rom(void) {
-  static int done = 0;
+/* Call exactly once per game start, from DRIVER_INIT: the ROM regions are
+   reloaded on every start, so a process-lifetime guard would leave the second
+   game started inside one VPinMAME/libpinmame process running a still
+   scrambled sound ROM - the 8035 would execute noise, never release P2.4 and
+   hold the main CPU in reset for ever. MACHINE_INIT is not the place either,
+   because it also runs on a soft reset and would reverse the image back. */
+void rfranco_unscramble_sound_rom(void) {
   UINT8 *rom = memory_region(RFRANCO_MEMREG_SCPU);
   int i;
-  if (done || !rom) return;
-  done = 1;
+  if (!rom) return;
   for (i = 0; i < 0x1000; i++) {
     UINT8 b = rom[i];
     b = (UINT8)(((b & 0x01) << 7) | ((b & 0x02) << 5) | ((b & 0x04) << 3) | ((b & 0x08) << 1) |
@@ -581,7 +802,7 @@ static void rfranco_unscramble_sound_rom(void) {
 
 static MACHINE_INIT(RFRANCO) {
   memset(&locals, 0, sizeof locals);
-  rfranco_unscramble_sound_rom();
+  locals.ballInTrough = 1;      /* a ball rests in the outhole at power up */
   /* RIM must sample SID at the instant it executes, because the switch data is
      being clocked in a bit at a time - a value pushed in ahead of time would be
      stale. */
@@ -610,5 +831,6 @@ MACHINE_DRIVER_START(RFRANCO)
   MDRV_NVRAM_HANDLER(generic_0fill)
   MDRV_SWITCH_UPDATE(RFRANCO)
   MDRV_SWITCH_CONV(rfranco_sw2m, rfranco_m2sw)
+  MDRV_LAMP_CONV(rfranco_lamp2m, rfranco_m2lamp)
   MDRV_SOUND_ADD(AY8910, RFRANCO_ay8910Int)
 MACHINE_DRIVER_END

@@ -14,6 +14,13 @@
     {GEN_RFRANCO, disptype, {FLIP_SW(FLIP_L), 0, lamps, 0, SNDBRD_NONE}}; \
   static void init_##name(void) { \
     core_gameData = &name##GameData; \
+    /* DRIVER_INIT runs once per game start, after the ROM regions are loaded \
+       and before the machine is reset. That is the only correct place for the \
+       sound ROM descramble: the regions are reloaded on every start, so a \
+       once-per-process guard would leave a second game inside the same \
+       VPinMAME/libpinmame process running a scrambled image, and MACHINE_INIT \
+       also runs on soft reset and would reverse it back. */ \
+    rfranco_unscramble_sound_rom(); \
   }
 
 /* Display board 53/3307: 30 HDSP-3400 digits behind an 8279, a 74159 digit
