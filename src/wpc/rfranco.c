@@ -87,7 +87,10 @@ static struct {
   UINT8  soundReply;    /* sound -> main, latched in IC5 */
   int    soundPending;
   UINT8  scpuP1;        /* 8035 port 1 latch */
-  UINT8  scpuP2;        /* 8035 port 2 latch - bit 7 selects the 8212s */
+  UINT8  scpuP2;        /* 8035 port 2 latch - selects latch / PSG1 / PSG2 */
+  int    phaseT1;       /* mains half-cycle presented on the 8035's T1 pin */
+  UINT8  lampAcc[7];    /* lamps gated during the current frame */
+  UINT32 solAcc;        /* coils gated during the current frame */
 } locals;
 
 /*------------------------------------
@@ -98,18 +101,20 @@ static struct {
    contacts are active low (see the loop at 0x18A6 in the game ROM). We present
    the current playfield state and let it clock through. */
 static int rfranco_sid_r(void) {
-  int bit;
   if (locals.swShiftPos <= 0) {
-    /* reload from the switch matrix at the start of each 16 bit pass */
-    locals.swShift = (coreGlobals.swMatrix[1] << 8) | coreGlobals.swMatrix[2];
+    /* Two 74165s cascaded IC6 -> IC5 -> SID. IC6 (connector JM) clocks out
+       first and H leaves before A, so the firmware sees chain positions 2..17:
+       IC6's H input (JM3) is shifted past before the first RIM and is invisible
+       to the ROM. That is exactly why the manual's errata moves the picabolas
+       contact from JM3 to JN2. Row 4 bit 7 is IC5's floating SER input and must
+       stay clear or the zone 9 contact test reports a phantom closed switch. */
+    locals.swShift = (UINT16)(coreGlobals.swMatrix[3] |
+                              (coreGlobals.swMatrix[4] << 8));
     locals.swShiftPos = 16;
   }
-  /* The playfield contacts are active low and the ROM inverts with CMA right
-     after RIM (0x18A9), so a switch PinMAME reports as closed must appear here
-     as a 0. Returning the matrix bit unchanged makes every switch read back as
-     permanently closed, which sends the game straight into its error path. */
-  bit = (locals.swShift & 0x8000) ? 0 : 1;
-  return bit;
+  /* Present the bit as-is: PinMAME's 1 = closed is what the hardware puts on
+     SID, and the ROM's CMA at 0x18A9 turns it into its own 0 = closed. */
+  return locals.swShift & 1;
 }
 
 /*-------------------------------------
@@ -141,7 +146,7 @@ static WRITE_HANDLER(rfranco_clk_w) {
   }
   /* advance the switch chain */
   if (locals.swShiftPos > 0) {
-    locals.swShift <<= 1;
+    locals.swShift >>= 1;          /* LSB first - see rfranco_sid_r */
     locals.swShiftPos--;
   }
   /* Advance the display chain.
@@ -202,12 +207,12 @@ static READ_HANDLER(rfranco_sound_r) {
   return locals.soundReply;
 }
 
-/* TODO(phase 5): 0x4000 is read once, at 0x18BD, immediately after the 16 bit
-   switch shift completes. MAME's skeleton does not map it at all. Until its
-   function is established, return 0xFF (idle/pulled up) rather than open bus so
-   the behaviour is at least deterministic. */
+/* 0x4000 is chip select CS1 from the 74S138 and carries eight playfield
+   contacts straight off connector JG - MAME's skeleton omits it entirely. The
+   ROM reads it once per pass at 0x18BD and, unlike the serial chain, applies no
+   CMA, so the bus itself is active low. */
 static READ_HANDLER(rfranco_4000_r) {
-  return 0xff;
+  return ~coreGlobals.swMatrix[1];
 }
 
 /*-------------------
@@ -237,8 +242,31 @@ static READ_HANDLER(rfranco_scpu_movx_r) {
     cpu_trigger(RFRANCO_SOUND_TRIGGER);
     return locals.soundCmd;
   }
-  /* TODO(phase 6): PSG read path. 0xFF reads as "no command" to the ROM's
-     idle test at 0x002C (INC A / JZ), which is the safe default. */
+  /* PSG read path. P2.5 low selects PCS2 = IC2 (PSG2), which is the input
+     device: its register 7 is programmed 0x38 at sound ROM 0x00B1, making both
+     ports inputs. The MOVX address is the AY register number, taken from R1.
+
+     This is the only way the machine can see a coin. The 8085 asks for it with
+     sound command 0x99 (0x18C3: MVI A,99 / CALL 196C), the 8035 answers from
+     0x060F by selecting IC2 and reading register 0x0E, and the reply lands in
+     C027. Port A carries the two coin slots, the ball drain and the start
+     button; port B carries the two operator switches on the door. */
+  if (!(locals.scpuP2 & 0x20)) {
+    switch (offset & 0x0f) {
+      case 0x0e:  /* port A - cabinet inputs, active low */
+        return ~coreGlobals.swMatrix[2];
+      case 0x0f: {
+        /* Port B bits 7/6 are the ajuste and test switches; 1 = switch down.
+           Both down is normal play, which is what the ROM's boot dispatch at
+           0x00BB decodes as 0xC0. */
+        static const UINT8 doorsw[4] = { 0xc0, 0x80, 0x40, 0x00 };
+        return doorsw[core_getDip(0) & 0x03];
+      }
+      default:
+        return 0xff;
+    }
+  }
+  /* TODO(phase 6): IC3/PSG1 (P2.6 low) is the lamp and coil output device. */
   return 0xff;
 }
 
@@ -249,7 +277,53 @@ static WRITE_HANDLER(rfranco_scpu_movx_w) {
     cpu_set_irq_line(RFRANCO_CPU, I8085_RST55_LINE, ASSERT_LINE);
     return;
   }
-  /* TODO(phase 6): PSG write path (BDIR/BC1 come from P1). */
+  /* P2.6 low selects PCS1 = IC3 (PSG1), the output device: its register 7 is
+     programmed 0xF8 by the sound ROM at 0x00DB, making both ports outputs.
+     Registers 0x0E/0x0F are the two I/O ports, and each byte written there
+     carries TWO 4028 select codes - high nibble and low nibble. Codes 0-9 pick
+     an output, 10-15 select none.
+
+         port A  high nibble -> driver IC1 : loteria / jugador / falta (JA)
+                 low  nibble -> driver IC2 : 20 playfield lamps       (JQ)
+         port B  high nibble -> driver IC7 : the coils                (JL)
+                 low  nibble -> driver IC3 : 9 playfield lamps        (JP)
+
+     Each code gates a BT106 thyristor which then conducts to the end of the
+     mains half cycle, so a lamp selected for one ~85us slot stays lit for the
+     rest of the frame. Accumulate here and commit at the frame boundary rather
+     than sampling instantaneously. */
+  if (!(locals.scpuP2 & 0x40)) {
+    int hi = data >> 4, lo = data & 0x0f;
+    int a  = locals.phaseT1;              /* FASE A this frame? */
+    switch (offset & 0x0f) {
+      case 0x0e:
+        if (hi < 10) locals.lampAcc[a ? 5 : 6] |= 1 << hi;        /* IC1 */
+        if (lo < 8)  locals.lampAcc[a ? 2 : 4] |= 1 << lo;        /* IC2 Q0-Q7 */
+        else if (lo < 10)
+          locals.lampAcc[3] |= 1 << ((lo - 8) + (a ? 0 : 2));     /* IC2 Q8/Q9 */
+        return;
+      case 0x0f:
+        if (hi < 10) locals.solAcc |= 1u << hi;                   /* IC7 coils */
+        if (lo < 10) locals.lampAcc[a ? 0 : 1] |= 1 << lo;        /* IC3 */
+        return;
+      default:
+        AY8910Write(0, 0, offset & 0x0f);
+        AY8910Write(0, 1, data);
+        return;
+    }
+  }
+  if (!(locals.scpuP2 & 0x20)) {          /* PCS2 = IC2, the input PSG */
+    AY8910Write(1, 0, offset & 0x0f);
+    AY8910Write(1, 1, data);
+  }
+}
+
+/* The sound CPU samples the mains half cycle on T1 (JD-8, DETECCION FASE) and
+   reports it to the 8085, which uses it to pick between the FASE A and FASE B
+   copies of the lamp data. Exactly one JT1 exists in the whole sound ROM, at
+   0x00F8. */
+static READ_HANDLER(rfranco_scpu_t1_r) {
+  return locals.phaseT1;
 }
 
 static WRITE_HANDLER(rfranco_scpu_p1_w) {
@@ -289,6 +363,13 @@ struct AY8910interface RFRANCO_ay8910Int = {
    detects the bad magic, sends sound command 0xBB, seeds C000 with 0x55 and
    resets. So without TRAP running the machine simply never comes up. */
 static INTERRUPT_GEN(rfranco_trap) {
+  /* One frame's worth of lamp/coil selects has been gated by now; commit it and
+     start the next half cycle. */
+  memcpy((void *)coreGlobals.tmpLampMatrix, locals.lampAcc, sizeof(locals.lampAcc));
+  locals.solenoids = locals.solAcc;
+  memset(locals.lampAcc, 0, sizeof(locals.lampAcc));
+  locals.solAcc = 0;
+  locals.phaseT1 ^= 1;
   cpu_set_irq_line(RFRANCO_CPU, IRQ_LINE_NMI, PULSE_LINE);
 }
 
@@ -307,16 +388,21 @@ static INTERRUPT_GEN(rfranco_vblank) {
          sizeof(coreGlobals.tmpLampMatrix));
   /*-- solenoids --*/
   coreGlobals.solenoids = locals.solenoids;
-  if ((locals.vblankCount % RFRANCO_SOLSMOOTH) == 0)
-    locals.solenoids = 0;
   /*-- display --*/
   if ((locals.vblankCount % RFRANCO_DISPLAYSMOOTH) == 0)
     memcpy(coreGlobals.segments, locals.segments, sizeof(locals.segments));
 }
 
 static SWITCH_UPDATE(RFRANCO) {
-  if (inports)
-    CORE_SETKEYSW(inports[RFRANCO_COMINPORT], 0xff, 0);
+  if (inports) {
+    /* Coins, ball drain and start sit in swMatrix[2] bits 4-7, which is what
+       the sound CPU hands back as IC2 port A. */
+    CORE_SETKEYSW(inports[RFRANCO_COMINPORT], 0xf0, 2);
+    /* Falta (tilt) is not a matrix switch at all - it reaches the CPU on JD1
+       and fires RST 6.5 (vector 0x0034 -> 0x0286). */
+    if (inports[RFRANCO_COMINPORT] & 0x0100)
+      cpu_set_irq_line(RFRANCO_CPU, I8085_RST65_LINE, PULSE_LINE);
+  }
 }
 
 /*----------------
@@ -350,6 +436,7 @@ MEMORY_END
 
 static PORT_READ_START(rfranco_scpu_readport)
   {0x00, 0xff, rfranco_scpu_movx_r},
+  {I8039_t1, I8039_t1, rfranco_scpu_t1_r},
 MEMORY_END
 
 static PORT_WRITE_START(rfranco_scpu_writeport)

@@ -22,11 +22,14 @@
    AJUSTES, TEST Y VISUALIZACION DE RAM". */
 #define RFRANCO_COMPORTS \
   PORT_START /* 0 */ \
-    COREPORT_BITDEF(  0x0001, IPT_START1,  IP_KEY_DEFAULT) \
-    COREPORT_BITDEF(  0x0002, IPT_COIN1,   IP_KEY_DEFAULT) \
-    COREPORT_BITDEF(  0x0004, IPT_COIN2,   KEYCODE_3) \
-    COREPORT_BIT(     0x0008, "Falta (Tilt)",       KEYCODE_INSERT) \
-    COREPORT_BIT(     0x0010, "Caida de bola",      KEYCODE_HOME) \
+    /* These land in swMatrix[2], which the driver hands back to the sound CPU
+       as AY-3-8910 IC2 port A when the game asks with sound command 0x99. That
+       is the only route a coin can reach the game. */ \
+    COREPORT_BITDEF(  0x0010, IPT_COIN1,   IP_KEY_DEFAULT) \
+    COREPORT_BITDEF(  0x0020, IPT_COIN2,   KEYCODE_3) \
+    COREPORT_BIT(     0x0040, "Caida de bola",  KEYCODE_HOME) \
+    COREPORT_BITDEF(  0x0080, IPT_START1,  IP_KEY_DEFAULT) \
+    COREPORT_BIT(     0x0100, "Falta (Tilt)",   KEYCODE_INSERT) \
   PORT_START /* 1 */ \
     COREPORT_DIPNAME( 0x0003, 0x0000, "Door switches") \
       COREPORT_DIPSET(0x0000, "Juego (both down)" ) \
