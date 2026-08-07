@@ -356,7 +356,7 @@ MACHINE_DRIVER_START(RFRANCO)
   MDRV_CPU_MEMORY(rfranco_scpu_readmem, rfranco_scpu_writemem)
   MDRV_CPU_PORTS(rfranco_scpu_readport, rfranco_scpu_writeport)
 
-  MDRV_INTERLEAVE(50)
+  MDRV_INTERLEAVE(500)
   MDRV_CORE_INIT_RESET_STOP(RFRANCO, NULL, NULL)
   MDRV_DIPS(16)
   MDRV_NVRAM_HANDLER(generic_0fill)
