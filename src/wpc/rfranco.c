@@ -160,20 +160,37 @@ static struct {
    contacts are active low (see the loop at 0x18A6 in the game ROM). We present
    the current playfield state and let it clock through. */
 static int rfranco_sid_r(void) {
-  if (locals.swShiftPos <= 0) {
-    /* Two 74165s cascaded IC6 -> IC5 -> SID. IC6 (connector JM) clocks out
-       first and H leaves before A, so the firmware sees chain positions 2..17:
-       IC6's H input (JM3) is shifted past before the first RIM and is invisible
-       to the ROM. That is exactly why the manual's errata moves the picabolas
-       contact from JM3 to JN2. Row 4 bit 7 is IC5's floating SER input and must
-       stay clear or the zone 9 contact test reports a phantom closed switch. */
-    locals.swShift = (UINT16)(coreGlobals.swMatrix[3] |
-                              (coreGlobals.swMatrix[4] << 8));
-    locals.swShiftPos = 16;
-  }
   /* Present the bit as-is: PinMAME's 1 = closed is what the hardware puts on
-     SID, and the ROM's CMA at 0x18A9 turns it into its own 0 = closed. */
+     SID, and the ROM's CMA at 0x18A9 turns it into its own 0 = closed. The
+     register is filled by LOAD, not here - see rfranco_load_w. */
   return locals.swShift & 1;
+}
+
+/* LOAD, the pulse the sound CPU puts on P1.5 when it is sent command 0xAA,
+   does two jobs: it is the 8279's /WR on the display board (JA12) and it is
+   the parallel load of the two 74165s on the driver board (JE-4). So the
+   playfield contacts are captured at exactly this instant.
+
+   That matters, because the clock the shift registers run on is the shared OUT
+   strobe, which the display transfer pulses nine times per byte. Reloading
+   when a bit count runs out instead - which is what this driver used to do -
+   let those display clocks eat shift positions, and the switch scan then
+   started somewhere in the middle of the word. The offset varied with how many
+   display bytes a frame happened to send, so contacts read as their neighbours
+   and the reading moved about. The ROM's own layout is what makes the hardware
+   scheme work: 0x2437 ends by sending 0xAA, and the switch scan at 0x189C is
+   the very next thing the TRAP handler does.
+
+   Two 74165s cascaded IC6 -> IC5 -> SID. IC6 (connector JM) clocks out first
+   and H leaves before A, so the firmware sees chain positions 2..17: IC6's H
+   input (JM3) is gone before the first RIM and is invisible to the ROM. That is
+   exactly why the manual's errata moves the picabolas contact from JM3 to JN2.
+   Row 4 bit 7 is IC5's floating SER input and must stay clear, or the zone 9
+   contact test reports a phantom closed switch. */
+static void rfranco_load_w(void) {
+  locals.swShift = (UINT16)(coreGlobals.swMatrix[3] |
+                            (coreGlobals.swMatrix[4] << 8));
+  locals.swShiftPos = 16;
 }
 
 /*-------------------------------------
@@ -203,7 +220,8 @@ static WRITE_HANDLER(rfranco_clk_w) {
     i8085_set_SID_callback(rfranco_sid_r);
     i8085_set_SOD_callback(rfranco_sod_w);
   }
-  /* advance the switch chain */
+  /* Advance the switch chain. Every OUT is a clock edge for it, whichever
+     serial chain the game thinks it is driving. */
   if (locals.swShiftPos > 0) {
     locals.swShift >>= 1;          /* LSB first - see rfranco_sid_r */
     locals.swShiftPos--;
@@ -298,8 +316,10 @@ static WRITE_HANDLER(rfranco_sound_w) {
      P1.5, which becomes LOAD on the display board and clocks the 74164's byte
      into the 8279. 0x2417 sends it at the end of every frame and it is issued
      from nowhere else in the ROM. */
-  if (data == 0xaa)
+  if (data == 0xaa) {
     rfranco_8279_w((UINT8)(locals.dispShift & 0xff), locals.sodState);
+    rfranco_load_w();
+  }
   locals.soundCmd = data;
   locals.soundPending = 1;
   cpu_set_irq_line(RFRANCO_SCPU, 0, ASSERT_LINE);
