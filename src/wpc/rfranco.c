@@ -132,10 +132,16 @@
    never going to answer does not wedge the machine. */
 #define RFRANCO_SOUND_GUARD_US 1000
 
-/* Pseudo solenoids. The two bumpers and the two ball ejectors have no CPU
+/* Pseudo solenoids. The two bumpers and the two expulsores have no CPU
    connection at all: board 53/3311 ("CONTROL BUMPER Y EXPULSOR") fires each
    coil straight from its own playfield switch through an RC one-shot. They are
-   synthesised here so the machine's most visible mechanics are observable. */
+   synthesised here so the machine's most visible mechanics are observable.
+
+   "Expulsor" is not a kickout hole - there is no hole on this playfield. The
+   contact drawing (manual page 3) has contacts 24 and 25 inside the two
+   triangular bodies at the bottom corners, i.e. the slingshots, and the parts
+   list calls that mechanism the RECHAZADOR. 53/3311 drives exactly four coils:
+   two bumpers and those two. See rfranco_pseudo_sol for the wiring. */
 #define RFRANCO_SOL_BUMPER_L 17
 #define RFRANCO_SOL_BUMPER_R 18
 #define RFRANCO_SOL_EJECT_L  19
@@ -677,8 +683,15 @@ static void rfranco_pseudo_sol(void) {
   static const struct { UINT8 mask; int sol; } wired[4] = {
     { 0x80, RFRANCO_SOL_BUMPER_L },   /* JG7  AD7 contacto bumper izq   (sw 18) */
     { 0x02, RFRANCO_SOL_BUMPER_R },   /* JG6  AD1 contacto bumper dcho  (sw 12) */
-    { 0x08, RFRANCO_SOL_EJECT_L },    /* JG2  AD3 rampa especial izq    (sw 14) */
-    { 0x20, RFRANCO_SOL_EJECT_R },    /* JG4  AD5 rampa especial dcha   (sw 16) */
+    /* Both expulsores hang off the same bit. Their contacts are the manual's
+       24 and 25, the two "10 PUNTOS" inside the slingshot bodies, and they are
+       wired in parallel onto AD0 - which the ROM's own contact-test table
+       states, by flagging AD0 as a paralleled pair and reporting it as the
+       higher of the two. The CPU therefore cannot tell left from right and
+       neither can this driver: both fire together. A front end that knows
+       where the ball was should use that instead. */
+    { 0x01, RFRANCO_SOL_EJECT_L },    /* JG8  AD0 contacto 10 puntos    (sw 11) */
+    { 0x01, RFRANCO_SOL_EJECT_R },    /* JG8  AD0 - the same contact         */
   };
   UINT8 jg = coreGlobals.swMatrix[1], closed = (UINT8)(jg & ~locals.lastJG);
   int i;
