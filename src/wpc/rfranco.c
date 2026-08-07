@@ -57,6 +57,9 @@
    against hardware. */
 #define RFRANCO_RST75FREQ 400
 
+/* Trigger used to model the 8212's READY handshake - see rfranco_sound_w. */
+#define RFRANCO_SOUND_TRIGGER 1701
+
 /*----------------
 /  Local variables
 /-----------------*/
@@ -146,6 +149,23 @@ static WRITE_HANDLER(rfranco_sound_w) {
   locals.soundCmd = data;
   locals.soundPending = 1;
   cpu_set_irq_line(RFRANCO_SCPU, 0, ASSERT_LINE);
+
+  /* The 8212 holds the 8085 in wait states through its READY input until the
+     sound CPU has taken the byte. That flow control is not optional: the bulk
+     transfer at 0x19F3 pushes 19 bytes back to back with no handshake of its
+     own, and the 8035 - which polls the INT pin with JNI at 0x00FB rather than
+     taking an interrupt - is far too slow to keep up. Without READY the 8085
+     simply overwrites the latch and the transfer is lost.
+
+     MAME's skeleton has the same wiring noted but commented out:
+        //m_soundlatch[1]->int_wr_callback().append_inputline(maincpu, READY)
+
+     PinMAME's 8085 core has no READY line, so stall the main CPU on a trigger
+     instead and let the sound CPU release it when it reads the latch. The
+     timed trigger is a safety net: if the sound CPU has masked its interrupt
+     and will never read, we must not deadlock. */
+  cpu_spinuntil_trigger(RFRANCO_SOUND_TRIGGER);
+  cpu_triggertime(TIME_IN_USEC(500), RFRANCO_SOUND_TRIGGER);
 }
 
 static READ_HANDLER(rfranco_sound_r) {
@@ -184,6 +204,8 @@ static READ_HANDLER(rfranco_scpu_movx_r) {
     /* reading IC6 takes the command and drops the sound CPU's interrupt */
     cpu_set_irq_line(RFRANCO_SCPU, 0, CLEAR_LINE);
     locals.soundPending = 0;
+    /* releases the main CPU from its READY stall */
+    cpu_trigger(RFRANCO_SOUND_TRIGGER);
     return locals.soundCmd;
   }
   /* TODO(phase 6): PSG read path. 0xFF reads as "no command" to the ROM's
