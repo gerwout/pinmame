@@ -447,7 +447,7 @@ static READ_HANDLER(rfranco_scpu_movx_r) {
       case 0x0e:  /* port A - cabinet inputs, active low */
         return ~coreGlobals.swMatrix[2];
       case 0x0f: {
-        /* Port B bits 7/6 are the test and ajuste switches on the door; 1 is
+        /* Port B bits 7/6 are the ajuste and test switches on the door; 1 is
            switch down. The boot dispatch at 0x00BB masks them to 0xC0 and
            branches on the result, giving the manual's four positions - all
            four verified against what the machine actually does:
@@ -456,12 +456,25 @@ static READ_HANDLER(rfranco_scpu_movx_r) {
                                RAM audit zones (0x312C)
              0x40              borrado: zeroes the credits once and waits
                                (0x00C7)
-             0x00 both up      ajustes, the nine adjustment zones (0x3255).
-                               Inside that mode 0x40/0x80 means "the button
-                               steps to the next zone" and 0x00 means "the
-                               button changes the value" (0x33AA). */
+             0x00 both up      ajustes, the adjustment zones (0x3255 in
+                               both sets).
+           The position is not only read at boot. Inside the ajustes menu the
+           ROM re-reads it on every pass and uses it to decide what the start
+           button does: with both switches still up the button steps the
+           current zone's VALUE, and with either one put back down it steps to
+           the NEXT ZONE (set 1 0x3380/0x33BC, set 2 0x3383/0x33BF). So walking
+           the menu needs the switches moved while the machine is running,
+           which a DIP setting cannot do.
+           Hence the two spare cabinet bits: the ROM never looks at bits 0-3 of
+           the port A byte (every read masks 0x10/0x20/0x40/0x80), so switches
+           23 and 24 are borrowed as a live way to lift each door switch, the
+           same trick switch 21 uses for falta. Both open = whatever the DIP
+           says, so the default behaviour is unchanged. */
         static const UINT8 doorsw[4] = { 0xc0, 0x80, 0x40, 0x00 };
-        return doorsw[core_getDip(0) & 0x03];
+        UINT8 v = doorsw[core_getDip(0) & 0x03];
+        if (coreGlobals.swMatrix[2] & 0x04) v &= (UINT8)~0x80; /* 23 ajuste up */
+        if (coreGlobals.swMatrix[2] & 0x08) v &= (UINT8)~0x40; /* 24 test up */
+        return v;
       }
       default:
         return 0xff;
