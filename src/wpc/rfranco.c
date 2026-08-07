@@ -254,7 +254,7 @@ static WRITE_HANDLER(rfranco_sound_w) {
      timed trigger is a safety net: if the sound CPU has masked its interrupt
      and will never read, we must not deadlock. */
   cpu_spinuntil_trigger(RFRANCO_SOUND_TRIGGER);
-  cpu_triggertime(TIME_IN_USEC(500), RFRANCO_SOUND_TRIGGER);
+  cpu_triggertime(TIME_IN_USEC(100), RFRANCO_SOUND_TRIGGER);
 }
 
 static READ_HANDLER(rfranco_sound_r) {
@@ -448,6 +448,14 @@ static INTERRUPT_GEN(rfranco_vblank) {
     memcpy(coreGlobals.segments, locals.segments, sizeof(locals.segments));
 }
 
+/* Switch numbering. The driver keeps its four hardware bytes in swMatrix rows
+   1-4, so expose them as the usual col*10 + row + 1: 11-18 are the JG contacts
+   read at 0x4000, 21-28 the cabinet inputs that come back through the sound
+   CPU, and 31-38 / 41-48 the two 74165 bytes. Declaring this explicitly rather
+   than relying on core.c's default keeps the numbering the driver's own. */
+static int rfranco_sw2m(int no) { return (no / 10) * 8 + (no % 10) - 1; }
+static int rfranco_m2sw(int col, int row) { return col * 10 + row + 1; }
+
 static SWITCH_UPDATE(RFRANCO) {
   if (inports) {
     /* Coins, ball drain and start sit in swMatrix[2] bits 4-7, which is what
@@ -554,5 +562,6 @@ MACHINE_DRIVER_START(RFRANCO)
   MDRV_DIPS(16)
   MDRV_NVRAM_HANDLER(generic_0fill)
   MDRV_SWITCH_UPDATE(RFRANCO)
+  MDRV_SWITCH_CONV(rfranco_sw2m, rfranco_m2sw)
   MDRV_SOUND_ADD(AY8910, RFRANCO_ay8910Int)
 MACHINE_DRIVER_END
