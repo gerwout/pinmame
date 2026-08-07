@@ -212,6 +212,7 @@ typedef struct {
 	int 	(*irq_callback)(int);
 	void	(*sod_callback)(int state);
 	int 	(*sid_callback)(void);
+	UINT8	after_ei;	/* EI takes effect one instruction late - see below */
 }	i8085_Regs;
 
 int i8085_ICount = 0;
@@ -1227,9 +1228,16 @@ INLINE void execute_one(int opcode)
 		case 0xfa: // JM nnnn
 			M_JMP( I.AF.b.l & SF );
 			break;
-		case 0xfb: // EI //!! not ported from new MAME
+		case 0xfb: // EI
 			/* set interrupt enable */
 			I.IM |= IM_IE;
+			/* The 8085 does not recognise an interrupt until the instruction
+			   after EI has completed. Real code leans on this: an interrupt
+			   service routine that ends
+			       EI / POP PSW / RET
+			   relies on the POP running before anything else can be taken, or
+			   the frame is left half unwound. */
+			I.after_ei = 1;
 			/* remove serviced IRQ flag */
 			I.IREQ &= ~I.ISRV;
 			/* reset serviced IRQ */
@@ -1370,6 +1378,7 @@ static void Interrupt(void)
 					execute_one(I.IRQ1 & 0xff);
 			}
 	}
+
 }
 
 int i8085_execute(int cycles)
@@ -1380,7 +1389,13 @@ int i8085_execute(int cycles)
 	{
 		CALL_MAME_DEBUG;
 		/* interrupts enabled or TRAP pending ? */
-		if ( (I.IM & IM_IE) || (I.IREQ & IM_TRAP) )
+		if ( I.after_ei )
+		{
+			/* swallow exactly one instruction's worth of interrupt latency
+			   after EI (see case 0xfb) */
+			I.after_ei--;
+		}
+		else if ( (I.IM & IM_IE) || (I.IREQ & IM_TRAP) )
 		{
 			/* copy scheduled to executed interrupt request */
 			I.IRQ1 = I.IRQ2;
@@ -1615,8 +1630,18 @@ void i8085_set_TRAP(int state)
 	LOG(("i8085: TRAP %d\n", state));
 	if (state)
 	{
+		/* Gate on the pending flag, not on I.ISRV. I.ISRV is an "in service"
+		   lock that only EI clears, and a TRAP handler is under no obligation
+		   to EI on the way out - running with interrupts disabled and simply
+		   RETing is perfectly legal, and this hardware does exactly that at
+		   boot. Keying off I.ISRV therefore wedged TRAP permanently after the
+		   first one. Interrupt() clears the pending flag as it takes the
+		   interrupt, so testing it here re-arms TRAP for the next edge while
+		   still ignoring a second edge that arrives before the first is taken.
+		   I.ISRV is deliberately left alone so it keeps blocking the maskable
+		   RST5.5/6.5/7.5 for the duration of the handler. */
+		if( I.IREQ & IM_TRAP ) return;	/* edge already pending, not yet taken */
 		I.IREQ |= IM_TRAP;
-		if( I.ISRV & IM_TRAP ) return;	/* already servicing TRAP ? */
 		I.ISRV = IM_TRAP;				/* service TRAP */
 		I.IRQ2 = ADDR_TRAP;
 	}
