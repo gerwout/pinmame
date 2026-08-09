@@ -286,7 +286,7 @@ static void rfranco_sod_w(int state) {
    irrelevant, the whole I/O space is one decode). Each pulse advances both the
    switch shift register and the display shift register. */
 static WRITE_HANDLER(rfranco_clk_w) {
-  /* MACHINE_INIT runs before the CPU cores are initialised, so callbacks
+  /* The reset handler runs before the CPU cores are reset, so callbacks
      installed there are lost. Install them on first use instead. */
   if (!locals.cbInstalled) {
     locals.cbInstalled = 1;
@@ -947,7 +947,15 @@ void rfranco_unscramble_sound_rom(void) {
   }
 }
 
-static MACHINE_INIT(RFRANCO) {
+/* This has to be the RESET handler, not the INIT one. core.c calls the driver's
+   init from inside its own `if (!coreData)` first-time block and its reset on
+   every pass, so an init-only driver keeps every byte of `locals` across a soft
+   reset (F3, or "Reset Game" in the Tab menu). That was visible: the machine
+   came back with the trough left wherever the last game had put it rather than
+   with a ball in it, so the ROM's boot path could not complete, and the boot
+   dispatch at 0x00BB - the only place the operator door switches are ever read -
+   was never reached. Resetting into an operator menu did nothing at all. */
+static MACHINE_RESET(RFRANCO) {
   memset(&locals, 0, sizeof locals);
   locals.ballInTrough = 1;      /* a ball rests in the outhole at power up */
   locals.troughEdge = 1;        /* ... and the ROM has to be told so */
@@ -974,7 +982,7 @@ MACHINE_DRIVER_START(RFRANCO)
   MDRV_CPU_PORTS(rfranco_scpu_readport, rfranco_scpu_writeport)
 
   MDRV_INTERLEAVE(500)
-  MDRV_CORE_INIT_RESET_STOP(RFRANCO, NULL, NULL)
+  MDRV_CORE_INIT_RESET_STOP(NULL, RFRANCO, NULL)
   MDRV_DIPS(16)
   MDRV_NVRAM_HANDLER(generic_0fill)
   MDRV_SWITCH_UPDATE(RFRANCO)
