@@ -76,8 +76,10 @@
 
    Status: playable, on both sets. A coin gives a credit, the start button
    starts a game and serves a ball, playfield contacts score, the drop target
-   banks light their specials, collecting one awards a replay and bangs the
-   knocker, each ball ends into the next with its bonus paid, the last ball ends
+   banks light their specials, collecting one awards a replay and fires the coil
+   the ROM gates for it - taken here to be the knocker, an inference the caveat
+   above sets out and only a real board can settle - each ball ends into the
+   next with its bonus paid, the last ball ends
    the game and the final score is held; the score and credit displays read
    correctly, lamps and coils follow the ROM's own tables, the two mains phases
    are multiplexed, and all four operator modes on the door switches work.
@@ -205,7 +207,6 @@ static struct {
   UINT8  soundReply;    /* sound -> main, latched in IC5 */
   int    soundTrigger;  /* trigger the main CPU is currently stalled on */
   int    soundSeq;      /* rotating index into the trigger block */
-  UINT8  scpuP1;        /* 8035 port 1 latch */
   UINT8  scpuP2;        /* 8035 port 2 latch - selects latch / PSG1 / PSG2 */
   int    coinPulse;     /* TRAP ticks left on a coin one-shot */
   UINT8  coinBits;      /* which coin slot is pulsing */
@@ -265,8 +266,12 @@ static int rfranco_sid_r(void) {
    Row 4 bit 7 is IC5's floating SER input and must stay clear, or the zone 9
    contact test reports a phantom closed switch. */
 static void rfranco_load_w(void) {
-  locals.swShift = (UINT16)(coreGlobals.swMatrix[3] |
-                            (coreGlobals.swMatrix[4] << 8));
+  /* Mask the SER bit rather than only asking callers to leave it alone: a front
+     end doing vp_setSwitch(48,1), or the Tab menu's manual switch keys on
+     column 4 row 8, would otherwise feed the ROM a sixteenth contact and its
+     own zone 9 test would report one the machine does not have. */
+  locals.swShift = (UINT16)((coreGlobals.swMatrix[3] |
+                             (coreGlobals.swMatrix[4] << 8)) & 0x7fff);
   locals.swShiftPos = 16;
 }
 
@@ -286,8 +291,12 @@ static void rfranco_sod_w(int state) {
    irrelevant, the whole I/O space is one decode). Each pulse advances both the
    switch shift register and the display shift register. */
 static WRITE_HANDLER(rfranco_clk_w) {
-  /* The reset handler runs before the CPU cores are reset, so callbacks
-     installed there are lost. Install them on first use instead. */
+  /* Belt and braces. This used to be the only install that stuck, because the
+     reset handler runs before the CPU cores are reset (cpuexec.c:364 vs :372)
+     and i8085_reset wiped the callbacks. Commit 8317f095 made the core preserve
+     them, so MACHINE_RESET's install now survives and this one re-seats the
+     same two pointers. Kept because it costs one branch and removing it would
+     make the driver depend silently on that core fix. */
   if (!locals.cbInstalled) {
     locals.cbInstalled = 1;
     i8085_set_SID_callback(rfranco_sid_r);
@@ -640,8 +649,9 @@ static READ_HANDLER(rfranco_scpu_t1_r) {
 }
 
 static WRITE_HANDLER(rfranco_scpu_p1_w) {
-  locals.scpuP1 = data;
-  /* P1 does NOT carry BDIR/BC1 - those come from IC17 (7400) fed by /WR35,
+  /* Nothing to latch: no output of P1 reaches anything this driver models, so
+     the value was write-only state and is not kept.
+     P1 does NOT carry BDIR/BC1 - those come from IC17 (7400) fed by /WR35,
      /RD35 and ALE, which is why a single MOVX both latches the AY register
      number and writes it. P1 drives the 74S138 (IC8) and the 7438 (IC15)
      display strobe gates; P1.6 is an independent latched output toggled only
@@ -815,8 +825,19 @@ static int rfranco_m2sw(int col, int row) { return col * 10 + row + 1; }
    reports. Without this the base machine driver's sequential numbering would
    apply and column 0 - the whole IC1 group - would land on lamp numbers 0 and
    below, unreachable through vp_getLamp. */
+/* The two directions do NOT take the column the same way, which is core.c's
+   convention rather than this driver's choice. lamp2m carries a +8 that
+   vp_getLamp cancels with its own -8 (vpintf.c:34), and m2lamp is called with a
+   ONE-BASED column (vpintf.c:74 and :96 pass ii+1), so it has to subtract that
+   1 back off - exactly as gts80.c:127 does. Without the -1 the change list a
+   VPX table reads reports every lamp a column high: matrix column 0, the IC1
+   FASE A group documented as lamps 1-8, came back as 11-18, and column 7 came
+   back as 81-88, numbers this machine does not have.
+   Note core.c's own round-trip assert (core.c:2469) passes a ZERO-based column,
+   so it disagrees with vpintf about the convention. It never fires here because
+   hw.lampCol is 0, and it is not this driver's to fix. */
 static int rfranco_lamp2m(int no) { return (no / 10) * 8 + (no % 10) + 7; }
-static int rfranco_m2lamp(int col, int row) { return col * 10 + row + 1; }
+static int rfranco_m2lamp(int col, int row) { return (col - 1) * 10 + row + 1; }
 
 static SWITCH_UPDATE(RFRANCO) {
   UINT8 v = 0, mask = 0;
@@ -994,6 +1015,11 @@ void rfranco_unscramble_sound_rom(void) {
    was never reached. Resetting into an operator menu did nothing at all. */
 static MACHINE_RESET(RFRANCO) {
   memset(&locals, 0, sizeof locals);
+  /* The 8035 resets its ports high (i8039_reset sets P2 = 0xff), so start there
+     rather than at 0: a zeroed P2 reads as "latch selected" and gives the P2.4
+     edge detector a state the chip was never in. Harmless with this ROM - 0x0A5
+     writes P2 before the first MOVX - but only by luck. */
+  locals.scpuP2 = 0xff;
   locals.ballInTrough = 1;      /* a ball rests in the outhole at power up */
   locals.troughEdge = 1;        /* ... and the ROM has to be told so, unless the
                                    front end owns the trough - see
@@ -1022,7 +1048,11 @@ MACHINE_DRIVER_START(RFRANCO)
 
   MDRV_INTERLEAVE(500)
   MDRV_CORE_INIT_RESET_STOP(NULL, RFRANCO, NULL)
-  MDRV_DIPS(16)
+  MDRV_DIPS(2)                  /* the two operator door switches, and nothing
+                                   else. 16 was declared before; behaviourally
+                                   identical, since every use of coreDips is
+                                   (coreDips+31)/16 and both give two inports,
+                                   but 2 is what the machine has. */
   MDRV_NVRAM_HANDLER(generic_0fill)
   MDRV_SWITCH_UPDATE(RFRANCO)
   MDRV_SWITCH_CONV(rfranco_sw2m, rfranco_m2sw)
