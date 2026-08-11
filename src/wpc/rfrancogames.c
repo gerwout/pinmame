@@ -35,12 +35,24 @@
    32/33 credits tens/units. Row and column positions are cosmetic, taken from
    the component placement drawing. There is no ball-in-play display on this
    board - 4x7 score digits plus 2 credit digits is exactly 30. */
+/* `left` is in HALF-digit columns: core.c:1462 halves the position while
+   core.c:1525 advances a whole cols+1 per digit, so a 7-digit score occupies 14
+   columns, not 7 - and a 2-digit credit display occupies 4.
+
+   The right-hand group used to sit at 18, which is correct for the 8-digit
+   layouts this was adapted from but leaves only columns 14-17 free, and credits
+   was placed at 15 as if digits were one column wide. Its second digit landed on
+   player 4's first, and player 4 - drawn later - erased the overlapping strokes.
+
+   Moving the right-hand group out to 20 opens a six-column gap and lets credits
+   sit at 15 with clear air on both sides, which is what the machine looks like:
+   the credits are a separate two-digit display, not part of a score. */
 static core_tLCDLayout rfrancoDisp[] = {
   { 0, 0,  0, 7, CORE_SEG7},   /* player 1  - top left     */
-  { 0,18, 16, 7, CORE_SEG7},   /* player 3  - top right    */
+  { 0,20, 16, 7, CORE_SEG7},   /* player 3  - top right    */
   { 3, 0,  8, 7, CORE_SEG7},   /* player 2  - bottom left  */
   { 3,15, 32, 2, CORE_SEG7},   /* credits   - centre       */
-  { 3,18, 24, 7, CORE_SEG7},   /* player 4  - bottom right */
+  { 3,20, 24, 7, CORE_SEG7},   /* player 4  - bottom right */
   {0}
 };
 

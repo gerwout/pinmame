@@ -26,7 +26,12 @@
        is the only route a coin can reach the game. */ \
     COREPORT_BITDEF(  0x0010, IPT_COIN1,   IP_KEY_DEFAULT) \
     COREPORT_BITDEF(  0x0020, IPT_COIN2,   KEYCODE_3) \
-    COREPORT_BIT(     0x0040, "Drain (caida de bolas)", KEYCODE_HOME) \
+    /* Not KEYCODE_HOME: that is Slam Tilt in some 35 other drivers, and a drain
+       key is unique to this driver anyway (no other PinMAME game has one - they
+       expect the outhole to be toggled as an ordinary matrix switch). BACKSPACE
+       is used by no driver and bound to no MAME UI function, so it carries no
+       expectation to contradict. */ \
+    COREPORT_BIT(     0x0040, "Drain (caida de bolas)", KEYCODE_BACKSPACE) \
     COREPORT_BITDEF(  0x0080, IPT_START1,  IP_KEY_DEFAULT) \
     COREPORT_BIT(     0x0100, "Falta (Tilt)",   KEYCODE_INSERT) \
   PORT_START /* 1 */ \
