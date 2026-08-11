@@ -161,10 +161,50 @@
    of them keeps every guard bound to the byte that armed it. */
 #define RFRANCO_SOUND_TRIGGER 1701
 #define RFRANCO_SOUND_TRIGGERS 32
-/* Long enough that it never fires while the sound CPU is merely busy (one byte
-   takes about 65us of 8035 time) and short enough that a sound CPU which is
-   never going to answer does not wedge the machine. */
-#define RFRANCO_SOUND_GUARD_US 1000
+/* Derived bound, not a tuned number.  The guard races the 8035's INT-to-read
+   latency: the external interrupt is taken at the first instruction boundary
+   with no interrupt in progress and EN I in effect, and the handler reaches
+   its MOVX read of the latch (sound ROM 0x02B) 12 machine cycles later.  The
+   longest the ROM can run with that recognition blocked is one timer-ISR pass
+   of the three-voice player at a chord boundary where all three voice
+   countdowns expire in the same tick and voice A also consumes the envelope
+   re-arm event - four event-pair fetches plus three full note programmings,
+   tune 0x7CA (commands 0x01/0xB0).  With the ISR entry that is 468 machine
+   cycles at 5.92us each = 2770us, computed by cycle-accurate emulation of the
+   sound ROM over every command's complete run.  Runners-up: 0x11 = 2243us,
+   0x00 = 2089us; every non-tune path is <= 953us (command dispatched inside
+   the timer ISR's tune-end path), and a polled 0xDD frame byte is taken every
+   12 cycles = 71us.  Verified against this driver live: 238k traced
+   handshakes match the computed paths within 3 cycles (max observed 971us, on
+   the 953us path), and the 0x00 tune's boundary pass measures 339 traced
+   cycles of blocked execution - 341 with the untraced vector, exactly the
+   computed figure.  Guard = 2770us x 1.44 margin ~= 4000us; the margin covers
+   the interleave quantum (~33us/slice) plus model error measured at <=3
+   cycles.
+
+   Upper limit: the trigger numbers rotate through RFRANCO_SOUND_TRIGGERS = 32
+   and cpu_triggertime cannot be cancelled, so every guard fires ~guard after
+   its byte no matter what; it must no longer be pending when its number is
+   reused 32 writes later, or it would release a live stall.  The longest
+   burst the ROM produces is 23 writes (0xDD + 20 frame bytes + 0xAA + 0x99,
+   once per TRAP pass, spanning ~2ms), so 32 consecutive writes always
+   straddle at least one full 10ms TRAP period and the guard is safe below
+   ~8ms.  (The naive per-byte form of that invariant, 32 x 71us = 2.3ms, is
+   not the binding one - bursts are capped by the protocol, not by the byte
+   time.)  It must also stay far below the 50ms that was measured to distort
+   game timing when the sound CPU never answers.  4000us satisfies both with
+   >= 2x headroom.
+
+   The old value, 1000us, was empirical and sat inside the 0x00/0x01/0x11/
+   0xB0 chord windows.  Tracing showed why it got away with it: the TRAP-burst
+   commands are phase-locked away from the long passes (a timer tick pending
+   during the burst's in-ISR chain is postponed past it, and the reload inside
+   the ISR drags the tick phase with it every frame), and on the 0x196C path a
+   prematurely released 8085 still HALTs for the RST5.5 reply before writing
+   again.  Neither mechanism protects the main-loop bare STA sends, which were
+   measured landing inside blocked passes, so the computed bound above is the
+   one that holds. */
+#define RFRANCO_SOUND_GUARD_US 4000
 
 /* Pseudo solenoids. The two bumpers and the two expulsores have no CPU
    connection at all: board 53/3311 ("CONTROL BUMPER Y EXPULSOR") fires each
@@ -1046,7 +1086,24 @@ MACHINE_DRIVER_START(RFRANCO)
   MDRV_CPU_MEMORY(rfranco_scpu_readmem, rfranco_scpu_writemem)
   MDRV_CPU_PORTS(rfranco_scpu_readport, rfranco_scpu_writeport)
 
-  MDRV_INTERLEAVE(500)
+  /* Retested empirically after the 8212 READY handshake was modelled (the old
+     500 predates it, from when raw interleave was all that kept the two CPUs
+     in step for the latch protocol).  Ladder tried, one rebuild per rung,
+     rfranco_check/rfranco_game/rfranco_sound on both sets from cold NVRAM:
+     500, 250, 150, 100, 50, 20, 10, 5, 1.  1-20 wedge both sets at the
+     power-on handshake (the READY trigger only covers the per-byte stall in
+     rfranco_sound_w, boot is still interleave-carried); at 50 supstarfa's
+     TRAP handler enters ~4x more often than it completes and never settles;
+     at 100 rfranco_game's end-of-ball bonus attribution fails on supstarf
+     (same total score, a stimulus-phase effect of the machine speed, but a
+     harness failure all the same).  150 and 250 pass every harness
+     repeatedly, sound byte protocol intact.  250 = lowest fully passing rung
+     x 1.7 and 5x the highest rfranco_check failure; headless it buys ~1.6x
+     emulated throughput and ~35% less host CPU per emulated second than 500.
+     The slice quantum at 250 is ~67us, far inside the sound guard's 1230us
+     margin - see RFRANCO_SOUND_GUARD_US.  Details: docs/driver-notes.md
+     (superstar repo) §7.3. */
+  MDRV_INTERLEAVE(250)
   MDRV_CORE_INIT_RESET_STOP(NULL, RFRANCO, NULL)
   MDRV_DIPS(2)                  /* the two operator door switches, and nothing
                                    else. 16 was declared before; behaviourally

@@ -1038,6 +1038,25 @@ static void handle_api_input(const http_request_t *req, http_response_t *resp)
 		respond_error(resp, 503, "core not initialized");
 }
 
+/* Read or set g_fHandleMechanics, the flag a front end uses to take ownership
+ * of driver-modelled mechanics (VPinMAME exposes it as
+ * Controller.HandleMechanics; libpinmame defaults it to 0). The standalone
+ * build pins it at 0xff and offers no way to change it, which left the
+ * front-end-owned code paths untestable from the harnesses - e.g. the
+ * rfranco trough handover, which hands switch 27 to the front end when the
+ * flag is 0. GET without val reports the current value.                     */
+static void handle_api_mechanics(const http_request_t *req, http_response_t *resp)
+{
+	extern int g_fHandleMechanics;
+	char val_buf[32];
+	char out[64];
+	get_query_param(req->query, "val", val_buf, (int)sizeof(val_buf));
+	if (val_buf[0])
+		g_fHandleMechanics = parse_int(val_buf);
+	snprintf(out, sizeof(out), "{\"handleMechanics\": %d}", g_fHandleMechanics);
+	respond_json(resp, 200, out);
+}
+
 static void handle_api_switches(const http_request_t *req, http_response_t *resp)
 {
 	char *body = NULL;
@@ -1467,6 +1486,8 @@ static const api_route_t api_routes[] = {
 	 "DMD frame recorder; ?cmd=start|stop|clear | status"},
 	{"/api/debugger/dmdrec/data", handle_api_debugger_dmdrec_data,
 	 "packed binary of recorded DMD frames (u32 count,w,h; per frame u32 t + w*h bytes)"},
+	{"/api/mechanics", handle_api_mechanics,
+	 "?val=N - set g_fHandleMechanics (0 = front end owns the mechanics); no val = read"},
 	{"/api/input", handle_api_input,
 	 "?sw=N&val=0|1[&pulse=MS] - set a switch, optionally as a timed pulse"},
 	{"/ui", handle_ui, "the web UI"},
