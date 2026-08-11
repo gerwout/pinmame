@@ -670,6 +670,32 @@ struct AY8910interface RFRANCO_ay8910Int = {
   { 0, 0 }, { 0, 0 },
 };
 
+/*-------------------------------------------------------------
+/  Who owns the ball: the driver, or the front end's own physics
+/--------------------------------------------------------------*/
+/* CAIDA DE BOLAS is an ordinary trough contact - manual contact 28, connector
+   JO3, debounced on the driver board like any other input. The machine senses a
+   ball in the outhole exactly the way every other pinball does, and the driver
+   does not model the *sensing*. What it models is the ball MOVEMENT that opens
+   and closes the contact, because standalone PinMAME has no ball: the kicker
+   firing stands in for "the ball left" and the DRAIN key for "the ball came
+   back".
+
+   That is mechanical simulation, and PinMAME's convention is that a front end
+   which owns the mechanics owns it. VPinMAME exposes the choice to the table as
+   Controller.HandleMechanics, libpinmame defaults it to 0, and core.c gates the
+   generic mech handler on the same flag (core.c:1783). With it off, a Visual
+   Pinball table drives switch 27 from its own ball physics - ball rolls into
+   the trough, table closes the contact; kicker fires, table opens it - and the
+   driver must keep its hands off, or the two fight over the same bit.
+
+   The standalone build defaults the flag to 0xff, so keyboard play is
+   unaffected. */
+static int rfranco_ownsBall(void) {
+  extern int g_fHandleMechanics;
+  return g_fHandleMechanics != 0;
+}
+
 /*-----------
 /  Interrupts
 /------------*/
@@ -697,8 +723,10 @@ static INTERRUPT_GEN(rfranco_trap) {
      ball is out of the trough, so the contact opens - and it stays open until
      the player drains, which is the DRAIN key since there is no ball model.
      Without this the trough reads "ball present" for ever and the game ends
-     every ball the instant it starts one (0x0A2C -> 0x1121). */
-  if (locals.solAcc & (1u << 9)) {
+     every ball the instant it starts one (0x0A2C -> 0x1121).
+
+     Only when the mechanics are ours - see rfranco_ownsBall. */
+  if (rfranco_ownsBall() && (locals.solAcc & (1u << 9))) {
     locals.ballInTrough = 0;
     locals.troughEdge = 1;
   }
@@ -855,11 +883,20 @@ static SWITCH_UPDATE(RFRANCO) {
      rfranco_trap) and the DRAIN key refills it, which is what ends the ball.
      Only those two physical events drive the contact - the state is not
      reasserted every frame - so a front end that owns the contact itself keeps
-     control of it in between. */
+     control of it in between.
+
+     And when the front end owns the mechanics outright (rfranco_ownsBall), the
+     driver does not drive the contact at all: the table's ball physics do, and
+     an empty trough at game start is then a real "no ball" condition that the
+     ROM handles on its own by waiting at 0x030F/0x0331. */
   if (locals.troughEdge) {
-    locals.troughEdge = 0;
-    if (locals.ballInTrough) v |= 0x40;
-    mask |= 0x40;
+    locals.troughEdge = 0;      /* consumed either way, so that a table which
+                                   turns HandleMechanics back on mid-run does not
+                                   inherit a stale edge from before */
+    if (rfranco_ownsBall()) {
+      if (locals.ballInTrough) v |= 0x40;
+      mask |= 0x40;
+    }
   }
 
   if (mask) CORE_SETKEYSW(v, mask, 2);
@@ -958,7 +995,9 @@ void rfranco_unscramble_sound_rom(void) {
 static MACHINE_RESET(RFRANCO) {
   memset(&locals, 0, sizeof locals);
   locals.ballInTrough = 1;      /* a ball rests in the outhole at power up */
-  locals.troughEdge = 1;        /* ... and the ROM has to be told so */
+  locals.troughEdge = 1;        /* ... and the ROM has to be told so, unless the
+                                   front end owns the trough - see
+                                   rfranco_ownsBall, which gates the commit */
   /* RIM must sample SID at the instant it executes, because the switch data is
      being clocked in a bit at a time - a value pushed in ahead of time would be
      stale. */
