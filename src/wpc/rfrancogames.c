@@ -66,8 +66,9 @@ RFRANCO_ROMSTART(supstarf,
 RFRANCO_ROMEND
 CORE_GAMEDEFNV(supstarf, "Super Star", 1986, "Recreativos Franco (Spain)", gl_mRFRANCO, 0)
 
-/* Set 2 is the newer firmware of the two despite the naming, which follows
-   MAME's set ordering. It extends the operator menu from 9 adjustment zones to
+/* Rev. 2 - the newer firmware, and named so: it is a true revision, not a
+   variant, carrying real fixes (the sender's HLT wake race replaced by a
+   bounded spin, the stuck-contact watchdog) on top of rev. 1. It extends the operator menu from 9 adjustment zones to
    25. Its sound ROM is the same 2532 image: the dump taken alongside this game
    ROM had data line D5 stuck high, and clearing that bit reproduces the good
    dump exactly across all 4096 bytes, so the physical part held this content.
@@ -77,4 +78,4 @@ RFRANCO_ROMSTART(supstarfa,
   "27c128.ic19", CRC(9a440461) SHA1(e2f8dcf95084f755d3a34d77ba2649602687a610),
   "2532.ic4",    CRC(d6d7eee2) SHA1(60e497c8845320eea01662d894d0b16349ebb7e4))
 RFRANCO_ROMEND
-CORE_CLONEDEFNV(supstarfa, supstarf, "Super Star (set 2)", 1986, "Recreativos Franco (Spain)", gl_mRFRANCO, 0)
+CORE_CLONEDEFNV(supstarfa, supstarf, "Super Star (rev. 2)", 1986, "Recreativos Franco (Spain)", gl_mRFRANCO, 0)
