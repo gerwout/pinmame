@@ -5,6 +5,7 @@
 #include "cpu/i86/i88intf.h"
 #include "cpu/i8051/i8051.h"
 #include "machine/i8256.h"
+#include "machine/i8155.h"
 
 
 /* Phase 0 tracing: set to 1 to log every I/O access with its decoded meaning. */
@@ -12,6 +13,8 @@
 
 static struct {
   UINT8 state;
+  int   lampCol;        /* IC20 PA4-6 -> IC29 (7445) -> lamp columns LC0-LC7 */
+  int   swCol;          /* IC20 PA0-3 -> IC30 (7445) -> switch columns CC0-CC9 */
   /*-- phase 0 instrumentation state --*/
   int   muart8086;      /* 8256 CMD1 bit 1: 0 = 8085 mode (reg = A0..A3),
                            1 = 8086 mode (reg = A1..A4, A0 = second chip select) */
@@ -31,6 +34,7 @@ static struct {
 /  Identical consecutive lines are collapsed, otherwise the watchdog kick
 /  (a single XOR on MUART P1.4) buries everything else.
 /-------------------------------------------------------------------------*/
+#if CIRSA_VERBOSE
 static void iolog(const char *msg) {
   if (!strcmp(msg, locals.lastline)) { locals.lastrep++; return; }
   if (locals.lastrep) {
@@ -101,6 +105,8 @@ static void muart_decode(char *buf, int reg, int data) {
   }
 }
 
+#endif  /* CIRSA_VERBOSE */
+
 static WRITE_HANDLER(ic4_w) {
 #if CIRSA_VERBOSE
   char msg[192], dec[128];
@@ -138,6 +144,7 @@ static READ_HANDLER(ic4_r) {
   return val;
 }
 
+#if CIRSA_VERBOSE
 static const char *i8155_regname(int reg) {
   static const char * const n[8] = {
     "CMD/STATUS", "PA", "PB", "PC", "TIMER_LO", "TIMER_HI", "reg6", "reg7" };
@@ -169,30 +176,64 @@ static void log8155(const char *chip, int rw, int offset, int data) {
   iolog(msg);
 }
 
-static WRITE_HANDLER(ic20_w) { log8155("IC20", 1, offset, data); }
-static READ_HANDLER (ic20_r) { log8155("IC20", 0, offset, 0); return 0; }
-static WRITE_HANDLER(ic9_w)  { log8155("IC9",  1, offset, data); }
-static READ_HANDLER (ic9_r)  { log8155("IC9",  0, offset, 0); return 0; }
+#endif  /* CIRSA_VERBOSE */
 
+#define I8155_IC9   0
+#define I8155_IC20  1
+
+static WRITE_HANDLER(ic20_w) {
+#if CIRSA_VERBOSE
+  log8155("IC20", 1, offset, data);
+#endif
+  i8155_w(I8155_IC20, offset, data);
+}
+static READ_HANDLER(ic20_r) {
+  UINT8 val = i8155_r(I8155_IC20, offset);
+#if CIRSA_VERBOSE
+  log8155("IC20", 0, offset, val);
+#endif
+  return val;
+}
+static WRITE_HANDLER(ic9_w) {
+#if CIRSA_VERBOSE
+  log8155("IC9", 1, offset, data);
+#endif
+  i8155_w(I8155_IC9, offset, data);
+}
+static READ_HANDLER(ic9_r) {
+  UINT8 val = i8155_r(I8155_IC9, offset);
+#if CIRSA_VERBOSE
+  log8155("IC9", 0, offset, val);
+#endif
+  return val;
+}
+
+/* Display data on its way to the 4094 chain -- decoded in the next phase. */
 static WRITE_HANDLER(shift_w) {
+#if CIRSA_VERBOSE
   char msg[192];
   sprintf(msg, "SHIFT W off=%x = %02x  PC=%05x\n", offset, data, activecpu_get_pc());
   iolog(msg);
+#endif
 }
 
-/* The ROM only ever *reads* this address (74LS165 parallel load / serial read);
-   it was mapped write-only, so the read fell through to unmapped. */
+/* Read side of the same address (74LS165 parallel load).  The ROM has one
+   such read at 0x6A88, on a path it does not currently take. */
 static READ_HANDLER(shift_r) {
+#if CIRSA_VERBOSE
   char msg[192];
   sprintf(msg, "SHIFT R off=%x  (74LS165)  PC=%05x\n", offset, activecpu_get_pc());
   iolog(msg);
+#endif
   return 0;
 }
 
 static WRITE_HANDLER(diag_w) {
+#if CIRSA_VERBOSE
   char msg[192];
   sprintf(msg, "DIAG W off=%x = %02x  PC=%05x\n", offset, data, activecpu_get_pc());
   iolog(msg);
+#endif
 }
 
 static MEMORY_WRITE_START(mephisto_writemem)
@@ -281,9 +322,52 @@ static const I8256interface cirsa_i8256 = {
   NULL
 };
 
+/*-- IC20: the lamp and switch matrices (plate 6) ------------------------
+/  PA0-3 select a switch column through IC30 (7445), PA4-6 select a lamp
+/  column through IC29 (7445), and PA7 strobes the WD LUCES lamp watchdog.
+/  PB drives the lamp rows through IC32 (UDN6118-A).  PC reads the switch
+/  rows back through two stages of 74HC14 off pulled-up lines, so a closed
+/  switch reads as 0.
+/----------------------------------------------------------------------*/
+static WRITE_HANDLER(ic20_pa_w) {
+  int col = (data >> 4) & 0x07;
+  /* The lamp columns are strobed 0..7 in order and each one is blanked
+     again before the next is selected, so accumulate a whole sweep and
+     latch it when the sweep wraps.  Latching on the video frame instead
+     chops the sweep and drops whichever columns straddle the boundary. */
+  if (col == 0 && locals.lampCol != 0) {
+    memcpy((void *)coreGlobals.lampMatrix, (void *)coreGlobals.tmpLampMatrix,
+           sizeof(coreGlobals.tmpLampMatrix));
+    memset((void *)coreGlobals.tmpLampMatrix, 0, sizeof(coreGlobals.tmpLampMatrix));
+  }
+  locals.swCol   = data & 0x0f;
+  locals.lampCol = col;
+}
+
+static WRITE_HANDLER(ic20_pb_w) {
+  core_setLamp(coreGlobals.tmpLampMatrix, 1 << locals.lampCol, data);
+}
+
+static READ_HANDLER(ic20_pc_r) {
+  if (locals.swCol > 9) return 0x3f;
+  return ~coreGlobals.swMatrix[locals.swCol + 1] & 0x3f;
+}
+
+/*-- IC9: general I/O.  PB reads the B0-B7 bus that also feeds the quick
+/  contact comparators and PC5 strobes the IC11 (74LS373) latch that
+/  snapshots it.  Nothing is connected until the playfield is.
+/----------------------------------------------------------------------*/
+static i8155_interface cirsa_i8155 = {
+  2,                              /* IC9 = chip 0, IC20 = chip 1 */
+  {0, 0}, {0, 0}, {0, ic20_pc_r},
+  {0, ic20_pa_w}, {0, ic20_pb_w}, {0, 0},
+  {0, 0}
+};
+
 static MACHINE_INIT(CIRSA) {
   memset(&locals, 0, sizeof(locals));
   i8256_init(&cirsa_i8256);
+  i8155_init(&cirsa_i8155);
   cpu_set_irq_callback(0, cirsa_irq_callback);
 }
 
@@ -400,7 +484,7 @@ static core_tLCDLayout cirsa_disp[] = {
   {6, 8,28, 2,CORE_SEG8D}, {6,14,30, 1,CORE_SEG8D}, {6,18,31, 2,CORE_SEG8D},
   {0}
 };
-static core_tGameData cirsaGameData = {0,cirsa_disp,{FLIP_SW(FLIP_L),0,8}};
+static core_tGameData cirsaGameData = {0,cirsa_disp,{FLIP_SW(FLIP_L),10,8}};
 static void init_cirsa(void) {
   core_gameData = &cirsaGameData;
 }
