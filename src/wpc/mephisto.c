@@ -4,7 +4,11 @@
 #include "core.h"
 #include "cpu/i86/i88intf.h"
 #include "cpu/i8051/i8051.h"
+#include "machine/i8256.h"
 
+
+/* Phase 0 tracing: set to 1 to log every I/O access with its decoded meaning. */
+#define CIRSA_VERBOSE 0
 
 static struct {
   UINT8 state;
@@ -98,40 +102,40 @@ static void muart_decode(char *buf, int reg, int data) {
 }
 
 static WRITE_HANDLER(ic4_w) {
+#if CIRSA_VERBOSE
   char msg[192], dec[128];
-  int reg;
-  if (locals.muart8086) {
-    if (offset & 1) {                      /* A0 must be low to select the chip */
-      sprintf(msg, "IC4  8256 W off=%02x  IGNORED (odd offset in 8086 mode)  PC=%05x\n",
-              offset, activecpu_get_pc());
-      iolog(msg); return;
-    }
-    reg = (offset >> 1) & 15;
+  int reg, mode8086 = i8256_is_8086_mode();
+  if (mode8086 && (offset & 1)) {
+    sprintf(msg, "IC4  8256 W off=%02x  IGNORED (odd offset in 8086 mode)  PC=%05x\n",
+            offset, activecpu_get_pc());
+    iolog(msg);
   } else {
-    reg = offset & 15;
+    reg = mode8086 ? ((offset >> 1) & 15) : (offset & 15);
+    muart_decode(dec, reg, data);
+    sprintf(msg, "IC4  8256 W off=%02x reg%-2d %-13s = %02x  %s%s  PC=%05x\n",
+            offset, reg, muart_regname(reg), data,
+            mode8086 ? "" : "[8085 mode] ", dec, activecpu_get_pc());
+    iolog(msg);
   }
-  muart_decode(dec, reg, data);
-  sprintf(msg, "IC4  8256 W off=%02x reg%-2d %-13s = %02x  %s%s  PC=%05x\n",
-          offset, reg, muart_regname(reg), data,
-          locals.muart8086 ? "" : "[8085 mode] ", dec, activecpu_get_pc());
-  iolog(msg);
-  /* track the addressing mode so the decode above stays honest */
-  if (reg == 0) locals.muart8086 = (data >> 1) & 1;
+#endif
+  i8256_w(offset, data);
 }
 
 static READ_HANDLER(ic4_r) {
-  char msg[192];
-  int reg;
-  if (locals.muart8086) {
-    if (offset & 1) return 0;
-    reg = (offset >> 1) & 15;
-  } else {
-    reg = offset & 15;
+  int val = i8256_r(offset);
+#if CIRSA_VERBOSE
+  {
+    char msg[192];
+    int mode8086 = i8256_is_8086_mode();
+    int reg = mode8086 ? ((offset >> 1) & 15) : (offset & 15);
+    if (!(mode8086 && (offset & 1))) {
+      sprintf(msg, "IC4  8256 R off=%02x reg%-2d %-13s -> %02x  PC=%05x\n",
+              offset, reg, muart_regname(reg), val, activecpu_get_pc());
+      iolog(msg);
+    }
   }
-  sprintf(msg, "IC4  8256 R off=%02x reg%-2d %-13s  PC=%05x\n",
-          offset, reg, muart_regname(reg), activecpu_get_pc());
-  iolog(msg);
-  return 0;
+#endif
+  return val;
 }
 
 static const char *i8155_regname(int reg) {
@@ -237,8 +241,50 @@ static MEMORY_READ_START(cirsa_readmem)
   {0xf8000,0xfffff, MRA_ROM},
 MEMORY_END
 
+/*-- 8256 MUART wiring --*/
+static void cirsa_muart_int(int state) {
+  cpu_set_irq_line(0, 0, state ? ASSERT_LINE : CLEAR_LINE);
+}
+
+/* The MUART answers the acknowledge cycle with its own vector (40H + level in
+   8086 mode), which is why the whole machine is dead without it: the ROM's
+   interrupt table only has real handlers at types 40H..47H. */
+static int cirsa_irq_callback(int irqline) {
+  return i8256_inta();
+}
+
+static UINT8 cirsa_p1_in(void) {
+  /* Port 1 inputs (PORT1C = 5C leaves P10, P11, P15 and P17 as inputs):
+       P10 S.C.MAT  - the CONT contact line, inverted
+       P11 PPCERO   - mains zero crossing
+       P15          - baud generator / timer 5 trigger
+       P17 F.T.     - "falta de tension", power failure
+     P17 must rest LOW.  CMD1.BITI routes it to interrupt level 1 and the
+     datasheet is explicit that a low-to-high transition is what signals the
+     fault, so a pin stuck high reads as a permanent power failure and the
+     ROM restarts.  The real sources are connected in a later phase. */
+  return 0x00;
+}
+
+static void cirsa_p1_out(UINT8 data) {
+  /* P14 = CL-WD (watchdog kick), P12/P13/P16 not yet used */
+}
+
+static void cirsa_p2_out(UINT8 data) {
+  /* P25/P26/P27 bit-bang the 4094 display chain -- decoded in a later phase */
+}
+
+static const I8256interface cirsa_i8256 = {
+  cirsa_muart_int,
+  cirsa_p1_in, cirsa_p1_out,
+  NULL, cirsa_p2_out,
+  NULL
+};
+
 static MACHINE_INIT(CIRSA) {
   memset(&locals, 0, sizeof(locals));
+  i8256_init(&cirsa_i8256);
+  cpu_set_irq_callback(0, cirsa_irq_callback);
 }
 
 static SWITCH_UPDATE(CIRSA) {
@@ -249,10 +295,6 @@ static SWITCH_UPDATE(CIRSA) {
 
 static INTERRUPT_GEN(cirsa_vblank) {
   core_updateSw(TRUE);
-}
-
-static INTERRUPT_GEN(cirsa_irq) {
-  cpu_set_irq_line(0, 0, (locals.state = !locals.state));
 }
 
 static READ_HANDLER(ay8910_porta_r)   { return coreGlobals.swMatrix[0]; }
@@ -326,7 +368,6 @@ MACHINE_DRIVER_START(mephisto)
   MDRV_CORE_INIT_RESET_STOP(CIRSA,NULL,NULL)
   MDRV_CPU_ADD_TAG("mcpu", I88, 6000000)
   MDRV_CPU_MEMORY(mephisto_readmem, mephisto_writemem)
-  MDRV_CPU_PERIODIC_INT(cirsa_irq, 100)
   MDRV_CPU_VBLANK_INT(cirsa_vblank, 1)
   MDRV_NVRAM_HANDLER(generic_0fill)
   MDRV_SWITCH_UPDATE(CIRSA)
