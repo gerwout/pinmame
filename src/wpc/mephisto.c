@@ -17,6 +17,7 @@ static struct {
   int   swCol;          /* IC20 PA0-3 -> IC30 (7445) -> switch columns CC0-CC9 */
   UINT8 shiftFrame[8];  /* one 64 bit pass through the 4094 display chain */
   int   shiftPos;
+  UINT8 lastKeys;       /* previous cabinet key state, for edge-only updates */
   /*-- phase 0 instrumentation state --*/
   int   muart8086;      /* 8256 CMD1 bit 1: 0 = 8085 mode (reg = A0..A3),
                            1 = 8086 mode (reg = A1..A4, A0 = second chip select) */
@@ -352,17 +353,31 @@ static void cirsa_p1_out(UINT8 data) {
   /* P14 = CL-WD (watchdog kick), P12/P13/P16 not yet used */
 }
 
+/*-- MUART Port 2 (plate 5) ---------------------------------------------
+/  P20 EG1, P21 EG2, P22 TEST, P23 AVANCE are inputs, buffered through
+/  74HC240s from J4.2 and J6 with 10K pull-ups, so a pressed button reads
+/  as 1.  P24 RST ASIN (sound board reset), P25 INH LF, P26 INH FLIP and
+/  P27 INH L.C. are outputs -- these are the bits the ROM sets and clears
+/  around 0x0A29, not display strobes as first assumed.
+/----------------------------------------------------------------------*/
 static void cirsa_p2_out(UINT8 data) {
-  /* P2.5/6/7 carry OE and the display strobe lines.  They change only a
-     couple of times over a whole run, so the 4094 chain is latched by the
-     hardware once a frame has been clocked through rather than by software
-     toggling a strobe -- see cirsa_shift_frame(). */
+  /* RST ASIN and the three inhibit lines; nothing consumes them yet. */
+}
+
+static UINT8 cirsa_p2_in(void) {
+  UINT8 ded = coreGlobals.swMatrix[0];
+  UINT8 v = 0;
+  if (ded & 0x01) v |= 0x04;      /* TEST    -> P22 */
+  if (ded & 0x02) v |= 0x08;      /* AVANCE  -> P23 */
+  if (ded & 0x04) v |= 0x01;      /* EG1     -> P20 */
+  if (ded & 0x08) v |= 0x02;      /* EG2     -> P21 */
+  return v;
 }
 
 static const I8256interface cirsa_i8256 = {
   cirsa_muart_int,
   cirsa_p1_in, cirsa_p1_out,
-  NULL, cirsa_p2_out,
+  cirsa_p2_in, cirsa_p2_out,
   NULL
 };
 
@@ -416,8 +431,18 @@ static MACHINE_INIT(CIRSA) {
 }
 
 static SWITCH_UPDATE(CIRSA) {
+  /* Write a cabinet bit only when the key behind it has actually changed.
+     Rewriting the whole row every frame stamps out anything else that set
+     one of these switches -- a front end, or the remote debugger -- before
+     the ROM has had a chance to poll it.  Same reasoning as rfranco.c. */
   if (inports) {
-    CORE_SETKEYSW(inports[CORE_COREINPORT]>>8, 0x01, 0);
+    UINT8 keys    = (UINT8)((inports[CORE_COREINPORT] >> 8) & 0x0f);
+    UINT8 changed = (UINT8)(keys ^ locals.lastKeys);
+    if (changed) {
+      coreGlobals.swMatrix[0] = (UINT8)((coreGlobals.swMatrix[0] & ~changed) |
+                                        (keys & changed));
+      locals.lastKeys = keys;
+    }
   }
 }
 
@@ -519,7 +544,10 @@ INPUT_PORTS_START(cirsa)
   CORE_PORTS
   SIM_PORTS(1)
   PORT_START /* 0 */
-    COREPORT_BIT(     0x0100, "Test", KEYCODE_0)
+    COREPORT_BIT(     0x0100, "Test",    KEYCODE_7)
+    COREPORT_BIT(     0x0200, "Advance", KEYCODE_8)
+    COREPORT_BIT(     0x0400, "EG1",     KEYCODE_9)
+    COREPORT_BIT(     0x0800, "EG2",     KEYCODE_0)
 INPUT_PORTS_END
 
 static core_tLCDLayout cirsa_disp[] = {
