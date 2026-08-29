@@ -18,6 +18,7 @@ static struct {
   UINT8 shiftFrame[8];  /* one 64 bit pass through the 4094 display chain */
   int   shiftPos;
   UINT8 lastKeys;       /* previous cabinet key state, for edge-only updates */
+  int   keysSeeded;     /* cabinet row sampled once at power-on */
   /*-- phase 0 instrumentation state --*/
   int   muart8086;      /* 8256 CMD1 bit 1: 0 = 8085 mode (reg = A0..A3),
                            1 = 8086 mode (reg = A1..A4, A0 = second chip select) */
@@ -425,6 +426,19 @@ static i8155_interface cirsa_i8155 = {
 
 static MACHINE_INIT(CIRSA) {
   memset(&locals, 0, sizeof(locals));
+
+  /* A cabinet button physically held at power-on is already down when the
+     ROM first reads MUART port 2, a few hundred instructions into the boot
+     -- that is how the real machine enters its test mode.  The core clears
+     swMatrix at reset, so sample the inputs here rather than waiting for
+     the first core_updateSw, which arrives a whole frame too late. */
+  {
+    UINT8 keys = (UINT8)((readinputport(CORE_COREINPORT) >> 8) & 0x0f);
+    coreGlobals.swMatrix[0] = (UINT8)((coreGlobals.swMatrix[0] & ~0x0f) | keys);
+    locals.lastKeys   = keys;
+    locals.keysSeeded = 1;
+  }
+
   i8256_init(&cirsa_i8256);
   i8155_init(&cirsa_i8155);
   cpu_set_irq_callback(0, cirsa_irq_callback);
@@ -438,6 +452,7 @@ static SWITCH_UPDATE(CIRSA) {
   if (inports) {
     UINT8 keys    = (UINT8)((inports[CORE_COREINPORT] >> 8) & 0x0f);
     UINT8 changed = (UINT8)(keys ^ locals.lastKeys);
+    if (!locals.keysSeeded) { locals.lastKeys = keys; locals.keysSeeded = 1; return; }
     if (changed) {
       coreGlobals.swMatrix[0] = (UINT8)((coreGlobals.swMatrix[0] & ~changed) |
                                         (keys & changed));
