@@ -1038,6 +1038,46 @@ static void handle_api_input(const http_request_t *req, http_response_t *resp)
 		respond_error(resp, 503, "core not initialized");
 }
 
+/* Force bits high/low in a raw input port's value, e.g. to hold a
+ * dedicated cabinet button (ADVANCE, TEST) at runtime the same way
+ * -holdport presents one from power-on. */
+static void handle_api_input_port(const http_request_t *req, http_response_t *resp)
+{
+	char port_buf[32], val_buf[32];
+	int port;
+	get_query_param(req->query, "port", port_buf, (int)sizeof(port_buf));
+	get_query_param(req->query, "val", val_buf, (int)sizeof(val_buf));
+	if (!port_buf[0] || !val_buf[0]) {
+		respond_error(resp, 400, "missing parameters: port, val");
+		return;
+	}
+	port = parse_int(port_buf);
+	if (remote_debug_set_input_port_force(port, (int)parse_hex(val_buf)) == 0)
+		respond_ok(resp);
+	else
+		respond_error(resp, 400, "port out of range");
+}
+
+/* Write a switch-matrix column directly, bypassing core_setSw/sw2m, so a
+ * dedicated switch column outside the scanned matrix (e.g. col 0, the
+ * cabinet row) can be set from the API. */
+static void handle_api_input_matrix(const http_request_t *req, http_response_t *resp)
+{
+	char col_buf[32], val_buf[32];
+	int col;
+	get_query_param(req->query, "col", col_buf, (int)sizeof(col_buf));
+	get_query_param(req->query, "val", val_buf, (int)sizeof(val_buf));
+	if (!col_buf[0] || !val_buf[0]) {
+		respond_error(resp, 400, "missing parameters: col, val");
+		return;
+	}
+	col = parse_int(col_buf);
+	if (remote_debug_set_matrix_col(col, (int)parse_hex(val_buf)) == 0)
+		respond_ok(resp);
+	else
+		respond_error(resp, 503, "core not initialized, or col out of range");
+}
+
 /* Read or set g_fHandleMechanics, the flag a front end uses to take ownership
  * of driver-modelled mechanics (VPinMAME exposes it as
  * Controller.HandleMechanics; libpinmame defaults it to 0). The standalone
@@ -1490,6 +1530,10 @@ static const api_route_t api_routes[] = {
 	 "?val=N - set g_fHandleMechanics (0 = front end owns the mechanics); no val = read"},
 	{"/api/input", handle_api_input,
 	 "?sw=N&val=0|1[&pulse=MS] - set a switch, optionally as a timed pulse"},
+	{"/api/input/port", handle_api_input_port,
+	 "?port=N&val=HEX - force bits high/low in a raw input port (reaches dedicated buttons like ADVANCE)"},
+	{"/api/input/matrix", handle_api_input_matrix,
+	 "?col=N&val=HEX - write a switch-matrix column directly, bypassing core_setSw/sw2m"},
 	{"/ui", handle_ui, "the web UI"},
 	{"/api/doc", handle_api_doc, "this document"},
 };
