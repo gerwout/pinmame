@@ -8,42 +8,187 @@
 
 static struct {
   UINT8 state;
+  /*-- phase 0 instrumentation state --*/
+  int   muart8086;      /* 8256 CMD1 bit 1: 0 = 8085 mode (reg = A0..A3),
+                           1 = 8086 mode (reg = A1..A4, A0 = second chip select) */
+  int   lastrep;
+  char  lastline[192];
 } locals;
 
+/*-------------------------------------------------------------------------
+/  Phase 0 instrumentation -- observation only.
+/
+/  Every handler still returns exactly what it returned before (0, which is
+/  also this core's unmapped-read value), so machine behaviour is unchanged.
+/  The point is to check the static analysis of the Sport 2000 ROM against a
+/  live trace: which registers the game really touches, in which order, and
+/  in which addressing mode.
+/
+/  Identical consecutive lines are collapsed, otherwise the watchdog kick
+/  (a single XOR on MUART P1.4) buries everything else.
+/-------------------------------------------------------------------------*/
+static void iolog(const char *msg) {
+  if (!strcmp(msg, locals.lastline)) { locals.lastrep++; return; }
+  if (locals.lastrep) {
+    logerror("        ... previous line repeated %d more time(s)\n", locals.lastrep);
+    locals.lastrep = 0;
+  }
+  strncpy(locals.lastline, msg, sizeof(locals.lastline)-1);
+  locals.lastline[sizeof(locals.lastline)-1] = '\0';
+  logerror("%s", msg);
+}
+
+static const char *muart_regname(int reg) {
+  static const char * const n[16] = {
+    "CMD1", "CMD2", "CMD3", "MODE", "PORT1C", "SETINT", "RSTINT/INTADR",
+    "BUFFER", "PORT1", "PORT2", "TIMER1", "TIMER2", "TIMER3", "TIMER4",
+    "TIMER5", "STATUS/MODIF" };
+  return n[reg & 15];
+}
+
+/* levels per the 8256AH datasheet; L1 and L3/L6/L7 depend on CMD1/MODE bits */
+static void muart_levels(char *buf, int mask) {
+  static const char * const src[8] = {
+    "L0=Tmr1", "L1=Tmr2/P17", "L2=EXTINT", "L3=Tmr3", "L4=RX", "L5=TX",
+    "L6=Tmr4", "L7=Tmr5" };
+  int i; buf[0] = '\0';
+  for (i = 0; i < 8; i++)
+    if (mask & (1 << i)) { if (buf[0]) strcat(buf, ","); strcat(buf, src[i]); }
+  if (!buf[0]) strcpy(buf, "none");
+}
+
+static void muart_decode(char *buf, int reg, int data) {
+  char tmp[128];
+  buf[0] = '\0';
+  switch (reg) {
+    case 0: /* CMD1 */
+      sprintf(buf, "FRQ=%d(%s) 8086=%d BITI=%d(L1=%s) BRKI=%d stop=%d len=%d",
+              data & 1, (data & 1) ? "1kHz" : "16kHz",
+              (data >> 1) & 1, (data >> 2) & 1,
+              ((data >> 2) & 1) ? "P17 edge" : "Timer2",
+              (data >> 3) & 1, (data >> 4) & 3, 8 - ((data >> 6) & 3));
+      break;
+    case 1: /* CMD2 */
+      sprintf(buf, "baud=%d clkdiv=%d parity=%s",
+              data & 15, (data >> 4) & 3,
+              (data & 0x80) ? ((data & 0x40) ? "even" : "odd") : "none");
+      break;
+    case 2: /* CMD3 -- set/reset register */
+      sprintf(buf, "%s:", (data & 0x80) ? "SET" : "RESET");
+      if (data & 0x40) strcat(buf, " RxE");
+      if (data & 0x20) strcat(buf, " IAE");
+      if (data & 0x10) strcat(buf, " NIE");
+      if (data & 0x08) strcat(buf, " END(EOI)");
+      if (data & 0x04) strcat(buf, " SBRK");
+      if (data & 0x02) strcat(buf, " TBRK");
+      if (data & 0x01) strcat(buf, " RST");
+      break;
+    case 3: /* MODE */
+      sprintf(buf, "T35=%d T24=%d T5C=%d CT3=%d CT2=%d P2C=%d",
+              (data >> 7) & 1, (data >> 6) & 1, (data >> 5) & 1,
+              (data >> 4) & 1, (data >> 3) & 1, data & 7);
+      break;
+    case 4: /* PORT1C -- 1 = output */
+      sprintf(buf, "P1 dir out=%02x in=%02x", data, (~data) & 0xff);
+      break;
+    case 5: muart_levels(tmp, data); sprintf(buf, "enable %s", tmp); break;
+    case 6: muart_levels(tmp, data); sprintf(buf, "disable %s", tmp); break;
+    default: break;
+  }
+}
 
 static WRITE_HANDLER(ic4_w) {
-//  logerror("Write to  IC4:  %02x:%02x\n", offset, data);
+  char msg[192], dec[128];
+  int reg;
+  if (locals.muart8086) {
+    if (offset & 1) {                      /* A0 must be low to select the chip */
+      sprintf(msg, "IC4  8256 W off=%02x  IGNORED (odd offset in 8086 mode)  PC=%05x\n",
+              offset, activecpu_get_pc());
+      iolog(msg); return;
+    }
+    reg = (offset >> 1) & 15;
+  } else {
+    reg = offset & 15;
+  }
+  muart_decode(dec, reg, data);
+  sprintf(msg, "IC4  8256 W off=%02x reg%-2d %-13s = %02x  %s%s  PC=%05x\n",
+          offset, reg, muart_regname(reg), data,
+          locals.muart8086 ? "" : "[8085 mode] ", dec, activecpu_get_pc());
+  iolog(msg);
+  /* track the addressing mode so the decode above stays honest */
+  if (reg == 0) locals.muart8086 = (data >> 1) & 1;
 }
 
 static READ_HANDLER(ic4_r) {
-//  logerror("Read from IC4:  %02x\n", offset);
+  char msg[192];
+  int reg;
+  if (locals.muart8086) {
+    if (offset & 1) return 0;
+    reg = (offset >> 1) & 15;
+  } else {
+    reg = offset & 15;
+  }
+  sprintf(msg, "IC4  8256 R off=%02x reg%-2d %-13s  PC=%05x\n",
+          offset, reg, muart_regname(reg), activecpu_get_pc());
+  iolog(msg);
   return 0;
 }
 
-static WRITE_HANDLER(ic20_w) {
-  logerror("Write to  IC20: %x:%02x\n", offset, data);
+static const char *i8155_regname(int reg) {
+  static const char * const n[8] = {
+    "CMD/STATUS", "PA", "PB", "PC", "TIMER_LO", "TIMER_HI", "reg6", "reg7" };
+  return n[reg & 7];
 }
 
-static READ_HANDLER(ic20_r) {
-  logerror("Read from IC20: %x\n", offset);
-  return 0;
+static void i8155_decode(char *buf, int reg, int data) {
+  static const char * const tm[4] = { "NOP", "STOP", "STOP-AT-TC", "START" };
+  buf[0] = '\0';
+  if (reg == 0)
+    sprintf(buf, "PA=%s PB=%s PC=ALT%d intA=%d intB=%d timer=%s",
+            (data & 1) ? "out" : "in", (data & 2) ? "out" : "in",
+            ((data >> 2) & 3) + 1, (data >> 4) & 1, (data >> 5) & 1,
+            tm[(data >> 6) & 3]);
+  else if (reg == 5)
+    sprintf(buf, "count_hi=%d mode=%d", data & 0x3f, (data >> 6) & 3);
 }
 
-static WRITE_HANDLER(ic9_w) {
-  logerror("Write to  IC9:  %x:%02x\n", offset, data);
+static void log8155(const char *chip, int rw, int offset, int data) {
+  char msg[192], dec[128];
+  int reg = offset & 7;
+  i8155_decode(dec, reg, data);
+  if (rw)
+    sprintf(msg, "%-4s 8155 W off=%x  %-10s = %02x  %s  PC=%05x\n",
+            chip, offset, i8155_regname(reg), data, dec, activecpu_get_pc());
+  else
+    sprintf(msg, "%-4s 8155 R off=%x  %-10s       PC=%05x\n",
+            chip, offset, i8155_regname(reg), activecpu_get_pc());
+  iolog(msg);
 }
 
-static READ_HANDLER(ic9_r) {
-  logerror("Read from IC9:  %x\n", offset);
-  return 0;
-}
+static WRITE_HANDLER(ic20_w) { log8155("IC20", 1, offset, data); }
+static READ_HANDLER (ic20_r) { log8155("IC20", 0, offset, 0); return 0; }
+static WRITE_HANDLER(ic9_w)  { log8155("IC9",  1, offset, data); }
+static READ_HANDLER (ic9_r)  { log8155("IC9",  0, offset, 0); return 0; }
 
 static WRITE_HANDLER(shift_w) {
-  logerror("Write to SHIFT: %02x\n", data);
+  char msg[192];
+  sprintf(msg, "SHIFT W off=%x = %02x  PC=%05x\n", offset, data, activecpu_get_pc());
+  iolog(msg);
+}
+
+/* The ROM only ever *reads* this address (74LS165 parallel load / serial read);
+   it was mapped write-only, so the read fell through to unmapped. */
+static READ_HANDLER(shift_r) {
+  char msg[192];
+  sprintf(msg, "SHIFT R off=%x  (74LS165)  PC=%05x\n", offset, activecpu_get_pc());
+  iolog(msg);
+  return 0;
 }
 
 static WRITE_HANDLER(diag_w) {
-  logerror("DIAG %x\n", offset);
+  char msg[192];
+  sprintf(msg, "DIAG W off=%x = %02x  PC=%05x\n", offset, data, activecpu_get_pc());
+  iolog(msg);
 }
 
 static MEMORY_WRITE_START(mephisto_writemem)
@@ -65,6 +210,7 @@ static MEMORY_READ_START(mephisto_readmem)
   {0x13800,0x13807, ic20_r},
   {0x14000,0x140ff, MRA_RAM},
   {0x14800,0x14807, ic9_r},
+  {0x16000,0x16000, shift_r},
   {0xf8000,0xfffff, MRA_ROM},
 MEMORY_END
 
@@ -87,6 +233,7 @@ static MEMORY_READ_START(cirsa_readmem)
   {0x2b800,0x2b807, ic20_r},
   {0x2c000,0x2c0ff, MRA_RAM},
   {0x2c800,0x2c807, ic9_r},
+  {0x2e000,0x2e000, shift_r},
   {0xf8000,0xfffff, MRA_ROM},
 MEMORY_END
 
