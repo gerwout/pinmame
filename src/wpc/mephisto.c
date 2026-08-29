@@ -15,6 +15,8 @@ static struct {
   UINT8 state;
   int   lampCol;        /* IC20 PA4-6 -> IC29 (7445) -> lamp columns LC0-LC7 */
   int   swCol;          /* IC20 PA0-3 -> IC30 (7445) -> switch columns CC0-CC9 */
+  UINT8 shiftFrame[8];  /* one 64 bit pass through the 4094 display chain */
+  int   shiftPos;
   /*-- phase 0 instrumentation state --*/
   int   muart8086;      /* 8256 CMD1 bit 1: 0 = 8085 mode (reg = A0..A3),
                            1 = 8086 mode (reg = A1..A4, A0 = second chip select) */
@@ -209,11 +211,50 @@ static READ_HANDLER(ic9_r) {
 }
 
 /* Display data on its way to the 4094 chain -- decoded in the next phase. */
+/*-- Display: the 74LS165 at 0x2E000 feeds the 4094 chain -----------------
+/  The CPU writes a byte to IC2 (74165); hardware shifts it out on QH,
+/  clocked by CLK SHT (IC9's TIMER OUT via IC13), into the daisy-chained
+/  4094s on the display board.  Plate 15 lists eight of them, and the byte
+/  stream confirms it: frames are exactly eight bytes.
+/
+/  The last byte of each frame is the digit column select -- active low,
+/  walking one bit at a time across seven columns, which matches the seven
+/  TIP116 digit drivers.  The other seven bytes are segment data.  Because
+/  the first byte shifted in travels furthest down the chain, byte 6 is the
+/  group nearest the column driver and byte 0 the one furthest away.
+/
+/  The four 7-digit player displays occupy segments 0..27 in cirsa_disp and
+/  the credit/match digits 28..32; the mapping of the last three groups onto
+/  those five digits still needs a frame where the game actually lights them.
+/----------------------------------------------------------------------*/
+static void cirsa_shift_frame(const UINT8 *f) {
+  int col, g;
+
+  for (col = 0; col < 7; col++)
+    if (!(f[7] & (1 << col))) break;
+  if (col >= 7) return;                       /* no digit column selected */
+
+  for (g = 0; g < 4; g++) {                   /* the four player displays */
+    UINT8 seg = f[6 - g];
+    coreGlobals.segments[g * 7 + col].w = seg;
+  }
+  if (col < 2) coreGlobals.segments[28 + col].w = f[2];
+  if (col < 1) coreGlobals.segments[30].w       = f[1];
+  if (col < 2) coreGlobals.segments[31 + col].w = f[0];
+}
+
 static WRITE_HANDLER(shift_w) {
+  locals.shiftFrame[locals.shiftPos++] = data;
+  if (locals.shiftPos == 8) {
+    locals.shiftPos = 0;
+    cirsa_shift_frame(locals.shiftFrame);
+  }
 #if CIRSA_VERBOSE
-  char msg[192];
-  sprintf(msg, "SHIFT W off=%x = %02x  PC=%05x\n", offset, data, activecpu_get_pc());
-  iolog(msg);
+  {
+    char msg[192];
+    sprintf(msg, "SHIFT W off=%x = %02x  PC=%05x\n", offset, data, activecpu_get_pc());
+    iolog(msg);
+  }
 #endif
 }
 
@@ -312,7 +353,10 @@ static void cirsa_p1_out(UINT8 data) {
 }
 
 static void cirsa_p2_out(UINT8 data) {
-  /* P25/P26/P27 bit-bang the 4094 display chain -- decoded in a later phase */
+  /* P2.5/6/7 carry OE and the display strobe lines.  They change only a
+     couple of times over a whole run, so the 4094 chain is latched by the
+     hardware once a frame has been clocked through rather than by software
+     toggling a strobe -- see cirsa_shift_frame(). */
 }
 
 static const I8256interface cirsa_i8256 = {
