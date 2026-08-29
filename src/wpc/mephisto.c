@@ -229,11 +229,18 @@ static READ_HANDLER(ic9_r) {
 /  those five digits still needs a frame where the game actually lights them.
 /----------------------------------------------------------------------*/
 static void cirsa_shift_frame(const UINT8 *f) {
-  int col, g;
+  /* DisplayColumnMaskTable at ROM 0xB730 is FF FD FB F7 7F BF EF DF, indexed by
+     the ROM's 1-7 column counter.  The bit each mask clears is not sequential:
+     column 4 clears bit 7, column 6 clears bit 4, column 7 clears bit 5.  This
+     table inverts that -- indexed by cleared bit, giving the ROM column, with 0
+     meaning "no column". */
+  static const UINT8 colFromBit[8] = { 0, 1, 2, 3, 6, 7, 5, 4 };
+  int col, g, bit;
 
-  for (col = 0; col < 7; col++)
-    if (!(f[7] & (1 << col))) break;
-  if (col >= 7) return;                       /* no digit column selected */
+  for (bit = 0; bit < 8; bit++)
+    if (!(f[7] & (1 << bit))) break;
+  if (bit == 8 || colFromBit[bit] == 0) return;   /* no column selected */
+  col = colFromBit[bit] - 1;                      /* 0..6 digit position */
 
   for (g = 0; g < 4; g++) {                   /* the four player displays */
     UINT8 seg = f[6 - g];
