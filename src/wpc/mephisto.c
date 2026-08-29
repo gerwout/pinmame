@@ -228,13 +228,37 @@ static READ_HANDLER(ic9_r) {
 /  the credit/match digits 28..32; the mapping of the last three groups onto
 /  those five digits still needs a frame where the game actually lights them.
 /----------------------------------------------------------------------*/
+/* The column-select mask table's byte values -- and which bit each one
+   clears -- are NOT shared between the two ROM sets this driver serves.
+   Both were confirmed by an exhaustive byte-scan of the ROM image for "8
+   bytes where each XORs with 0xFF to 0 or a single bit", which returns
+   exactly one hit per ROM, at the exact address each game's own display
+   routine reads from via CS:B[BX+addr]:
+
+     Sport 2000        ROM 0xB730:  FF FD FB F7 7F BF EF DF
+                          col 1-7 -> bits 1,2,3,7,6,4,5 (bit 0 never used)
+     Mephisto (rev 1.2) ROM 0x0F82:  FF FE FD FB F7 BF DF EF
+                          col 1-7 -> bits 0,1,2,3,6,5,4 (bit 7 never used)
+
+   Mephisto rev 1.1 (mephist1) has the identical 8 bytes at ROM 0x0D61 (a
+   different address -- the surrounding code is extensively reshuffled
+   between revisions -- but byte-for-byte the same table, read by a
+   structurally identical routine), so it shares Mephisto's inverted table
+   below rather than needing a third one.
+
+   Each table inverts its ROM bytes -- indexed by cleared bit, giving the
+   1-7 ROM column, with 0 meaning "no column" -- and is selected per game via
+   core_gameData->hw.gameSpecific1 (0 = Sport 2000, 1 = Mephisto/mephist1;
+   see cirsaGameData/mephistoGameData below). Mephisto's table is derived
+   only from its ROM's mask table -- unlike Sport 2000's, it has not been
+   cross-checked against a located RAM display buffer, since Mephisto's
+   buffer address is not established. */
+static const UINT8 colFromBitSport2k[8]  = { 0, 1, 2, 3, 6, 7, 5, 4 };
+static const UINT8 colFromBitMephisto[8] = { 1, 2, 3, 4, 7, 6, 5, 0 };
+
 static void cirsa_shift_frame(const UINT8 *f) {
-  /* DisplayColumnMaskTable at ROM 0xB730 is FF FD FB F7 7F BF EF DF, indexed by
-     the ROM's 1-7 column counter.  The bit each mask clears is not sequential:
-     column 4 clears bit 7, column 6 clears bit 4, column 7 clears bit 5.  This
-     table inverts that -- indexed by cleared bit, giving the ROM column, with 0
-     meaning "no column". */
-  static const UINT8 colFromBit[8] = { 0, 1, 2, 3, 6, 7, 5, 4 };
+  const UINT8 *colFromBit = core_gameData->hw.gameSpecific1
+                              ? colFromBitMephisto : colFromBitSport2k;
   int col, g, bit;
 
   for (bit = 0; bit < 8; bit++)
@@ -585,9 +609,16 @@ static core_tLCDLayout cirsa_disp[] = {
   {6, 8,28, 2,CORE_SEG8D}, {6,14,30, 1,CORE_SEG8D}, {6,18,31, 2,CORE_SEG8D},
   {0}
 };
-static core_tGameData cirsaGameData = {0,cirsa_disp,{FLIP_SW(FLIP_L),10,8}};
+/* hw.gameSpecific1 (7th field of the hw sub-struct: flippers, swCol, lampCol,
+   custSol, soundBoard, display, gameSpecific1) selects cirsa_shift_frame's
+   column-mask table: 0 = Sport 2000 (default), 1 = Mephisto/mephist1. */
+static core_tGameData cirsaGameData    = {0,cirsa_disp,{FLIP_SW(FLIP_L),10,8}};
+static core_tGameData mephistoGameData = {0,cirsa_disp,{FLIP_SW(FLIP_L),10,8,0,0,0,1}};
 static void init_cirsa(void) {
   core_gameData = &cirsaGameData;
+}
+static void init_mephisto(void) {
+  core_gameData = &mephistoGameData;
 }
 
 ROM_START(mephisto)
@@ -607,7 +638,8 @@ ROM_START(mephisto)
     ROM_LOAD("ic18_e",  0x30000, 0x8000, CRC(eac6dbba) SHA1(f4971c8b0aa3a72c396b943a0ee3094afb902ec1))
     ROM_LOAD("ic19_f",  0x38000, 0x8000, CRC(cc4bb629) SHA1(db46be2a8034bbd106b7dd80f50988c339684b5e))
 ROM_END
-#define init_mephisto init_cirsa
+/* init_mephisto is a real function (above) that selects mephistoGameData,
+   not init_cirsa -- Mephisto uses its own column-mask table. */
 #define input_ports_mephisto input_ports_cirsa
 CORE_GAMEDEFNV(mephisto,"Mephisto (rev. 1.2)",1986,"Stargame",mephisto,GAME_NOT_WORKING)
 
@@ -628,7 +660,11 @@ ROM_START(mephist1)
     ROM_LOAD("ic18_e",  0x30000, 0x8000, CRC(eac6dbba) SHA1(f4971c8b0aa3a72c396b943a0ee3094afb902ec1))
     ROM_LOAD("ic19_f",  0x38000, 0x8000, CRC(cc4bb629) SHA1(db46be2a8034bbd106b7dd80f50988c339684b5e))
 ROM_END
-#define init_mephist1 init_cirsa
+/* mephist1 (rev 1.1) has the identical column-mask table content as
+   mephisto (rev 1.2), confirmed by a byte scan of its ROM -- see the
+   comment above colFromBitMephisto -- so it reuses init_mephisto rather
+   than init_cirsa. */
+#define init_mephist1 init_mephisto
 #define input_ports_mephist1 input_ports_cirsa
 CORE_CLONEDEFNV(mephist1,mephisto,"Mephisto (rev. 1.1)",1986,"Stargame",mephisto,GAME_NOT_WORKING)
 
