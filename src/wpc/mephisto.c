@@ -710,9 +710,28 @@ static INTERRUPT_GEN(cirsa_vblank) {
   if (!core_gameData->hw.gameSpecific1) {
     const UINT8 qc = coreGlobals.swMatrix[12] & 0x1f;
     if (qc != locals.qcState) {
+      const UINT8 newlyClosed = qc & ~locals.qcState;
       locals.qcState = qc;
       if (locals.qcTransparent) locals.qcLatch = qc;   /* '373 is transparent */
-      i8256_set_extint(qc ? 1 : 0);                    /* level sensitive */
+      /* i8256_set_extint() only raises a request on a 0->1 transition of
+         the pin (i8256.c: "if (!old && i8256.extint)") -- it is genuinely
+         level sensitive, not level triggered on every sample, so while one
+         contact is already held closed, a second contact closing changes
+         qc but not the 0/1 level and would otherwise request nothing (the
+         ROM's own ISR_QuickContacts count then misses the second contact
+         for as long as the first stays down). i8256_set_extint()'s
+         semantics are intentionally left alone -- it is a shared device --
+         so model each newly-closed contact as its own falling/rising edge
+         on the driver side instead: drop the line and immediately restate
+         it, which is a genuine 0->1 transition by the callee's own rule
+         whenever the line is meant to be up. This only runs inside the
+         qc != locals.qcState branch, i.e. once per actual change in the
+         debounced contact state, so holding a single contact for the full
+         ~1.2 s closure produces exactly one pulse -- not a storm -- and a
+         contact release with no new contact closing (newlyClosed == 0)
+         is left as a plain level update, same as before. */
+      if (newlyClosed) i8256_set_extint(0);
+      i8256_set_extint(qc ? 1 : 0);
     }
   }
 }
