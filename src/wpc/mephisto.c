@@ -468,9 +468,22 @@ static UINT8 cirsa_p2_in(void) {
 /  The boot handshake at 0x05BF pulses a line, waits, tests 0x2A01E bit 6
 /  for RX-ready and compares [0x2A00E] against 0xA5.  Until this link
 /  existed the test could not pass and the machine displayed "NO AUDIO".
+/
+/  i8051.c's I8051_RX_LINE case is the *only* place serial_rx_callback is
+/  ever invoked -- there is no polling path, and reaching that case does
+/  not by itself deliver anything unless the firmware also has ES and REN
+/  set.  A driver that only installs the callback (as this one did before
+/  this fix) gets silence: the byte sits in locals.sndToSnd forever and
+/  the 8051 never knows it arrived.  Asserting the line each time a fresh
+/  byte lands is what actually pulls it through cirsa_snd_rx() into SBUF
+/  and raises RI -- same pattern as capcoms.c's send_data_to_8752().  The
+/  case does not look at the line state at all, so a bare ASSERT_LINE per
+/  byte is enough; there is nothing to clear afterwards.  scpu (the 8051)
+/  is cpu 1 here -- mcpu is added first in MACHINE_DRIVER_START(mephisto).
 /----------------------------------------------------------------------*/
 static void cirsa_txd_out(UINT8 data) {
   locals.sndToSnd = data;
+  cpu_set_irq_line(1, I8051_RX_LINE, ASSERT_LINE);
 }
 
 static int cirsa_snd_rx(void) {
