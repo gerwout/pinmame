@@ -2730,10 +2730,6 @@ void input_port_set_force(int port, unsigned short mask)
 	if (port >= 0 && port < MAX_INPUT_PORTS) input_port_force[port] = mask;
 }
 
-unsigned short input_port_get_force(int port)
-{
-	return (port >= 0 && port < MAX_INPUT_PORTS) ? input_port_force[port] : 0;
-}
 #endif
 
 int readinputport(int port)

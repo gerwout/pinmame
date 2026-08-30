@@ -412,7 +412,6 @@ int readinputport(int port);
 #ifdef REMOTE_DEBUG
 /* Forced-value overlay OR'd into readinputport()'s result -- see inptport.c. */
 void input_port_set_force(int port, unsigned short mask);
-unsigned short input_port_get_force(int port);
 #endif
 
 READ_HANDLER( input_port_0_r );
