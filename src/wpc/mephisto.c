@@ -557,33 +557,44 @@ static WRITE_HANDLER(ic9_pa_w) {
     else                      coreGlobals.solenoids &= ~bit;
   }
 
-  /* Coils 0-4 (LEFT BALL EJECTOR, SORTING RAMP EJECTOR, KICKBACK, BUMPER,
-     RIGHT BALL EJECTOR) fire from their quick contacts in hardware, not
-     from this bus -- the CPU never commands them here, which is exactly
-     the coil-encoding findings' "coil 3 never appears in this stream".
-     A bit written to coreGlobals.solenoids anywhere else would still be at
-     the mercy of this sweep's own clear step the next time it revisits that
-     position, so locals.qcState (bits 0-4, live and un-latched, updated
-     every vblank by cirsa_vblank -- contact N's bit is coil N-60's bit by
-     hardware coincidence) is ORed back in here, every call, so the sweep's
-     clear can never win while the contact is actually closed: that models
-     a hardware path the CPU cannot override.
+  /* Coils 1-3 (SORTING RAMP EJECTOR, KICKBACK, BUMPER) fire from their
+     quick contacts in hardware, not from this bus -- the CPU never
+     commands them here, which is exactly the coil-encoding findings'
+     "coil 3 never appears in this stream". Coils 0 and 4 (the two ball
+     ejectors) are deliberately EXCLUDED from this: the ROM genuinely
+     drives those two itself, on its own timed schedule (0xC3CA, see
+     ball-serve.md), so asserting them from raw contact state would fight
+     the ROM's own control of them -- confirmed live as a real regression
+     (contact 60 held during gameplay kept solenoid bit 0 asserted for the
+     whole 4 s hold, which the ROM itself never does). Only bits 1-3 of
+     locals.qcState (live, un-latched contact state updated every vblank by
+     cirsa_vblank -- contact N's bit is coil N-60's bit by hardware
+     coincidence) are ORed back in here, every call, so this sweep's own
+     clear of those two bits can never win while the contact is actually
+     closed: that models a hardware path the CPU cannot override, without
+     touching the two coils the CPU already owns.
 
-     This is deliberately one-directional. The rising edge is immediate and
-     was confirmed reliable over many repeated trials (coreGlobals.solenoids
-     goes 0->1 the same vblank the contact closes). The falling edge is
-     bounded but NOT immediate for coils 1-3 specifically: since the ROM
-     genuinely never uses those three positions, this sweep only clears
-     them whenever it happens to revisit position 1, 2 or 3, which live
-     testing found took up to ~1 s after the contact opened (vs. near-
-     instant for coils 0/4, which the ROM does drive for real ball-ejector
-     control and therefore revisits constantly). Making the release
-     instant too would mean writing these bits from cirsa_vblank as well,
-     which risks clobbering a genuine CPU-commanded coil-0/4 state (e.g.
-     during COILS TEST 4-PHASE) the instant a quick contact happens to
-     release at the same moment -- purely additive was the explicit
-     requirement, so that trade was not taken. */
-  coreGlobals.solenoids |= locals.qcState;
+     This is deliberately one-directional -- it can only ever ADD a bit,
+     never block a genuine CPU-commanded write. The rising edge is
+     immediate and confirmed reliable over many repeated trials
+     (coreGlobals.solenoids goes 0->1 the same vblank the contact closes).
+     The falling edge is NOT uniform across coils 1-3, and the mechanism is
+     not "this sweep revisits the position" -- the full 8-byte PA frame
+     goes out ~280 times/second regardless, so every position, including
+     1-3, is rewritten every ~3.5 ms. What actually differs is what the ROM
+     puts in that byte:
+       - Coil 3 (BUMPER) is re-derived from Port B on every scan pass
+         (`test byte [0x71e], 8`), so it tracks the live contact almost
+         immediately either way -- measured at ~21 ms to clear, same order
+         as coils 0/4.
+       - Coils 1-2 (SORTING RAMP EJECTOR, KICKBACK) are one-shot `or`s the
+         ROM never explicitly clears bit-by-bit; they only reset when its
+         periodic coil-table recompute (0xC512/0xC14D/0xC1E6) overwrites
+         the whole frame. THAT recompute's cadence is the real bound on
+         their release, not the PA sweep -- measured at 0.3-1.5 s during
+         active gameplay, but under 30 ms at idle in attract, so the delay
+         itself is state-dependent, not a fixed driver latency. */
+  coreGlobals.solenoids |= (locals.qcState & 0x0e);  /* coils 1-3 only */
 }
 
 /*-- IC9: general I/O.  PB reads the B0-B7 bus that also feeds the quick
