@@ -873,7 +873,6 @@ MACHINE_DRIVER_START(mephisto)
   MDRV_CPU_PORTS(cirsa_readsndport, cirsa_writesndport)
   MDRV_CPU_FLAGS(CPU_AUDIO_CPU)
   MDRV_SOUND_ADD(AY8910, cirsa_ay8910Int)
-  MDRV_SOUND_ADD(YM3812, cirsa_ym3812Int)
   MDRV_SOUND_ADD(DAC, cirsa_dacInt)
 MACHINE_DRIVER_END
 
@@ -881,6 +880,10 @@ MACHINE_DRIVER_START(cirsa)
   MDRV_IMPORT_FROM(mephisto)
   MDRV_CPU_MODIFY("mcpu")
   MDRV_CPU_MEMORY(cirsa_readmem, cirsa_writemem)
+  /* Sport 2000's audio board has a YM3812 (OPL2) with its own 14.318 MHz
+     crystal; Mephisto's has neither -- just the 8051, an AY-3-8910 and a
+     DAC-08.  MAME agrees: only its sport2k() config adds one. */
+  MDRV_SOUND_ADD(YM3812, cirsa_ym3812Int)
 MACHINE_DRIVER_END
 
 INPUT_PORTS_START(cirsa)
