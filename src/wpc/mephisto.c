@@ -508,10 +508,12 @@ static READ_HANDLER(ic20_pc_r) {
 /  Derived by running the ROM's own COILS TEST 4-PHASE and correlating with
 /  the coil number displayed; see docs/findings/2026-08-30-coil-encoding.md.
 /
-/  Not modelled here: coils 1-3 (sorting ramp ejector, kickback, bumper) are
-/  also driven straight from IC9 Port B, so coil 3 in particular never
-/  appears in this stream; and "coil 24" (general illumination) is MUART
-/  Port 2 bit 7, not on this bus.
+/  Not modelled here: PA6, the global enable described above, is read back
+/  and tested but never latched into coreGlobals -- only the strobe (PA7)
+/  and the three data bits actually move a coil; coils 1-3 (sorting ramp
+/  ejector, kickback, bumper) are also driven straight from IC9 Port B, so
+/  coil 3 in particular never appears in this stream; and "coil 24"
+/  (general illumination) is MUART Port 2 bit 7, not on this bus.
 /----------------------------------------------------------------------*/
 static WRITE_HANDLER(ic9_pa_w) {
   const int pos = data & 0x07;
