@@ -21,6 +21,9 @@ static struct {
   /*-- phase 0 instrumentation state --*/
   int   lastrep;
   char  lastline[192];
+  UINT8 qcState;        /* live quick-contact inputs, swMatrix[11] bits 0-4 */
+  UINT8 qcLatch;        /* IC11 (74LS373) held value, read back on IC9 PB */
+  int   qcTransparent;  /* IC9 PC5 high -> latch follows input */
 } locals;
 
 /*-------------------------------------------------------------------------
@@ -557,12 +560,39 @@ static WRITE_HANDLER(ic9_pa_w) {
 
 /*-- IC9: general I/O.  PB reads the B0-B7 bus that also feeds the quick
 /  contact comparators and PC5 strobes the IC11 (74LS373) latch that
-/  snapshots it.  Nothing is connected until the playfield is.
+/  snapshots it.  The quick-contact return path itself is implemented just
+/  below.
 /----------------------------------------------------------------------*/
+
+/*-- IC9 PB/PC5: the quick-contact return path (plate 5) -----------------
+/  The five quick contacts (60 RAMP HOLE, 61 SORTING RAMP, 62 KICKBACK,
+/  63 BUMPER, 64 BRIDGE ENTRY) fire their coils in hardware -- that is what
+/  makes them quick -- and notify the CPU separately.  A contact is captured
+/  in IC11, a 74LS373, and signalled on EXTINT (level 2, vector 0x42).
+/
+/  ISR_QuickContacts at 0x0931 drives IC9 PC5 high then low and then reads
+/  Port B.  A '373 is transparent while its latch-enable is high and holds on
+/  the falling edge, so PC5 high makes qcLatch follow qcState and the high-to-
+/  low edge freezes it.
+/
+/  The ROM's own event table at 0xD11E places contacts 60-64 at column 10,
+/  rows 0-4, which is swMatrix[11] bits 0-4 under the swMatrix[col + 1]
+/  convention -- so this is the ROM's numbering, not an arbitrary free slot.
+/----------------------------------------------------------------------*/
+static READ_HANDLER(ic9_pb_r) {
+  return locals.qcLatch;
+}
+
+static WRITE_HANDLER(ic9_pc_w) {
+  const int pc5 = (data & 0x20) ? 1 : 0;
+  if (pc5) locals.qcLatch = locals.qcState;   /* transparent */
+  locals.qcTransparent = pc5;                 /* falling edge freezes it */
+}
+
 static i8155_interface cirsa_i8155 = {
   2,                              /* IC9 = chip 0, IC20 = chip 1 */
-  {0, 0}, {0, 0}, {0, ic20_pc_r},
-  {ic9_pa_w, ic20_pa_w}, {0, ic20_pb_w}, {0, 0},
+  {0, 0}, {ic9_pb_r, 0}, {0, ic20_pc_r},
+  {ic9_pa_w, ic20_pa_w}, {0, ic20_pb_w}, {ic9_pc_w, 0},
   {0, 0}
 };
 
@@ -626,6 +656,14 @@ static SWITCH_UPDATE(CIRSA) {
 
 static INTERRUPT_GEN(cirsa_vblank) {
   core_updateSw(TRUE);
+  if (!core_gameData->hw.gameSpecific1) {
+    const UINT8 qc = coreGlobals.swMatrix[11] & 0x1f;
+    if (qc != locals.qcState) {
+      locals.qcState = qc;
+      if (locals.qcTransparent) locals.qcLatch = qc;   /* '373 is transparent */
+      i8256_set_extint(qc ? 1 : 0);                    /* level sensitive */
+    }
+  }
 }
 
 static READ_HANDLER(ay8910_porta_r)   { return coreGlobals.swMatrix[0]; }
