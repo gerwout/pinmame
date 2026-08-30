@@ -21,7 +21,7 @@ static struct {
   /*-- phase 0 instrumentation state --*/
   int   lastrep;
   char  lastline[192];
-  UINT8 qcState;        /* live quick-contact inputs, swMatrix[11] bits 0-4 */
+  UINT8 qcState;        /* live quick-contact inputs, swMatrix[12] bits 0-4 */
   UINT8 qcLatch;        /* IC11 (74LS373) held value, read back on IC9 PB */
   int   qcTransparent;  /* IC9 PC5 high -> latch follows input */
 } locals;
@@ -556,6 +556,34 @@ static WRITE_HANDLER(ic9_pa_w) {
     if (data & (0x08 << blk)) coreGlobals.solenoids |=  bit;
     else                      coreGlobals.solenoids &= ~bit;
   }
+
+  /* Coils 0-4 (LEFT BALL EJECTOR, SORTING RAMP EJECTOR, KICKBACK, BUMPER,
+     RIGHT BALL EJECTOR) fire from their quick contacts in hardware, not
+     from this bus -- the CPU never commands them here, which is exactly
+     the coil-encoding findings' "coil 3 never appears in this stream".
+     A bit written to coreGlobals.solenoids anywhere else would still be at
+     the mercy of this sweep's own clear step the next time it revisits that
+     position, so locals.qcState (bits 0-4, live and un-latched, updated
+     every vblank by cirsa_vblank -- contact N's bit is coil N-60's bit by
+     hardware coincidence) is ORed back in here, every call, so the sweep's
+     clear can never win while the contact is actually closed: that models
+     a hardware path the CPU cannot override.
+
+     This is deliberately one-directional. The rising edge is immediate and
+     was confirmed reliable over many repeated trials (coreGlobals.solenoids
+     goes 0->1 the same vblank the contact closes). The falling edge is
+     bounded but NOT immediate for coils 1-3 specifically: since the ROM
+     genuinely never uses those three positions, this sweep only clears
+     them whenever it happens to revisit position 1, 2 or 3, which live
+     testing found took up to ~1 s after the contact opened (vs. near-
+     instant for coils 0/4, which the ROM does drive for real ball-ejector
+     control and therefore revisits constantly). Making the release
+     instant too would mean writing these bits from cirsa_vblank as well,
+     which risks clobbering a genuine CPU-commanded coil-0/4 state (e.g.
+     during COILS TEST 4-PHASE) the instant a quick contact happens to
+     release at the same moment -- purely additive was the explicit
+     requirement, so that trade was not taken. */
+  coreGlobals.solenoids |= locals.qcState;
 }
 
 /*-- IC9: general I/O.  PB reads the B0-B7 bus that also feeds the quick
@@ -575,9 +603,21 @@ static WRITE_HANDLER(ic9_pa_w) {
 /  the falling edge, so PC5 high makes qcLatch follow qcState and the high-to-
 /  low edge freezes it.
 /
-/  The ROM's own event table at 0xD11E places contacts 60-64 at column 10,
-/  rows 0-4, which is swMatrix[11] bits 0-4 under the swMatrix[col + 1]
-/  convention -- so this is the ROM's numbering, not an arbitrary free slot.
+/  coreGlobals.swMatrix[12] bits 0-4 carry the live contact state.  This is
+/  NOT the ROM's own column numbering -- that was this driver's original,
+/  wrong argument (contacts sit at the ROM's event-table column 10, so
+/  "naturally" swMatrix[11]).  Quick contacts arrive over IC9 Port B, never
+/  through the IC20 matrix scan (ic20_pc_r rejects any swCol > 9), so which
+/  swMatrix slot carries them is a free driver-side plumbing choice, not
+/  something derived from the ROM at all.  Column 11 is wrong regardless:
+/  it is PinMAME's own CORE_FLIPPERSWCOL (core.h:334), and core_updateSw()
+/  unconditionally overwrites its bits 0x02/0x08 from the (absent) flipper-
+/  button state on every single frame, before this driver ever reads them --
+/  confirmed live, contacts 61 and 63 never reached ISR_QuickContacts because
+/  of exactly this collision.  Column 12 is the first CUSTOM switch column
+/  (CORE_STDSWCOLS == 12) and needs hw.swCol == 1 on cirsaGameData below so
+/  core.c's custom-column loops (core.c:2000, :2460) stay in bounds -- see
+/  that field's own comment for why it was deliberately 0 before this.
 /----------------------------------------------------------------------*/
 static READ_HANDLER(ic9_pb_r) {
   return locals.qcLatch;
@@ -657,7 +697,7 @@ static SWITCH_UPDATE(CIRSA) {
 static INTERRUPT_GEN(cirsa_vblank) {
   core_updateSw(TRUE);
   if (!core_gameData->hw.gameSpecific1) {
-    const UINT8 qc = coreGlobals.swMatrix[11] & 0x1f;
+    const UINT8 qc = coreGlobals.swMatrix[12] & 0x1f;
     if (qc != locals.qcState) {
       locals.qcState = qc;
       if (locals.qcTransparent) locals.qcLatch = qc;   /* '373 is transparent */
@@ -775,10 +815,22 @@ static core_tLCDLayout cirsa_disp[] = {
 /* hw.swCol counts CUSTOM switch columns beyond CORE_STDSWCOLS (12), not the
    game's hardware column count -- and coreGlobals.swMatrix is only
    CORE_MAXSWCOL (16) entries. Both games read swMatrix[1..10] via
-   ic20_pc_r, which is inside the standard range, so no custom columns are
-   needed. The previous value of 10 made core.c:2000 read 22 entries from a
-   16-entry array. Sport 2000's 8 (schematic 10) and Mephisto's 7 hardware
-   columns are NOT this field. */
+   ic20_pc_r, which is inside the standard range, so neither needs a custom
+   column for THAT path. A previous value of 10 made core.c:2000 read 22
+   entries from a 16-entry array; Sport 2000's 8 (schematic 10) and
+   Mephisto's 7 hardware columns are NOT this field, and that mistake is
+   why it was reset to 0 for both games.
+
+   cirsaGameData now sets it to 1: the quick-contact return path (see the
+   IC9 PB/PC5 comment above ic9_pb_r) needs a swMatrix slot of its own,
+   deliberately NOT column 11 -- that is core.h's CORE_FLIPPERSWCOL, and
+   core_updateSw() unconditionally overwrites two of its bits every frame
+   regardless of what a driver declares. Column 12 is the first genuinely
+   free (CUSTOM) column, and hw.swCol == 1 is exactly what makes core.c's
+   two CORE_STDSWCOLS+hw.swCol loops (core.c:2000, :2460) include it without
+   going past CORE_MAXSWCOL -- 12+1=13, still inside the 16-entry array.
+   mephistoGameData stays at 0: Mephisto has no quick-contact path (gated
+   off by hw.gameSpecific1 in cirsa_vblank), so it needs no custom column. */
 /* hw.gameSpecific1 (7th field of the hw sub-struct: flippers, swCol, lampCol,
    custSol, soundBoard, display, gameSpecific1) is the Sport-2000-vs-Mephisto
    switch: 0 = Sport 2000 (default), 1 = Mephisto/mephist1. It has four
@@ -790,7 +842,7 @@ static core_tLCDLayout cirsa_disp[] = {
    of them, and in particular does not touch the coil-bus gate that
    commit 20f52134 added to keep ic9_pa_w from populating
    coreGlobals.solenoids with fictitious Mephisto coil numbers. */
-static core_tGameData cirsaGameData    = {0,cirsa_disp,{FLIP_SW(FLIP_L),0,8}};
+static core_tGameData cirsaGameData    = {0,cirsa_disp,{FLIP_SW(FLIP_L),1,8}};
 static core_tGameData mephistoGameData = {0,cirsa_disp,{FLIP_SW(FLIP_L),0,8,0,0,0,1}};
 static void init_cirsa(void) {
   core_gameData = &cirsaGameData;
