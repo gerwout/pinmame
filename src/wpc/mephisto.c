@@ -516,6 +516,23 @@ static READ_HANDLER(ic20_pc_r) {
 static WRITE_HANDLER(ic9_pa_w) {
   const int pos = data & 0x07;
   int blk;
+
+  /* Sport 2000 only.  The 24-coil, three-connector encoding above came
+     solely from Sport 2000's ROM and its own COILS TEST 4-PHASE -- nothing
+     establishes that Mephisto's IC9 Port A carries the same bus, and
+     mephisto_readmem/mephisto_writemem route the identical 0x14800-0x14807
+     range through this same ic9_r/ic9_w, so this handler fires for
+     Mephisto and mephist1 too.  Mephisto's board has several documented
+     IC9/IC20-area differences from Sport 2000's (different switch matrix,
+     different address decoder, lamp/switch drive on the CPU board instead
+     of a separate distribution board), so running its Port A writes
+     through this decode would populate coreGlobals.solenoids with
+     fictitious coil numbers.  Same precedent as cirsa_shift_frame's
+     Mephisto gate just above: writing nothing is honest, writing a
+     plausible-looking but invented bitmask is not.  Re-enable once
+     Mephisto's own Port A encoding is confirmed. */
+  if (core_gameData->hw.gameSpecific1) return;
+
   for (blk = 0; blk < 3; blk++) {
     const UINT32 bit = 1u << (blk * 8 + pos);   /* coil number == mask bit */
     if (data & (0x08 << blk)) coreGlobals.solenoids |=  bit;
@@ -558,7 +575,9 @@ static MACHINE_INIT(CIRSA) {
     locals.lastKeys = keys;
   }
 
-  coreGlobals.nSolenoids = 24;
+  /* Sport 2000 only -- see ic9_pa_w.  Mephisto's coil bus is uncharacterised,
+     so it reports zero solenoids rather than a fabricated count of 24. */
+  if (!core_gameData->hw.gameSpecific1) coreGlobals.nSolenoids = 24;
 
   i8256_init(&cirsa_i8256);
   i8155_init(&cirsa_i8155);
