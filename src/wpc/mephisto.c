@@ -506,7 +506,9 @@ static READ_HANDLER(ic20_pc_r) {
 /  and clears the three bits for the addressed position on every write.
 /
 /  Derived by running the ROM's own COILS TEST 4-PHASE and correlating with
-/  the coil number displayed; see docs/findings/2026-08-30-coil-encoding.md.
+/  the coil number displayed; see the workspace repo's
+/  docs/findings/2026-08-30-coil-encoding.md (that is the repo this driver
+/  is developed alongside, not this fork -- there is no such path here).
 /
 /  Not modelled here: PA6, the global enable described above, is read back
 /  and tested but never latched into coreGlobals -- only the strobe (PA7)
