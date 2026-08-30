@@ -659,11 +659,18 @@ static core_tLCDLayout cirsa_disp[] = {
   {6, 8,28, 2,CORE_SEG8D}, {6,14,30, 1,CORE_SEG8D}, {6,18,31, 2,CORE_SEG8D},
   {0}
 };
+/* hw.swCol counts CUSTOM switch columns beyond CORE_STDSWCOLS (12), not the
+   game's hardware column count -- and coreGlobals.swMatrix is only
+   CORE_MAXSWCOL (16) entries. Both games read swMatrix[1..10] via
+   ic20_pc_r, which is inside the standard range, so no custom columns are
+   needed. The previous value of 10 made core.c:2000 read 22 entries from a
+   16-entry array. Sport 2000's 8 (schematic 10) and Mephisto's 7 hardware
+   columns are NOT this field. */
 /* hw.gameSpecific1 (7th field of the hw sub-struct: flippers, swCol, lampCol,
    custSol, soundBoard, display, gameSpecific1) selects cirsa_shift_frame's
    column-mask table: 0 = Sport 2000 (default), 1 = Mephisto/mephist1. */
-static core_tGameData cirsaGameData    = {0,cirsa_disp,{FLIP_SW(FLIP_L),10,8}};
-static core_tGameData mephistoGameData = {0,cirsa_disp,{FLIP_SW(FLIP_L),10,8,0,0,0,1}};
+static core_tGameData cirsaGameData    = {0,cirsa_disp,{FLIP_SW(FLIP_L),0,8}};
+static core_tGameData mephistoGameData = {0,cirsa_disp,{FLIP_SW(FLIP_L),0,8,0,0,0,1}};
 static void init_cirsa(void) {
   core_gameData = &cirsaGameData;
 }
