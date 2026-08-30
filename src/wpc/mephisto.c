@@ -575,9 +575,18 @@ static MACHINE_INIT(CIRSA) {
     locals.lastKeys = keys;
   }
 
-  /* Sport 2000 only -- see ic9_pa_w.  Mephisto's coil bus is uncharacterised,
-     so it reports zero solenoids rather than a fabricated count of 24. */
-  if (!core_gameData->hw.gameSpecific1) coreGlobals.nSolenoids = 24;
+  /* coreGlobals.nSolenoids is deliberately left at 0 here, for both games.
+     Every other driver that sets it follows with
+     core_set_pwm_output_type(CORE_MODOUT_SOL0, n, CORE_MODOUT_SOL_2_STATE)
+     and writes through core_write_pwm_output*() -- this driver does
+     neither. p2k.c:2008-2010 spells out what happens if the count is set
+     without that: core_getSol() reads physicOutputState[] as soon as the
+     count is non-zero and options.usemodsol is set, so declaring 24 here
+     would report every output as permanently off the moment this game
+     meets a front end with modsol turned on. Not reachable today only
+     because usemodsol is 0 on the unix build. Advertise the count once
+     ic9_pa_w also feeds the PWM integrator -- it already runs on every
+     hardware write, so it is well placed to do both jobs. */
 
   i8256_init(&cirsa_i8256);
   i8155_init(&cirsa_i8155);
