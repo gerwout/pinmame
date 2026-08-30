@@ -517,20 +517,31 @@ static WRITE_HANDLER(ic9_pa_w) {
   const int pos = data & 0x07;
   int blk;
 
-  /* Sport 2000 only.  The 24-coil, three-connector encoding above came
-     solely from Sport 2000's ROM and its own COILS TEST 4-PHASE -- nothing
-     establishes that Mephisto's IC9 Port A carries the same bus, and
-     mephisto_readmem/mephisto_writemem route the identical 0x14800-0x14807
-     range through this same ic9_r/ic9_w, so this handler fires for
-     Mephisto and mephist1 too.  Mephisto's board has several documented
-     IC9/IC20-area differences from Sport 2000's (different switch matrix,
-     different address decoder, lamp/switch drive on the CPU board instead
-     of a separate distribution board), so running its Port A writes
-     through this decode would populate coreGlobals.solenoids with
-     fictitious coil numbers.  Same precedent as cirsa_shift_frame's
+  /* Sport 2000 only.  The bus protocol itself IS established for Mephisto:
+     its ROM drives IC9 Port A with the same transaction idiom, instruction
+     for instruction, at 0x130D (disasm/mephisto.bin) as Sport 2000 uses at
+     0xC277 (disasm/sport2k.bin) -- select position, write PA, mask PC to
+     000, strobe PA bit 7 low then high, restore PC to 111 -- and Mephisto
+     also reads PA back and tests bit 6 at 0x12F6-0x1303, mirroring Sport
+     2000's own PA readback.  mephisto_readmem/mephisto_writemem route the
+     identical 0x14800-0x14807 range through this same ic9_r/ic9_w, so this
+     handler fires for Mephisto and mephist1 too, and it is the same bus.
+
+     What is genuinely unestablished is Mephisto's coil NUMBERING and
+     CONNECTOR MAP.  The 24-coil, three-connector (J11/J12/J13) assignment
+     above came solely from Sport 2000's own COILS TEST 4-PHASE, and
+     Mephisto's board has several documented IC9/IC20-area differences from
+     Sport 2000's (different switch matrix, different address decoder,
+     lamp/switch drive on the CPU board instead of a separate distribution
+     board) that bear on which physical coil sits at which bus position.
+     Running Mephisto's Port A writes through this decode would populate
+     coreGlobals.solenoids with fictitious coil numbers even though the bus
+     underneath them is real.  Same precedent as cirsa_shift_frame's
      Mephisto gate just above: writing nothing is honest, writing a
      plausible-looking but invented bitmask is not.  Re-enable once
-     Mephisto's own Port A encoding is confirmed. */
+     Mephisto's own coil numbering is confirmed -- the 0x12F6-0x1303
+     readback is a good place to start walking it the way COILS TEST
+     4-PHASE did for Sport 2000. */
   if (core_gameData->hw.gameSpecific1) return;
 
   for (blk = 0; blk < 3; blk++) {
