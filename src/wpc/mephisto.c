@@ -14,7 +14,8 @@
 static struct {
   int   lampCol;        /* IC20 PA4-6 -> IC29 (7445) -> lamp columns LC0-LC7 */
   int   swCol;          /* IC20 PA0-3 -> IC30 (7445) -> switch columns CC0-CC9 */
-  UINT8 shiftFrame[8];  /* one 64 bit pass through the 4094 display chain */
+  UINT8 shiftFrame[8];  /* one pass through the 4094 display chain, 6 or 8
+                           bytes long -- see cirsa_frameLen() */
   int   shiftPos;
   UINT8 lastKeys;       /* previous cabinet key state, for edge-only updates */
   /*-- phase 0 instrumentation state --*/
@@ -216,18 +217,40 @@ static READ_HANDLER(ic9_r) {
 /*-- Display: the 74LS165 at 0x2E000 feeds the 4094 chain -----------------
 /  The CPU writes a byte to IC2 (74165); hardware shifts it out on QH,
 /  clocked by CLK SHT (IC9's TIMER OUT via IC13), into the daisy-chained
-/  4094s on the display board.  Plate 15 lists eight of them, and the byte
-/  stream confirms it: frames are exactly eight bytes.
+/  4094s on the display boards.  One frame = one byte per 4094, and the two
+/  games do NOT have the same number of them, so the frame length is per
+/  game (hw.gameSpecific1, same selector as the column-mask table):
+/
+/    Sport 2000  8 bytes -- 7 segment groups + the column select
+/    Mephisto    6 bytes -- 5 segment groups + the column select
+/
+/  Mephisto's six are accounted for by its manual: one 4094 on each of the
+/  four player display boards (plate 13) and two on the match/credit board
+/  (plate 11, IC2 and IC3), one of which drives COLUMNA through the 74HC240
+/  into the seven TIP116 digit drivers.
+/
+/  Measured over a 12 s run, scoring each candidate period on "last byte of
+/  the frame has exactly one clear bit":
+/
+/    sport2k   33608 bytes   period 8: 100.0%   period 6:  25.9%
+/    mephisto  29418 bytes   period 6: 100.0%   period 8:  33.3%
+/    mephist1  29316 bytes   period 6: 100.0%   period 8:  33.3%
+/
+/  and by the writing PCs: Mephisto writes five bytes from 0x00F47 and one
+/  from 0x00F65 (24515 : 4903, exactly 5:1); mephist1 the same from 0x00D26
+/  and 0x00D44; Sport 2000 writes eight bytes from eight consecutive PCs
+/  0x0B6A9..0x0B712, 4201 each.
 /
 /  The last byte of each frame is the digit column select -- active low,
-/  walking one bit at a time across seven columns, which matches the seven
-/  TIP116 digit drivers.  The other seven bytes are segment data.  Because
-/  the first byte shifted in travels furthest down the chain, byte 6 is the
-/  group nearest the column driver and byte 0 the one furthest away.
+/  exactly one bit clear, walking across seven columns, which matches the
+/  seven TIP116 digit drivers.  The rest is segment data.  Because the first
+/  byte shifted in travels furthest down the chain, the last byte written
+/  sits in the 4094 nearest the CPU and byte 0 in the one furthest away.
 /
-/  The four 7-digit player displays occupy segments 0..27 in cirsa_disp and
-/  the credit/match digits 28..32; the mapping of the last three groups onto
-/  those five digits still needs a frame where the game actually lights them.
+/  For Sport 2000 the four 7-digit player displays occupy segments 0..27 in
+/  cirsa_disp and the credit/match digits 28..32; the mapping of the last
+/  three groups onto those five digits still needs a frame where the game
+/  actually lights them.
 /----------------------------------------------------------------------*/
 /* The column-select mask table's byte values -- and which bit each one
    clears -- are NOT shared between the two ROM sets this driver serves.
@@ -257,15 +280,40 @@ static READ_HANDLER(ic9_r) {
 static const UINT8 colFromBitSport2k[8]  = { 0, 1, 2, 3, 6, 7, 5, 4 };
 static const UINT8 colFromBitMephisto[8] = { 1, 2, 3, 4, 7, 6, 5, 0 };
 
-static void cirsa_shift_frame(const UINT8 *f) {
+/* Bytes per pass through the chain -- one per 4094 on the display boards. */
+static int cirsa_frameLen(void) {
+  return core_gameData->hw.gameSpecific1 ? 6 : 8;
+}
+
+static void cirsa_shift_frame(const UINT8 *f, int len) {
   const UINT8 *colFromBit = core_gameData->hw.gameSpecific1
                               ? colFromBitMephisto : colFromBitSport2k;
+  UINT8 sel = (UINT8)~f[len - 1];
   int col, g, bit;
 
-  for (bit = 0; bit < 8; bit++)
-    if (!(f[7] & (1 << bit))) break;
-  if (bit == 8 || colFromBit[bit] == 0) return;   /* no column selected */
+  /* Exactly one of the seven digit drivers is on at a time, so the column
+     byte must have exactly one clear bit.  0xFF (nothing selected) and
+     anything with two or more clear bits are both rejected: a byte that is
+     not a valid column select means the frame is not a frame, and a blank
+     display is a far better symptom of that than a plausible digit. */
+  if (!sel || (sel & (sel - 1))) return;
+  for (bit = 0; !(sel & (1 << bit)); bit++) ;
+  if (colFromBit[bit] == 0) return;               /* bit unused as a column */
   col = colFromBit[bit] - 1;                      /* 0..6 digit position */
+
+  /* Sport 2000 only.  Mephisto's five segment groups are NOT characterised:
+     its match/credit board is first in the chain (plate 11: J23 carries DATA
+     IN from the control board, J24 daisy-chains onward), which fixes the
+     column register and the match/credit segments as the last two bytes of
+     the frame -- but nothing establishes which of the remaining four bytes
+     is which player display, which of the seven columns light that board's
+     five digits, or even that Mephisto's segment bit order is Sport 2000's.
+     Nor does cirsa_disp describe Mephisto's panel: it was laid out for Sport
+     2000, whose 33 units are 14 alphanumeric plus 19 seven-segment, where
+     Mephisto has 33 identical LTS 3401 digits.  Writing this frame into that
+     layout would put invented positions on the screen and in /api/info, so
+     until a service-mode display test settles it, write nothing. */
+  if (core_gameData->hw.gameSpecific1) return;
 
   for (g = 0; g < 4; g++) {                   /* the four player displays */
     UINT8 seg = f[6 - g];
@@ -277,10 +325,11 @@ static void cirsa_shift_frame(const UINT8 *f) {
 }
 
 static WRITE_HANDLER(shift_w) {
+  int len = cirsa_frameLen();
   locals.shiftFrame[locals.shiftPos++] = data;
-  if (locals.shiftPos == 8) {
+  if (locals.shiftPos == len) {
     locals.shiftPos = 0;
-    cirsa_shift_frame(locals.shiftFrame);
+    cirsa_shift_frame(locals.shiftFrame, len);
   }
 #if CIRSA_VERBOSE
   {
