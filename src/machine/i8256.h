@@ -34,8 +34,10 @@ typedef struct {
   /* INT pin.  Called with 1 to request an interrupt, 0 to release it. */
   void  (*int_out)(int state);
   /* Port 1 / Port 2 pins.  The *_in callbacks supply the level on the pins
-     configured as inputs; bits configured as outputs are taken from the
-     internal latch and the callback's value for those bits is ignored. */
+     configured as inputs -- by PORT1C for port 1 and by MODE.P2C for port 2;
+     bits configured as outputs are taken from the internal latch and the
+     callback's value for those bits is ignored.  Unconnected inputs should
+     read back as 0. */
   UINT8 (*p1_in)(void);
   void  (*p1_out)(UINT8 data);
   UINT8 (*p2_in)(void);
@@ -59,7 +61,9 @@ int  i8256_inta(void);
 void i8256_set_extint(int state);
 
 /* Drive one Port 1 input pin.  P17 is edge triggered and raises level 1 when
-   CMD1.BITI is set, so power-fail and similar inputs go through here. */
+   CMD1.BITI is set, so power-fail and similar inputs go through here.  These
+   pins are OR'd with whatever p1_in returns, so a driver may use either
+   route, or both for different bits. */
 void i8256_set_p1_pin(int bit, int state);
 
 /* A byte arriving on RxD -> receive buffer, raises level 4. */

@@ -38,6 +38,22 @@
 /*-- MODE --*/
 #define MODE_T35(m)  (((m) >> 7) & 1)   /* cascade timers 3+5 */
 #define MODE_T24(m)  (((m) >> 6) & 1)   /* cascade timers 2+4 */
+#define MODE_P2C(m)  ((m) & 0x07)       /* Port 2 direction / handshake mode */
+
+/* Port 2 direction per MODE.P2C, as a mask of the bits the chip drives
+   (datasheet "Port 2 Control" table, upper/lower nibble):
+
+     0 nibble  in / in      4 byte handshake input
+     1 nibble  in / out     5 byte handshake output
+     2 nibble out / in      6 DO NOT USE
+     3 nibble out / out     7 test mode
+
+   Both ROMs this device serves write MODE = 0x02, i.e. P20-P23 input and
+   P24-P27 output, so a read has to return the output latch for the upper
+   nibble.  The two reserved codes are treated as all-input. */
+static const UINT8 p2c_outmask[8] = {
+  0x00, 0x0f, 0xf0, 0xff, 0x00, 0xff, 0x00, 0x00
+};
 
 /*-- STATUS --*/
 #define ST_INT  0x80
@@ -199,10 +215,25 @@ static void i8256_tick(int dummy) {
 /*-------------------------------------------------------------------------
 /  Ports
 /-------------------------------------------------------------------------*/
+/* A port read returns the output latch for the bits the chip drives and the
+   pin level for the bits it does not -- the ROMs do read-modify-write on
+   both ports and would otherwise clear their own outputs.
+
+   Input pins have two sources, and a pin reads high if either drives it
+   high: the *_in callback, polled here, and i8256_set_p1_pin(), which
+   latches individual Port 1 pins as they change (that is also where the
+   P17 edge that raises level 1 is detected).  Both rest low after reset. */
 static UINT8 i8256_port1_read(void) {
-  UINT8 dir = i8256.reg[R_PORT1C];              /* 1 = output */
-  UINT8 pins = i8256.intf && i8256.intf->p1_in ? i8256.intf->p1_in() : 0xff;
+  UINT8 dir  = i8256.reg[R_PORT1C];             /* 1 = output */
+  UINT8 pins = i8256.p1_pins;
+  if (i8256.intf && i8256.intf->p1_in) pins |= i8256.intf->p1_in();
   return (UINT8)((i8256.p1_latch & dir) | (pins & ~dir));
+}
+
+static UINT8 i8256_port2_read(void) {
+  UINT8 dir  = p2c_outmask[MODE_P2C(i8256.reg[R_MODE])];
+  UINT8 pins = i8256.intf && i8256.intf->p2_in ? i8256.intf->p2_in() : 0x00;
+  return (UINT8)((i8256.p2_latch & dir) | (pins & ~dir));
 }
 
 static void i8256_port1_write(UINT8 data) {
@@ -351,8 +382,7 @@ READ_HANDLER(i8256_r) {
       return i8256_port1_read();
 
     case R_PORT2:
-      if (i8256.intf && i8256.intf->p2_in) return i8256.intf->p2_in();
-      return i8256.p2_latch;
+      return i8256_port2_read();
 
     case R_TIMER1: case R_TIMER1+1: case R_TIMER1+2: case R_TIMER1+3: case R_TIMER5:
       return i8256.timer[reg - R_TIMER1];
