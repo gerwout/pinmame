@@ -727,8 +727,16 @@ static core_tLCDLayout cirsa_disp[] = {
    16-entry array. Sport 2000's 8 (schematic 10) and Mephisto's 7 hardware
    columns are NOT this field. */
 /* hw.gameSpecific1 (7th field of the hw sub-struct: flippers, swCol, lampCol,
-   custSol, soundBoard, display, gameSpecific1) selects cirsa_shift_frame's
-   column-mask table: 0 = Sport 2000 (default), 1 = Mephisto/mephist1. */
+   custSol, soundBoard, display, gameSpecific1) is the Sport-2000-vs-Mephisto
+   switch: 0 = Sport 2000 (default), 1 = Mephisto/mephist1. It has four
+   consumers, all gating Sport-2000-only decodes that are not established
+   for Mephisto's board: cirsa_frameLen()'s frame length, cirsa_shift_frame()'s
+   column-mask table select and its Mephisto write gate, and ic9_pa_w's
+   coil-bus decode. It is not just the display's column-mask select --
+   characterising Mephisto's own 4094 chain removes one consumer, not all
+   of them, and in particular does not touch the coil-bus gate that
+   commit 20f52134 added to keep ic9_pa_w from populating
+   coreGlobals.solenoids with fictitious Mephisto coil numbers. */
 static core_tGameData cirsaGameData    = {0,cirsa_disp,{FLIP_SW(FLIP_L),0,8}};
 static core_tGameData mephistoGameData = {0,cirsa_disp,{FLIP_SW(FLIP_L),0,8,0,0,0,1}};
 static void init_cirsa(void) {
