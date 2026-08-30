@@ -24,6 +24,7 @@ static struct {
   UINT8 qcState;        /* live quick-contact inputs, swMatrix[12] bits 0-4 */
   UINT8 qcLatch;        /* IC11 (74LS373) held value, read back on IC9 PB */
   int   qcTransparent;  /* IC9 PC5 high -> latch follows input */
+  UINT8 sndToSnd;       /* last byte the MUART sent, latched for the 8051 */
 } locals;
 
 /*-------------------------------------------------------------------------
@@ -458,11 +459,33 @@ static UINT8 cirsa_p2_in(void) {
   return v;
 }
 
+/*-- The MUART <-> 8051 serial link (plate 5, J23) -----------------------
+/  Byte level, not bit level: the 8256's TxD callback hands us a byte, the
+/  8051's RxD callback collects it, and anything the 8051 transmits goes
+/  back through i8256_receive() which raises interrupt level 4 --
+/  ISR_SerialRX at 0x0C994, which reads the buffer at [0xA00E].
+/
+/  The boot handshake at 0x05BF pulses a line, waits, tests 0x2A01E bit 6
+/  for RX-ready and compares [0x2A00E] against 0xA5.  Until this link
+/  existed the test could not pass and the machine displayed "NO AUDIO".
+/----------------------------------------------------------------------*/
+static void cirsa_txd_out(UINT8 data) {
+  locals.sndToSnd = data;
+}
+
+static int cirsa_snd_rx(void) {
+  return locals.sndToSnd;
+}
+
+static void cirsa_snd_tx(int data) {
+  i8256_receive((UINT8)data);
+}
+
 static const I8256interface cirsa_i8256 = {
   cirsa_muart_int,
   cirsa_p1_in, cirsa_p1_out,
   cirsa_p2_in, cirsa_p2_out,
-  NULL
+  cirsa_txd_out
 };
 
 /*-- IC20: the lamp and switch matrices (plate 6) ------------------------
@@ -703,6 +726,11 @@ static MACHINE_INIT(CIRSA) {
   i8256_init(&cirsa_i8256);
   i8155_init(&cirsa_i8155);
   cpu_set_irq_callback(0, cirsa_irq_callback);
+
+  /* Setup serial line callbacks, needs to be set before CPU reset by
+     design -- see nuova.c's uboat65 init for the same warning. */
+  i8051_set_serial_tx_callback(cirsa_snd_tx);
+  i8051_set_serial_rx_callback(cirsa_snd_rx);
 }
 
 static SWITCH_UPDATE(CIRSA) {
