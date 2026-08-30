@@ -516,9 +516,13 @@ static READ_HANDLER(ic20_pc_r) {
 /  Not modelled here: PA6, the global enable described above, is read back
 /  and tested but never latched into coreGlobals -- only the strobe (PA7)
 /  and the three data bits actually move a coil; coils 1-3 (sorting ramp
-/  ejector, kickback, bumper) are also driven straight from IC9 Port B, so
-/  coil 3 in particular never appears in this stream; and "coil 24"
-/  (general illumination) is MUART Port 2 bit 7, not on this bus.
+/  ejector, kickback, bumper) ARE on this same bus -- the ROM itself
+/  re-derives their PA-frame bits from the quick-contact latch on every
+/  pass (0xC2AB, 0xC2A5, 0xC2B1/0xC2B6/0xC2BD; see ic9_pa_w below) rather
+/  than writing them as ordinary phase-cycled data, which is why COILS
+/  TEST 4-PHASE never showed coil 3 as an assertable value in this
+/  stream; and "coil 24" (general illumination) is MUART Port 2 bit 7,
+/  not on this bus.
 /----------------------------------------------------------------------*/
 static WRITE_HANDLER(ic9_pa_w) {
   const int pos = data & 0x07;
@@ -557,20 +561,32 @@ static WRITE_HANDLER(ic9_pa_w) {
     else                      coreGlobals.solenoids &= ~bit;
   }
 
-  /* Coils 1-3 (SORTING RAMP EJECTOR, KICKBACK, BUMPER) fire from their
-     quick contacts in hardware, not from this bus -- the CPU never
-     commands them here, which is exactly the coil-encoding findings'
-     "coil 3 never appears in this stream". Coils 0 and 4 (the two ball
-     ejectors) are deliberately EXCLUDED from this: the ROM genuinely
-     drives those two itself, on its own timed schedule (0xC3CA, see
-     ball-serve.md), so asserting them from raw contact state would fight
-     the ROM's own control of them -- confirmed live as a real regression
-     (contact 60 held during gameplay kept solenoid bit 0 asserted for the
-     whole 4 s hold, which the ROM itself never does). Only bits 1-3 of
+  /* Coils 1-3 (SORTING RAMP EJECTOR, KICKBACK, BUMPER) DO come through
+     this same bus -- the ROM re-derives their PA-frame bits from the
+     quick-contact latch on every pass: 0xC2AB `or [0x661],8` (coil 1),
+     0xC2A5 `or [0x662],8` (coil 2), and for coil 3 0xC2B1
+     `and [0x663],0xf7` / 0xC2B6 `test [0x71e],8` / 0xC2BD `or [0x663],8`,
+     cleared and re-derived every pass. The coil-encoding findings' "coil
+     3 never appears in this stream" was about COILS TEST 4-PHASE never
+     asserting it as an ordinary phase-cycled value, not about the CPU
+     being absent from the path -- lines 527-535 above already say this
+     bus carries the transaction for both games; the error was in this
+     paragraph, not that one. Those re-derive paths are gameplay-only,
+     though: [0x663] measured constant at 0xA3 through every attract-mode
+     closure, so nothing on this bus tracks the contact while the ROM is
+     in attract. The OR below is what covers that gap in software -- the
+     real machine's contact wiring does not care which mode the ROM is in
+     and fires the coil regardless. Coils 0 and 4 (the two ball ejectors)
+     are deliberately EXCLUDED from this: the ROM genuinely drives those
+     two itself, on its own timed schedule (0xC3CA, see ball-serve.md),
+     so asserting them from raw contact state would fight the ROM's own
+     control of them -- confirmed live as a real regression (contact 60
+     held during gameplay kept solenoid bit 0 asserted for the whole 4 s
+     hold, which the ROM itself never does). Only bits 1-3 of
      locals.qcState (live, un-latched contact state updated every vblank by
      cirsa_vblank -- contact N's bit is coil N-60's bit by hardware
      coincidence) are ORed back in here, every call, so this sweep's own
-     clear of those two bits can never win while the contact is actually
+     clear of those three bits can never win while the contact is actually
      closed: that models a hardware path the CPU cannot override, without
      touching the two coils the CPU already owns.
 
@@ -863,15 +879,18 @@ static core_tLCDLayout cirsa_disp[] = {
    off by hw.gameSpecific1 in cirsa_vblank), so it needs no custom column. */
 /* hw.gameSpecific1 (7th field of the hw sub-struct: flippers, swCol, lampCol,
    custSol, soundBoard, display, gameSpecific1) is the Sport-2000-vs-Mephisto
-   switch: 0 = Sport 2000 (default), 1 = Mephisto/mephist1. It has four
+   switch: 0 = Sport 2000 (default), 1 = Mephisto/mephist1. It has five
    consumers, all gating Sport-2000-only decodes that are not established
    for Mephisto's board: cirsa_frameLen()'s frame length, cirsa_shift_frame()'s
-   column-mask table select and its Mephisto write gate, and ic9_pa_w's
-   coil-bus decode. It is not just the display's column-mask select --
-   characterising Mephisto's own 4094 chain removes one consumer, not all
-   of them, and in particular does not touch the coil-bus gate that
-   commit 20f52134 added to keep ic9_pa_w from populating
-   coreGlobals.solenoids with fictitious Mephisto coil numbers. */
+   column-mask table select and its Mephisto write gate, ic9_pa_w's
+   coil-bus decode, and cirsa_vblank's quick-contact gate (Mephisto has no
+   quick-contact path modelled, see the comment just above mephistoGameData).
+   It is not just the display's column-mask select -- characterising
+   Mephisto's own 4094 chain removes one consumer, not all of them, and in
+   particular does not touch the coil-bus gate that commit 20f52134 added
+   to keep ic9_pa_w from populating coreGlobals.solenoids with fictitious
+   Mephisto coil numbers, nor the quick-contact gate that a later commit
+   added to cirsa_vblank. */
 static core_tGameData cirsaGameData    = {0,cirsa_disp,{FLIP_SW(FLIP_L),1,8}};
 static core_tGameData mephistoGameData = {0,cirsa_disp,{FLIP_SW(FLIP_L),0,8,0,0,0,1}};
 static void init_cirsa(void) {
