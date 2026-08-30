@@ -12,15 +12,12 @@
 #define CIRSA_VERBOSE 0
 
 static struct {
-  UINT8 state;
   int   lampCol;        /* IC20 PA4-6 -> IC29 (7445) -> lamp columns LC0-LC7 */
   int   swCol;          /* IC20 PA0-3 -> IC30 (7445) -> switch columns CC0-CC9 */
   UINT8 shiftFrame[8];  /* one 64 bit pass through the 4094 display chain */
   int   shiftPos;
   UINT8 lastKeys;       /* previous cabinet key state, for edge-only updates */
   /*-- phase 0 instrumentation state --*/
-  int   muart8086;      /* 8256 CMD1 bit 1: 0 = 8085 mode (reg = A0..A3),
-                           1 = 8086 mode (reg = A1..A4, A0 = second chip select) */
   int   lastrep;
   char  lastline[192];
 } locals;
@@ -156,11 +153,15 @@ static const char *i8155_regname(int reg) {
 
 static void i8155_decode(char *buf, int reg, int data) {
   static const char * const tm[4] = { "NOP", "STOP", "STOP-AT-TC", "START" };
+  /* Command bits 3-2 are PC2,PC1 and the four modes are NOT in numeric
+     order: 00 = ALT1 (all input), 01 = ALT3, 10 = ALT4, 11 = ALT2 (all
+     output) -- Intel's table, and what i8155.c's own decode implements. */
+  static const char * const pc[4] = { "1", "3", "4", "2" };
   buf[0] = '\0';
   if (reg == 0)
-    sprintf(buf, "PA=%s PB=%s PC=ALT%d intA=%d intB=%d timer=%s",
+    sprintf(buf, "PA=%s PB=%s PC=ALT%s intA=%d intB=%d timer=%s",
             (data & 1) ? "out" : "in", (data & 2) ? "out" : "in",
-            ((data >> 2) & 3) + 1, (data >> 4) & 1, (data >> 5) & 1,
+            pc[(data >> 2) & 3], (data >> 4) & 1, (data >> 5) & 1,
             tm[(data >> 6) & 3]);
   else if (reg == 5)
     sprintf(buf, "count_hi=%d mode=%d", data & 0x3f, (data >> 6) & 3);
