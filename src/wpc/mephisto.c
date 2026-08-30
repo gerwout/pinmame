@@ -493,6 +493,36 @@ static READ_HANDLER(ic20_pc_r) {
   return ~coreGlobals.swMatrix[locals.swCol + 1] & 0x3f;
 }
 
+/*-- IC9 Port A: the coil bus (plate 9) -----------------------------------
+/  One 8-byte frame carries all 24 coils.  PA0-2 select a position 0-7 that
+/  is shared by the three 74HC259 addressable latches; PA3, PA4 and PA5 are
+/  the data bit for J11 (coils 0-7), J12 (8-15) and J13 (16-23)
+/  respectively -- three parallel data lines, not a one-hot block select,
+/  which is why 24 coils need only eight transfers.  PA7 is the strobe and
+/  PA6 a global enable that is only meaningful at position 0.
+/
+/  Coils are level-held: the ROM re-sends the whole frame about 280 times a
+/  second and never issues an "off", so this must be idempotent -- it sets
+/  and clears the three bits for the addressed position on every write.
+/
+/  Derived by running the ROM's own COILS TEST 4-PHASE and correlating with
+/  the coil number displayed; see docs/findings/2026-08-30-coil-encoding.md.
+/
+/  Not modelled here: coils 1-3 (sorting ramp ejector, kickback, bumper) are
+/  also driven straight from IC9 Port B, so coil 3 in particular never
+/  appears in this stream; and "coil 24" (general illumination) is MUART
+/  Port 2 bit 7, not on this bus.
+/----------------------------------------------------------------------*/
+static WRITE_HANDLER(ic9_pa_w) {
+  const int pos = data & 0x07;
+  int blk;
+  for (blk = 0; blk < 3; blk++) {
+    const UINT32 bit = 1u << (blk * 8 + pos);   /* coil number == mask bit */
+    if (data & (0x08 << blk)) coreGlobals.solenoids |=  bit;
+    else                      coreGlobals.solenoids &= ~bit;
+  }
+}
+
 /*-- IC9: general I/O.  PB reads the B0-B7 bus that also feeds the quick
 /  contact comparators and PC5 strobes the IC11 (74LS373) latch that
 /  snapshots it.  Nothing is connected until the playfield is.
@@ -500,7 +530,7 @@ static READ_HANDLER(ic20_pc_r) {
 static i8155_interface cirsa_i8155 = {
   2,                              /* IC9 = chip 0, IC20 = chip 1 */
   {0, 0}, {0, 0}, {0, ic20_pc_r},
-  {0, ic20_pa_w}, {0, ic20_pb_w}, {0, 0},
+  {ic9_pa_w, ic20_pa_w}, {0, ic20_pb_w}, {0, 0},
   {0, 0}
 };
 
@@ -527,6 +557,8 @@ static MACHINE_INIT(CIRSA) {
     coreGlobals.swMatrix[0] = (UINT8)((coreGlobals.swMatrix[0] & ~0x0f) | keys);
     locals.lastKeys = keys;
   }
+
+  coreGlobals.nSolenoids = 24;
 
   i8256_init(&cirsa_i8256);
   i8155_init(&cirsa_i8155);
