@@ -186,9 +186,7 @@ static void i8256_tick(int dummy) {
     /* The high half of a cascaded pair is stepped by its low half, not here. */
     if ((i == 3 && t24) || (i == 4 && t35)) continue;
 
-    if (i8256.timer[i]--) continue;           /* no underflow this tick */
-
-    /* Which level does this underflow report on?
+    /* Which level does an underflow here report on?
        Cascaded 2+4 reports on level 6 and vacates level 1; cascaded 3+5
        reports on level 3 and vacates level 7 (datasheet priority table). */
     if (i == 1 && t24) {
@@ -199,9 +197,18 @@ static void i8256_tick(int dummy) {
       high = -1; level = timer_level[i];
     }
 
-    if (high >= 0) {
-      if (i8256.timer[high]--) continue;      /* 16 bit pair not exhausted yet */
-    } else if (i == 1 && CMD1_BITI(i8256.reg[R_CMD1])) {
+    /* Decrement first: the interrupt is the 1 -> 0 transition, so a reload
+       of N counts N ticks, not N+1.  A counter that has reached 0 keeps
+       running and wraps to 0xff on the next tick, 256 ticks per pass from
+       then on -- and in a cascaded pair that 0 -> 0xff wrap is the borrow
+       that steps the high half. */
+    if (--i8256.timer[i]) {
+      if (high >= 0 && i8256.timer[i] == 0xff) i8256.timer[high]--;
+      continue;
+    }
+    if (high >= 0 && i8256.timer[high]) continue;   /* 16 bit pair not done */
+
+    if (high < 0 && i == 1 && CMD1_BITI(i8256.reg[R_CMD1])) {
       /* CMD1.BITI gives level 1 to the Port 1 P17 edge input instead, so an
          uncascaded timer 2 generates no interrupt at all in this mode.  Sport
          2000 and Mephisto both run with BITI set, and level 1 is their
