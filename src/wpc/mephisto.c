@@ -293,7 +293,7 @@ static void cirsa_shift_frame(const UINT8 *f, int len) {
   const UINT8 *colFromBit = core_gameData->hw.gameSpecific1
                               ? colFromBitMephisto : colFromBitSport2k;
   UINT8 sel = (UINT8)~f[len - 1];
-  int col, g, bit;
+  int col, bit;
 
   /* Exactly one of the seven digit drivers is on at a time, so the column
      byte must have exactly one clear bit.  0xFF (nothing selected) and
@@ -319,13 +319,43 @@ static void cirsa_shift_frame(const UINT8 *f, int len) {
      until a service-mode display test settles it, write nothing. */
   if (core_gameData->hw.gameSpecific1) return;
 
-  for (g = 0; g < 4; g++) {                   /* the four player displays */
-    UINT8 seg = f[6 - g];
-    coreGlobals.segments[g * 7 + col].w = seg;
-  }
-  if (col < 2) coreGlobals.segments[28 + col].w = f[2];
-  if (col < 1) coreGlobals.segments[30].w       = f[1];
-  if (col < 2) coreGlobals.segments[31 + col].w = f[0];
+  /* Which of the seven shift-frame bytes feeds which physical group --
+     corrected here from a live DISPLAY TEST 1-PHASE capture (docs/findings/
+     2026-08-31-display-groups.md, 2026-09-01 addendum "the mapping,
+     settled"): three complete passes through the test's item list show
+     f[0], f[1], f[3] and f[4] each carrying a full 7-column segment-cascade
+     and column-walk pattern -- these are the four "Display 1/2/3/4" boards
+     the manual names throughout its service-menu sections (e.g. the Lamp/
+     Coil/Switch Test pages' "Display 1 shows...", "Display 2 shows...").
+     f[6] carries a *separate* cascade limited to columns 0-4 (5 of 7) --
+     columns 5 and 6 never light in any of the three cycles -- matching the
+     Credit/Match/Extra-Ball board's 5 real digits (manual Plate 15/16:
+     DIS22-26, "groups of 5 x LTS3401") and the ROM's own dedicated writer
+     for that row (0xBC19-0xBC81, gated by the in-service/message flags at
+     [0x274]/[0x2AA], entirely separate from the per-Display BCD filler at
+     0xB83F/0xB8DD). This replaces the previous f[6-g] mapping, which put
+     f[6] -- now identified as Credit/Match/Extra-Ball -- in "player 1".
+
+     f[2] and f[5] ALSO get a full 7-column cascade in the same test, but
+     the manual's own panel inventory (14 alphanumeric + 19 seven-segment =
+     33 = 4x7 + 5, Plate 15) leaves no physical position for them once the
+     four Display boards and the Credit/Match/Extra-Ball board are
+     accounted for. Rather than guess a position the manual does not
+     describe, they are left unassigned.
+
+     Not established by this evidence: the specific left-to-right identity
+     of f[0]/f[1]/f[3]/f[4] (i.e. which is literally "Display 1" versus
+     "Display 2", or which cabinet position that is) -- ascending index
+     order is used below as the least presumptuous default, the same
+     principle the sibling Mephisto investigation used for its own group
+     order (docs/findings/2026-09-01-mephisto-display-chain.md). */
+  coreGlobals.segments[0 * 7 + col].w = f[0];
+  coreGlobals.segments[1 * 7 + col].w = f[1];
+  coreGlobals.segments[2 * 7 + col].w = f[3];
+  coreGlobals.segments[3 * 7 + col].w = f[4];
+  if (col < 2)             coreGlobals.segments[28 + col].w       = f[6];
+  if (col == 2)            coreGlobals.segments[30].w             = f[6];
+  if (col >= 3 && col < 5) coreGlobals.segments[31 + (col - 3)].w = f[6];
 }
 
 static WRITE_HANDLER(shift_w) {
