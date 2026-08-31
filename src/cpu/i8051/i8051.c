@@ -429,17 +429,30 @@ static READ32_HANDLER((*hold_eram_iaddr_callback));
 static void sweep_irq_report(void);
 #endif
 
-/* Any pending IRQ */
+/* Any pending IRQ.
+   MCS-51 requires BOTH a source's flag and that source's own enable bit in IE
+   before it can interrupt (the global EA is tested separately, at the top of
+   check_interrupts()).  Each term below therefore pairs a flag with its enable.
+   These must stay in step with the matching proposals in check_interrupts():
+   if this macro lets a call through but no proposal then matches, the dispatch
+   at the bottom of that function runs with int_vec still 0 and sets PC to the
+   reset vector.  There is a belt-and-braces test for that case there as well.
+   TIMER2_IRQ additionally tests the CPU subtype.  An 8051 has no Timer 2 at
+   all, but every Timer 2 guard in this file is compile-time (HAS_I8052 /
+   HAS_I8752 are properties of the build, not of the instance), so without a
+   runtime check the Timer 2 path also runs for I8051 instances -- spinb.c,
+   mephisto.c and alvgdmd.c all instantiate I8051. */
+#define EXT0_IRQ          (GET_IE0 && GET_EX0)
+#define TIMER0_IRQ        (GET_TF0 && GET_ET0)
+#define EXT1_IRQ          (GET_IE1 && GET_EX1)
+#define TIMER1_IRQ        (GET_TF1 && GET_ET1)
 #define SERIALPORT_IRQ    ((R_SCON & 0x03) && GET_ES)
 
 #if (HAS_I8052 || HAS_I8752)
-#ifdef PINMAME // otherwise no sound on spinball games
-#define NO_PENDING_IRQ  !(R_TCON & 0xaa) && !(SERIALPORT_IRQ) && !GET_TF2 && !GET_EXF2
+#define TIMER2_IRQ        (TYPE != 8051 && GET_ET2 && (GET_TF2 || GET_EXF2))
+#define NO_PENDING_IRQ  !(EXT0_IRQ) && !(TIMER0_IRQ) && !(EXT1_IRQ) && !(TIMER1_IRQ) && !(SERIALPORT_IRQ) && !(TIMER2_IRQ)
 #else
-#define NO_PENDING_IRQ  !(R_TCON & 0xaa) && !(SERIALPORT_IRQ) && !GET_ET2 //!GET_TF2 && !GET_EXF2
-#endif
-#else
-#define NO_PENDING_IRQ  !(R_TCON & 0xaa) && !(SERIALPORT_IRQ)
+#define NO_PENDING_IRQ  !(EXT0_IRQ) && !(TIMER0_IRQ) && !(EXT1_IRQ) && !(TIMER1_IRQ) && !(SERIALPORT_IRQ)
 #endif
 
 /* Clear Current IRQ  */
@@ -1555,42 +1568,40 @@ INLINE UINT8 check_interrupts(void)
 	//NOTE: The order of checking is based on the internal/default priority levels when levels are the same
 
 	//External Int 0
-	if(GET_IE0) {
+	if(EXT0_IRQ) {
 		//Set vector & priority level request
 		i8051.int_vec = V_IE0;
 		i8051.priority_request = GET_PX0;
 	}
 	//Timer 0 overflow
-	if(!i8051.priority_request && GET_TF0 && (!i8051.int_vec || (i8051.int_vec && GET_PT0))) {
+	if(!i8051.priority_request && TIMER0_IRQ && (!i8051.int_vec || (i8051.int_vec && GET_PT0))) {
 		//Set vector & priority level request
 		i8051.int_vec = V_TF0;
 		i8051.priority_request = GET_PT0;
 	}
 	//External Int 1
-	if(!i8051.priority_request && GET_IE1 && (!i8051.int_vec || (i8051.int_vec && GET_PX1))) {
+	if(!i8051.priority_request && EXT1_IRQ && (!i8051.int_vec || (i8051.int_vec && GET_PX1))) {
 		//Set vector & priority level request
 		i8051.int_vec = V_IE1;
 		i8051.priority_request = GET_PX1;
 	}
 	//Timer 1 overflow
-	if(!i8051.priority_request && GET_TF1 && (!i8051.int_vec || (i8051.int_vec && GET_PT1))) {
+	if(!i8051.priority_request && TIMER1_IRQ && (!i8051.int_vec || (i8051.int_vec && GET_PT1))) {
 		//Set vector & priority level request
 		i8051.int_vec = V_TF1;
 		i8051.priority_request = GET_PT1;
 	}
 	//Serial Interrupt Transmit/Receive Interrupts (Note: ES Bit - Serial Interrupts must be enabled)
-	if(!i8051.priority_request && GET_ES && (GET_TI || GET_RI) && (!i8051.int_vec || (i8051.int_vec && GET_PS))) {
+	if(!i8051.priority_request && SERIALPORT_IRQ && (!i8051.int_vec || (i8051.int_vec && GET_PS))) {
 		//Set vector & priority level request
 		i8051.int_vec = V_RITI;
 		i8051.priority_request = GET_PS;
 	}
 #if (HAS_I8052 || HAS_I8752)
-	//Timer 2 overflow (Either Timer Overflow OR External Interrupt)
-#ifdef PINMAME // otherwise no sound on spinball games
-	if(!i8051.priority_request && (GET_TF2 || GET_EXF2) && (!i8051.int_vec || (i8051.int_vec && GET_PT2))) {
-#else
-	if(!i8051.priority_request && GET_ET2 && (GET_TF2 || GET_EXF2) && (!i8051.int_vec || (i8051.int_vec && GET_PT2))) {
-#endif		//Set vector & priority level request
+	//Timer 2 overflow (Either Timer Overflow OR External Interrupt).
+	//TIMER2_IRQ gates on ET2 and on the CPU subtype -- see the macro's comment.
+	if(!i8051.priority_request && TIMER2_IRQ && (!i8051.int_vec || (i8051.int_vec && GET_PT2))) {
+		//Set vector & priority level request
 		i8051.int_vec = V_TF2;
 		i8051.priority_request = GET_PT2;
 	}
@@ -1599,6 +1610,13 @@ INLINE UINT8 check_interrupts(void)
 	//Skip the interrupt request if currently processing is lo priority, and the new request IS NOT HI PRIORITY!
 	if(i8051.cur_irq < 0xff && !i8051.priority_request)
 		{ LOG(("low priority irq in progress already, skipping low irq request\n")); return 0; }
+
+	//No source was actually selected above, so there is nothing to dispatch.
+	//Without this, PC would be set to int_vec == 0 -- i.e. the reset vector --
+	//with a return address pushed.  Reachable whenever NO_PENDING_IRQ and the
+	//proposals disagree, which the enable bits make possible if either is ever
+	//changed without the other.
+	if(!i8051.int_vec) return 0;
 
     /*** --- Perform the interrupt --- ***/
 
