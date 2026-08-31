@@ -212,6 +212,75 @@ INLINE float triangular(const float r) // from -1..1, c=0 (with random no r=0..1
 //   -> but then also use triangular() instead of rand()-rand()!
 
 /***************************************************************************
+	I8051_SWEEP -- audio digest probe (compiled out unless -DI8051_SWEEP)
+
+	Every mixed sample the emulator produces passes through the single call to
+	osd_update_audio_stream() in mixer_sh_update(), so a checksum taken there
+	is a checksum of the machine's entire audio output.  It exists to answer
+	exactly one question: did a change to a shared CPU core alter what a game
+	plays?  Identical digest before and after == provably no change.
+
+	The digest is bounded by SAMPLE COUNT, never by wall clock, so two runs
+	that are stopped at different moments still produce comparable numbers as
+	long as both reached the cap (or both ran the same number of frames).
+
+	A warning about "nonzero": mixer_sh_update() adds TPDF dither of +-1 LSB
+	to every sample before quantising, and it does so whether or not anything
+	is playing.  A perfectly silent machine therefore still emits a stream of
+	0/+1/-1 values, and "nonzero" counts roughly half of them.  "nonzero" is
+	NOT a silence test.  "loud" (|s| > 1) is: it is exactly zero for a machine
+	that is producing no audio, because dither alone can never exceed 1 LSB.
+
+	This probe never touches the buffer and never changes emulation state.
+***************************************************************************/
+#ifdef I8051_SWEEP
+
+/* Bound the digest at this many INT16 values (stereo counts 2 per sample). */
+#define SWEEP_AUDIO_MAX_VALUES	2000000u
+
+static unsigned int       sweep_audio_hash	= 2166136261u;	/* FNV-1a offset basis */
+static unsigned long long sweep_audio_seen	= 0;	/* INT16 values produced, unbounded */
+static unsigned long long sweep_audio_n	= 0;	/* INT16 values actually digested   */
+static unsigned long long sweep_audio_nonzero	= 0;	/* of those, != 0  (dither included) */
+static unsigned long long sweep_audio_loud	= 0;	/* of those, |s|>1 (dither excluded) */
+
+static void sweep_audio_digest(const INT16 *buf, unsigned int count)
+{
+	unsigned int i;
+
+	sweep_audio_seen += count;
+
+	for (i = 0; i < count && sweep_audio_n < SWEEP_AUDIO_MAX_VALUES; i++)
+	{
+		const INT16 s = buf[i];
+		const unsigned int u = (unsigned int)(unsigned short)s;
+
+		sweep_audio_hash = (sweep_audio_hash ^ (u & 0xff)) * 16777619u;
+		sweep_audio_hash = (sweep_audio_hash ^ (u >> 8))   * 16777619u;
+
+		if (s != 0)			sweep_audio_nonzero++;
+		if (s > 1 || s < -1)	sweep_audio_loud++;
+
+		sweep_audio_n++;
+	}
+}
+
+static void sweep_audio_report(void)
+{
+	static int reported = 0;
+	if (reported) return;
+	reported = 1;
+
+	printf("I8051_SWEEP AUDIO hash=%08x n=%llu seen=%llu nonzero=%llu loud=%llu\n",
+		sweep_audio_hash,
+		sweep_audio_n, sweep_audio_seen,
+		sweep_audio_nonzero, sweep_audio_loud);
+	fflush(stdout);
+}
+
+#endif /* I8051_SWEEP */
+
+/***************************************************************************
 	mixer_channel_resample
 ***************************************************************************/
 
@@ -780,6 +849,10 @@ void mixer_sh_stop()
 	struct mixer_channel_data *channel;
 	int i;
 
+#ifdef I8051_SWEEP
+	sweep_audio_report();
+#endif
+
 	osd_stop_audio_stream();
 
 	for (i = 0, channel = mixer_channel; i < MIXER_MAX_CHANNELS; i++, channel++)
@@ -931,6 +1004,10 @@ void mixer_sh_update()
     extern void pm_wave_record(INT16 *buffer, int samples);
     pm_wave_record(mix_buffer, samples_this_frame);
     }
+
+#ifdef I8051_SWEEP
+	sweep_audio_digest(mix_buffer, samples_this_frame * (is_stereo ? 2 : 1));
+#endif
 
 	samples_this_frame = osd_update_audio_stream(mix_buffer);
 

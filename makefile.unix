@@ -794,6 +794,20 @@ ifdef REMOTE_DEBUG
 CFLAGS += -DREMOTE_DEBUG
 endif
 
+# Sweep instrumentation: audio digest (src/sound/mixer.c) + per-source 8051
+# interrupt dispatch counters (src/cpu/i8051/i8051.c), both printed at exit.
+# Purely observational -- it changes no emulation behaviour -- but it is off by
+# default and OFF is the shipping configuration.  Building with it appends an
+# "s" to NAME, so the instrumented binary and object dir never collide with a
+# normal build.  Build it with neither REMOTE_DEBUG nor DEBUG -- REMOTE_DEBUG's
+# usleep(1) in cpu_run() makes a sweep 24x slower and its polling HTTP thread
+# makes the measurement non-reproducible (see scripts/i8051_sweep.sh):
+#   make -f makefile.unix I8051_SWEEP=1 -j$(nproc)      # -> ./xpinmames.x11
+ifdef I8051_SWEEP
+CFLAGS += -DI8051_SWEEP
+NAME := $(NAME)s
+endif
+
 ###########################################################################
 # All done.  Type make -f makefile.unix and enjoy xmame/xmess.  ;)
 # No configurable options below this line.

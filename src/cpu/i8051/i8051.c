@@ -423,6 +423,12 @@ static READ32_HANDLER((*hold_eram_iaddr_callback));
 
 #define V_TF2	0x02b	/* Timer 2 Overflow */
 
+#ifdef I8051_SWEEP
+/* Sweep instrumentation.  Defined next to check_interrupts(), where the counting
+   happens; declared here only so i8051_exit() below can print the totals. */
+static void sweep_irq_report(void);
+#endif
+
 /* Any pending IRQ */
 #define SERIALPORT_IRQ    ((R_SCON & 0x03) && GET_ES)
 
@@ -608,7 +614,10 @@ void i8051_reset(void *param)
 /* Shut down CPU core */
 void i8051_exit(void)
 {
-	/* nothing to do */
+#ifdef I8051_SWEEP
+	sweep_irq_report();
+#endif
+	/* nothing else to do */
 }
 
 /* Execute cycles - returns number of cycles actually run */
@@ -1491,6 +1500,42 @@ void i8051_set_irq_line(int irqline, int state)
 		e) RI+TI
 		f) TF2+EXF2
  **********************************************************************************/
+/***********************************************************************************
+ I8051_SWEEP -- per-source interrupt dispatch counters (compiled out unless
+ -DI8051_SWEEP).
+
+ check_interrupts() proposes a vector in up to six separate if-blocks, each of
+ which may overwrite the previous one's i8051.int_vec.  Counting at those sites
+ would therefore over-count: a proposal is not a dispatch.  The counters below
+ are incremented at the single point where the dispatch is committed -- after
+ the last early-return, immediately before push_pc() -- so each increment is one
+ interrupt the CPU actually took.
+
+ Purpose: when a game's audio digest moves after a change to the enable-bit
+ logic, these say which of the five sources caused it.  Purely observational;
+ no emulation state is read or written that the core does not already read.
+ ***********************************************************************************/
+#ifdef I8051_SWEEP
+static unsigned long long sweep_irq_ie0  = 0;	/* External 0        */
+static unsigned long long sweep_irq_tf0  = 0;	/* Timer 0 overflow  */
+static unsigned long long sweep_irq_ie1  = 0;	/* External 1        */
+static unsigned long long sweep_irq_tf1  = 0;	/* Timer 1 overflow  */
+static unsigned long long sweep_irq_riti = 0;	/* Serial RI/TI      */
+static unsigned long long sweep_irq_tf2  = 0;	/* Timer 2 TF2/EXF2  */
+
+static void sweep_irq_report(void)
+{
+	static int reported = 0;
+	if (reported) return;
+	reported = 1;
+
+	printf("I8051_SWEEP IRQ ie0=%llu tf0=%llu ie1=%llu tf1=%llu riti=%llu tf2=%llu\n",
+		sweep_irq_ie0, sweep_irq_tf0, sweep_irq_ie1,
+		sweep_irq_tf1, sweep_irq_riti, sweep_irq_tf2);
+	fflush(stdout);
+}
+#endif /* I8051_SWEEP */
+
 INLINE UINT8 check_interrupts(void)
 {
 #if FIXIRQ
@@ -1556,6 +1601,19 @@ INLINE UINT8 check_interrupts(void)
 		{ LOG(("low priority irq in progress already, skipping low irq request\n")); return 0; }
 
     /*** --- Perform the interrupt --- ***/
+
+#ifdef I8051_SWEEP
+	/* Committed: past every early return, the vector is final.  One increment
+	   here == one interrupt actually taken.  See the block above check_interrupts(). */
+	switch(i8051.int_vec) {
+		case V_IE0:  sweep_irq_ie0++;  break;
+		case V_TF0:  sweep_irq_tf0++;  break;
+		case V_IE1:  sweep_irq_ie1++;  break;
+		case V_TF1:  sweep_irq_tf1++;  break;
+		case V_RITI: sweep_irq_riti++; break;
+		case V_TF2:  sweep_irq_tf2++;  break;
+	}
+#endif
 
 	//Save current pc to stack, set pc to new interrupt vector
 	push_pc();
