@@ -1137,9 +1137,43 @@ static struct YM3812interface cirsa_ym3812Int = {
 
 static struct DACinterface cirsa_dacInt = { 1, { 50 }};
 
+/*-- Sound ROM banking (plate 11, PDF p.34) ------------------------------
+/  IC20, a 74LS373, latches the bank byte.  Three of its outputs drive
+/  IC22 (74LS138) A/B/C, whose Y0-Y7 are CST0-CST7, the chip selects of the
+/  eight EPROM sockets -- in board order IC14, IC13, IC12, IC11, IC16, IC17,
+/  IC18, IC19.  A fourth output leaves the latch as the net A15F and goes to
+/  pin 1 of every socket, with a 10K pull-up (R16, 8x10K).  There is no
+/  inverter on that path, so bit 3 reaches A15 directly: 0 = low half.
+/
+/  Pin 1 is Vpp on a 27256 (harmlessly held at +5V by the pull-up) and A15 on
+/  a 27512.  The sockets are silkscreened "27256-(27512)" for exactly that
+/  reason, and the two games populate them differently:
+/
+/    Mephisto  eight 27256 (0x8000 each), CST0..CST7 -> 0x00000..0x38000.
+/              A15F does nothing.  bank = data, flat: data * 0x8000.
+/    Sport2000 five 27512 (0x10000 each) on CST0..CST4.  bits 0-2 pick the
+/              chip, bit 3 picks the 32K half within it.
+/
+/  The old flat arithmetic was right for Mephisto and wrong for Sport 2000,
+/  whose descriptor table uses 0x00-0x04 and 0x08-0x0C.  Under data*0x8000
+/  those ran off the end of a 0x50000 region -- 0x0B -> 0x58000 and
+/  0x0C -> 0x60000, both out of bounds, 11,771 times in 60 s of attract --
+/  and the most common value, 0x09, silently addressed the wrong chip.
+/
+/  Bit 3's polarity is confirmed twice over: the schematic path above, and a
+/  measurement -- DAC discontinuity across a bank change is 2.73x the
+/  within-bank step size non-inverted against 3.55x inverted.
+/-----------------------------------------------------------------------*/
 static WRITE_HANDLER(bank_w) {
-  cpu_setbank(1, memory_region(REGION_SOUND1) + data * 0x8000);
-  logerror("SND BANK %x:%02x\n", offset, data);
+  UINT32 off;
+
+  if (core_gameData->hw.gameSpecific1)          /* Mephisto: 8 x 27256 */
+    off = data * 0x8000;
+  else                                          /* Sport 2000: 5 x 27512 */
+    off = (data & 0x07) * 0x10000 + (((data >> 3) & 1) * 0x8000);
+
+  cpu_setbank(1, memory_region(REGION_SOUND1) + off);
+  logerror("SND BANK %x:%02x -> %05x\n", offset, data, off);
 }
 
 static READ_HANDLER(port_r) {
