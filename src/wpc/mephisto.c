@@ -344,8 +344,12 @@ static int cirsa_frameLen(void) {
 /  Numeric groups (CORE_SEG8D -- all of Mephisto's five, Sport 2000's two
 /  7-digit rows and its credit/match/EB digits): ROM bit -> segment ->
 /  core_bcd2seg7 bit, one-to-one, per the finding's sec 5.2.  ROM bit 0
-/  (dp) has no target in core_bcd2seg7 (a 7-value table, no punctuation
-/  row) and is dropped.
+/  (dp) is dropped -- not because CORE_SEG8D lacks a period bit (it has
+/  one, bit 7, per segSize1C[4] at core.c:354) but because neither ROM
+/  font ever needs it: the digit font at 0xC143 never sets bit 0, and
+/  where a numeric row is fed from the alphanumeric font's high byte,
+/  bit 0 is D2 (a D1 duplicate), not a dot -- mapping it would light a
+/  spurious period.
 /
 /  Alphanumeric groups (CORE_SEG16N, Sport 2000 only): 16 ROM bits carry
 /  14 independent strokes plus two hard-wired duplicates -- A2 (low bit 2)
@@ -369,13 +373,37 @@ static int cirsa_frameLen(void) {
 /  that wants a full-width bar.  Kept as two independent single-bit
 /  mappings instead.
 /
-/  Low-byte bit 7 (R) itself is the one bit this project rates moderate-,
-/  not high-, confidence -- best-supported as a right-of-centre companion
-/  to the middle bar, not certain (see the finding's sec 3.1 step 4 and
-/  sec 4).  If a character renders wrong in a way that implicates that
-/  stroke (an extra or missing right-hand nub near the vertical centre),
-/  this is the row to revisit.  Every other bit is pinned by intersecting
-/  constraints with zero contradictions across the solid 0x20-0x5A range.
+/  Low-byte bit 7 (R) is settled, not moderate confidence.  Plate 15's
+/  DIS1 symbol lists 16 named segment pins in two 8-pin lanes -- 8
+/  outer-ring (A1 A2 B C D1 D2 E F) and 6 inner-cross (H J K M N P) --
+/  leaving only G and R to cover the middle bar, so a part that already
+/  splits A1/A2 and D1/D2 must split the middle bar too.  An exhaustive
+/  search over all 16 PinMAME bits (plus "drop") for this bit's target
+/  scores bit 11 at 24/26 on A-Z, a six-point margin over every other
+/  candidate (17-18); ROM R agrees with PinMAME bit 11 on 35/36 letters,
+/  the same rate G gets against bit 6 -- nobody hedges G.  See
+/  docs/findings/2026-09-03-low-byte-strokes.md sec 4/5.1 and
+/  .superpowers/segment-remap-review.md sec 1-2.
+/
+/  Two font-design mismatches are known and are NOT remap bugs -- do not
+/  chase them by editing these tables:
+/    - 'E': the ROM's 'E' sets both G and R (a full-width middle bar).
+/      Both candidate mappings for R (bit 11 alone, or forced-OR with G
+/      per the rejected sec 5.1 prose above) produce the identical
+/      remapped word for 'E', so 'E' is evidence about neither one -- it
+/      differs from core_ascii2seg16['E'] only because PinMAME's
+/      Rockwell-derived font draws 'E' (and 'F') with a half-width
+/      crossbar, left half only, where the ROM (and the real hardware)
+/      draws a full-width bar.
+/    - 'K': the ROM's 'K' has high byte 0x00 -- it lights no outer-ring
+/      stroke at all -- while core_ascii2seg16['K'] lights e and f.  No
+/      permutation of the low byte can create or destroy an outer-ring
+/      segment, so this is provably a font-drawing difference too, not a
+/      low-byte decode error.  Neither letter is exercised by the four
+/      verified strings (NO AUDIO / SPORT 2000 / GAME OVER / UNIDESA
+/      CIRSA).
+/  Every other bit is pinned by intersecting constraints with zero
+/  contradictions across the solid 0x20-0x5A range.
 /---------------------------------------------------------------------*/
 
 /* Numeric font bit -> core_bcd2seg7 bit.  ROM order a=3 b=7 c=5 d=4 e=1
@@ -383,7 +411,10 @@ static int cirsa_frameLen(void) {
    2026-09-03-low-byte-strokes.md sec 5.2); core_bcd2seg7 (core.c:137) is
    the classic a=0 b=1 c=2 d=3 e=4 f=5 g=6, no dp bit. */
 static const UINT8 cirsa_seg8dBit[8] = {
-  0,      /* 0: dp -- no core_bcd2seg7 equivalent, dropped */
+  0,      /* 0: dp -- CORE_SEG8D's period is bit 7 (segSize1C[4],
+             core.c:354), but neither ROM font ever needs it: the digit
+             font never sets bit 0, and in the alphanumeric high byte
+             bit 0 is D2, not dp -- dropped, not unmapped */
   1 << 4, /* 1: e */
   1 << 5, /* 2: f */
   1 << 0, /* 3: a */
@@ -418,8 +449,7 @@ static const UINT16 cirsa_seg16HiBit[8] = {
 
 /* Alphanumeric font, low byte bit -> CORE_SEG16N bit.  Bit 2 is A2, the
    mirrored twin of A1 (hi bit 3); the rest are the six-stroke internal
-   cross plus R (bit 7, moderate confidence -- see the block comment
-   above). */
+   cross plus R (bit 7, settled -- see the block comment above). */
 static const UINT16 cirsa_seg16LoBit[8] = {
   1 << 12, /* 0: M */
   1 << 14, /* 1: K */
@@ -428,7 +458,7 @@ static const UINT16 cirsa_seg16LoBit[8] = {
   1 << 13, /* 4: L */
   1 << 10, /* 5: J */
   1 << 9,  /* 6: I */
-  1 << 11, /* 7: R  -- moderate confidence, see block comment above */
+  1 << 11, /* 7: R  -- settled, see block comment above */
 };
 
 static UINT16 cirsa_seg16(UINT8 lo, UINT8 hi) {
