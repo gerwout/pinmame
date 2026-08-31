@@ -835,10 +835,43 @@ static READ_HANDLER(ic20_pc_r) {
 /  second and never issues an "off", so this must be idempotent -- it sets
 /  and clears the three bits for the addressed position on every write.
 /
-/  Derived by running the ROM's own COILS TEST 4-PHASE and correlating with
-/  the coil number displayed; see the workspace repo's
-/  docs/findings/2026-08-30-coil-encoding.md (that is the repo this driver
-/  is developed alongside, not this fork -- there is no such path here).
+/  Derived by running each ROM's own COILS TEST and correlating with the
+/  coil number it displays.  Mephisto's write-up is in this fork, at
+/  docs/findings/2026-08-31-mephisto-coils.md; Sport 2000's is
+/  docs/findings/2026-08-30-coil-encoding.md in the workspace repo this
+/  driver is developed alongside (there is no such path here).
+/
+/  THE TWO GAMES NUMBER THE POSITIONS IN OPPOSITE DIRECTIONS.  Same wires,
+/  same connectors, same frame -- but Sport 2000 puts coil N at position
+/  N%8 while Mephisto puts it at 7-(N%8), so a decode written for one game
+/  mislabels 6 of every 8 coils on the other (only N%8 == 3 and 4 survive).
+/  It is not an inference from the schematic, it is what each ROM does:
+/
+/    Sport 2000  SolenoidOn(N) (0xC7D8, table 0xC81E) sets mask 1<<(N%8)
+/                in the group byte, and the frame builder emits group-byte
+/                bit p at position p  ->  position N%8.
+/    Mephisto    COIL TEST's element routine (0x3178, mephist1 0x2E01 --
+/                byte-identical) does `mov al,0x80 / ror al,cl` with
+/                cl = N%8, i.e. mask 0x80>>(N%8), and its frame builder
+/                (0x126C, mephist1 0x103F) emits group-byte bit p at
+/                position p  ->  position 7-(N%8).
+/
+/  Confirmed live on the machine, all 24 coils and both ROM revisions, by
+/  walking Mephisto's own COIL TEST ("TEST / BOBINAS / -4-FASE / N nn")
+/  one element at a time and reading the displayed number against the PA
+/  byte on the bus.  The four group boundaries, verbatim from that walk
+/  (bit 6 is the heartbeat and rides along at positions 0 and 3, which is
+/  why some bytes read 0xC../0xD../0xE.. rather than 0x8./0x9./0xA.):
+/
+/    N 00 -> 0x8F  N 07 -> 0xC8   (PA3, group 0, positions 7 .. 0)
+/    N 08 -> 0x97  N 15 -> 0xD0   (PA4, group 1, positions 7 .. 0)
+/    N 16 -> 0xA7  N 23 -> 0xE0   (PA5, group 2, positions 7 .. 0)
+/
+/  The bus transaction itself is the same for both games, instruction for
+/  instruction -- Mephisto at 0x130D, Sport 2000 at 0xC277: select the
+/  position, write PA, mask PC to 000, pulse PA bit 7 low then high,
+/  restore PC to 111 -- and both memory maps route their IC9 through this
+/  same handler.  It was only ever the numbering that differed.
 /
 /  Not modelled here: PA6, the global enable described above, is read back
 /  and tested but never latched into coreGlobals -- only the strobe (PA7)
@@ -855,38 +888,24 @@ static WRITE_HANDLER(ic9_pa_w) {
   const int pos = data & 0x07;
   int blk;
 
-  /* Sport 2000 only.  The bus protocol itself IS established for Mephisto:
-     its ROM drives IC9 Port A with the same transaction idiom, instruction
-     for instruction, at 0x130D (disasm/mephisto.bin) as Sport 2000 uses at
-     0xC277 (disasm/sport2k.bin) -- select position, write PA, mask PC to
-     000, strobe PA bit 7 low then high, restore PC to 111 -- and Mephisto
-     also reads PA back and tests bit 6 at 0x12F6-0x1303, mirroring Sport
-     2000's own PA readback.  mephisto_readmem/mephisto_writemem route the
-     identical 0x14800-0x14807 range through this same ic9_r/ic9_w, so this
-     handler fires for Mephisto and mephist1 too, and it is the same bus.
-
-     What is genuinely unestablished is Mephisto's coil NUMBERING and
-     CONNECTOR MAP.  The 24-coil, three-connector (J11/J12/J13) assignment
-     above came solely from Sport 2000's own COILS TEST 4-PHASE, and
-     Mephisto's board has several documented IC9/IC20-area differences from
-     Sport 2000's (different switch matrix, different address decoder,
-     lamp/switch drive on the CPU board instead of a separate distribution
-     board) that bear on which physical coil sits at which bus position.
-     Running Mephisto's Port A writes through this decode would populate
-     coreGlobals.solenoids with fictitious coil numbers even though the bus
-     underneath them is real.  Writing nothing here is honest; writing a
-     plausible-looking but invented bitmask is not -- a blank solenoid
-     state is visibly incomplete, but a wrong one looks like a working
-     driver until someone traces an individual coil back to the wrong
-     physical position, and this is the one place in the driver where
-     getting that wrong means publishing fictitious solenoid numbers, not
-     just a blank display.  Re-enable once Mephisto's own coil numbering
-     is confirmed -- the 0x12F6-0x1303 readback is a good place to start
-     walking it the way COILS TEST 4-PHASE did for Sport 2000. */
-  if (core_gameData->hw.gameSpecific1) return;
-
+  /* Both games are decoded here now.  The gate that used to sit at this
+     point ("Sport 2000 only -- Mephisto's coil numbering is not
+     established") is gone because the numbering IS established: see the
+     block comment above for the per-game position order and the live
+     COIL TEST walk that settled it.  What is still missing for Mephisto is
+     upstream of this handler, not in it -- nothing drives the MUART's
+     EXTINT pin for Mephisto, and the ISR that builds and sends the coil
+     frame is its interrupt level 2 (vector type 0x42 -> 0x1416), so with
+     the driver as it stands Mephisto's ROM only ever writes the watchdog
+     byte here (0x00/0x40/0xC0: position 0, all three data bits clear) and
+     coreGlobals.solenoids correctly stays 0.  The decode below is what
+     runs the moment that pin is connected. */
   for (blk = 0; blk < 3; blk++) {
-    const UINT32 bit = 1u << (blk * 8 + pos);   /* coil number == mask bit */
+    /* coil number == mask bit; Mephisto counts the position the other way
+       round (7-pos), see the block comment. */
+    const int coil = blk * 8 +
+                     (core_gameData->hw.gameSpecific1 ? (7 - pos) : pos);
+    const UINT32 bit = 1u << coil;
     if (data & (0x08 << blk)) coreGlobals.solenoids |=  bit;
     else                      coreGlobals.solenoids &= ~bit;
   }
@@ -940,7 +959,8 @@ static WRITE_HANDLER(ic9_pa_w) {
          their release, not the PA sweep -- measured at 0.3-1.5 s during
          active gameplay, but under 30 ms at idle in attract, so the delay
          itself is state-dependent, not a fixed driver latency. */
-  coreGlobals.solenoids |= (locals.qcState & 0x0e);  /* coils 1-3 only */
+  if (!core_gameData->hw.gameSpecific1)              /* Sport 2000 only */
+    coreGlobals.solenoids |= (locals.qcState & 0x0e); /* coils 1-3 only  */
 
   /* Feed the PWM integrator with the same 24-bit state, including the
      quick-contact OR above -- this is what MACHINE_INIT(CIRSA)'s
@@ -949,7 +969,9 @@ static WRITE_HANDLER(ic9_pa_w) {
      it is a far better source for the integrator than sampling
      coreGlobals.solenoids from cirsa_vblank would be -- see p2k.c:2013-2018
      on why a once-a-frame sample loses short pulses the integrator needs
-     to see. Sport 2000 only, same gate as the rest of this handler. */
+     to see.  Both games now: Mephisto reaches this with all-zero data
+     until its EXTINT is connected, which is an honest "everything off",
+     not an unfed integrator. */
   core_write_pwm_output_8b(CORE_MODOUT_SOL0,      (UINT8)(coreGlobals.solenoids      & 0xff));
   core_write_pwm_output_8b(CORE_MODOUT_SOL0 +  8, (UINT8)((coreGlobals.solenoids >> 8)  & 0xff));
   core_write_pwm_output_8b(CORE_MODOUT_SOL0 + 16, (UINT8)((coreGlobals.solenoids >> 16) & 0xff));
@@ -1043,13 +1065,12 @@ static MACHINE_INIT(CIRSA) {
      nSolenoids alone makes things worse, not better. This is that same
      decision completed, not reversed: ic9_pa_w now feeds the integrator
      on every hardware write (see below), so the count can be advertised
-     honestly. Sport 2000 only -- Mephisto's coil numbering on this same
-     bus is still uncharacterised (see ic9_pa_w's gate), so it must not
-     advertise solenoids it cannot drive. */
-  if (!core_gameData->hw.gameSpecific1) {
-    coreGlobals.nSolenoids = 24;
-    core_set_pwm_output_type(CORE_MODOUT_SOL0, 24, CORE_MODOUT_SOL_2_STATE);
-  }
+     honestly. Both games: Mephisto's numbering on this same bus is now
+     established too (see ic9_pa_w's block comment), it has the same 24
+     coils on the same three connectors, and ic9_pa_w feeds the integrator
+     for it on exactly the same schedule. */
+  coreGlobals.nSolenoids = 24;
+  core_set_pwm_output_type(CORE_MODOUT_SOL0, 24, CORE_MODOUT_SOL_2_STATE);
 
   i8256_init(&cirsa_i8256);
   i8155_init(&cirsa_i8155);
