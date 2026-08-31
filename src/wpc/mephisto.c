@@ -363,6 +363,17 @@ static void cirsa_shift_frame(const UINT8 *f, int len) {
          f[2] -> segments[14..20] (Player 3)
          f[3] -> segments[21..27] (Player 4)
          f[4], columns 0-4        -> segments[28..32] (credit/match/EB)
+                                      -- ASSUMED, see below
+
+     f[4]'s column slice is carried over from Sport 2000's f[6] pattern
+     (below), NOT independently established for Mephisto: no findings doc
+     identifies which five of the credit board's seven columns carry its
+     five LTS 3401s -- Plate 11 lists DP1..DP5 against TR1..TR7 with no
+     stated correspondence, and the only column this task observed f[4]
+     non-zero at is column 2 (the credit digit in the "NO AUDIO" capture).
+     Sport 2000's f[6] slice, by contrast, is independently established
+     (docs/findings/2026-08-29-display-buffer.md's addendum traced actual
+     writers to offsets 42-46, i.e. columns 0-4, and found none for 5-6).
 
      Not established for either game: which physical row is upper/lower on
      the cabinet (which alphanumeric or numeric row is "first", which
@@ -375,9 +386,7 @@ static void cirsa_shift_frame(const UINT8 *f, int len) {
     coreGlobals.segments[1 * 7 + col].w = f[1];
     coreGlobals.segments[2 * 7 + col].w = f[2];
     coreGlobals.segments[3 * 7 + col].w = f[3];
-    if (col < 2)             coreGlobals.segments[28 + col].w       = f[4];
-    if (col == 2)            coreGlobals.segments[30].w             = f[4];
-    if (col >= 3 && col < 5) coreGlobals.segments[31 + (col - 3)].w = f[4];
+    if (col < 5) coreGlobals.segments[28 + col].w = f[4];  /* credit/match/EB, cols 0-4 */
     return;
   }
 
@@ -387,9 +396,7 @@ static void cirsa_shift_frame(const UINT8 *f, int len) {
   coreGlobals.segments[1 * 7 + col].b.hi = f[1];
   coreGlobals.segments[2 * 7 + col].w    = f[5];
   coreGlobals.segments[3 * 7 + col].w    = f[2];
-  if (col < 2)             coreGlobals.segments[28 + col].w       = f[6];
-  if (col == 2)            coreGlobals.segments[30].w             = f[6];
-  if (col >= 3 && col < 5) coreGlobals.segments[31 + (col - 3)].w = f[6];
+  if (col < 5) coreGlobals.segments[28 + col].w = f[6];  /* credit/match/EB, cols 0-4 */
 }
 
 static WRITE_HANDLER(shift_w) {
@@ -657,12 +664,15 @@ static WRITE_HANDLER(ic9_pa_w) {
      board) that bear on which physical coil sits at which bus position.
      Running Mephisto's Port A writes through this decode would populate
      coreGlobals.solenoids with fictitious coil numbers even though the bus
-     underneath them is real.  Same precedent as cirsa_shift_frame's
-     Mephisto gate just above: writing nothing is honest, writing a
-     plausible-looking but invented bitmask is not.  Re-enable once
-     Mephisto's own coil numbering is confirmed -- the 0x12F6-0x1303
-     readback is a good place to start walking it the way COILS TEST
-     4-PHASE did for Sport 2000. */
+     underneath them is real.  Writing nothing here is honest; writing a
+     plausible-looking but invented bitmask is not -- a blank solenoid
+     state is visibly incomplete, but a wrong one looks like a working
+     driver until someone traces an individual coil back to the wrong
+     physical position, and this is the one place in the driver where
+     getting that wrong means publishing fictitious solenoid numbers, not
+     just a blank display.  Re-enable once Mephisto's own coil numbering
+     is confirmed -- the 0x12F6-0x1303 readback is a good place to start
+     walking it the way COILS TEST 4-PHASE did for Sport 2000. */
   if (core_gameData->hw.gameSpecific1) return;
 
   for (blk = 0; blk < 3; blk++) {
@@ -998,6 +1008,18 @@ INPUT_PORTS_END
    declaration). Positions 14..20 and 21..27 stay the real 7-digit LTS 3401
    numeric rows, CORE_SEG8D, unchanged.
 
+   CORE_SEG16N controls pixel geometry only, NOT bit interpretation -- and
+   the bits it draws are NOT in PinMAME's own order. The ROM's font bit
+   order is a=3 b=7 c=5 d=4 e=1 f=2 g=6 dp=0 (docs/findings/
+   2026-09-02-alphanumeric-segments.md sec 5), but core.c:187's
+   core_ascii2seg16 -- PinMAME's own canonical 16-segment bit assignment --
+   puts segment a at bit 0. The two words written below (f[3]/f[4] and
+   f[0]/f[1], verified byte-exact against known ROM strings) are the
+   correct DATA; the strokes core_seg_video_update() draws from them are
+   not, until a per-bit remap (ROM bit -> PinMAME segment bit) is added.
+   That remap is real work with its own verification surface -- not
+   attempted here, see the findings doc sec 5-6.
+
    Column positions were checked, not just carried over: core.c's
    segData[] table gives CORE_SEG8D and CORE_SEG16N the identical {20,15}
    cell (cols=15 either way), and core_seg_video_update() advances `left`
@@ -1045,18 +1067,22 @@ static core_tLCDLayout mephisto_disp[] = {
    off by hw.gameSpecific1 in cirsa_vblank), so it needs no custom column. */
 /* hw.gameSpecific1 (7th field of the hw sub-struct: flippers, swCol, lampCol,
    custSol, soundBoard, display, gameSpecific1) is the Sport-2000-vs-Mephisto
-   switch: 0 = Sport 2000 (default), 1 = Mephisto/mephist1. It has five
-   consumers, all gating Sport-2000-only decodes that are not established
-   for Mephisto's board: cirsa_frameLen()'s frame length, cirsa_shift_frame()'s
-   column-mask table select and its Mephisto write gate, ic9_pa_w's
-   coil-bus decode, and cirsa_vblank's quick-contact gate (Mephisto has no
-   quick-contact path modelled, see the comment just above mephistoGameData).
-   It is not just the display's column-mask select -- characterising
-   Mephisto's own 4094 chain removes one consumer, not all of them, and in
-   particular does not touch the coil-bus gate that commit 20f52134 added
-   to keep ic9_pa_w from populating coreGlobals.solenoids with fictitious
-   Mephisto coil numbers, nor the quick-contact gate that a later commit
-   added to cirsa_vblank. */
+   switch: 0 = Sport 2000 (default), 1 = Mephisto/mephist1. It has four
+   consumers:
+
+     - cirsa_frameLen()'s frame length (8 bytes vs 6).
+     - cirsa_shift_frame()'s per-game selector -- the column-mask table,
+       and, since the display round, which segment-group mapping to write.
+       Both games are characterised now, so this is a selector between two
+       implemented paths, not a gate on an unimplemented one.
+     - ic9_pa_w's coil-bus GATE (still a gate: Mephisto's coil numbering is
+       not established, so it still writes nothing for Mephisto -- see the
+       comment there).
+     - cirsa_vblank's quick-contact GATE (Mephisto has no quick-contact
+       path modelled, see the comment just above mephistoGameData).
+
+   Two of the four remain genuine "write nothing, unestablished" gates
+   (ic9_pa_w, cirsa_vblank); the display round closed the third. */
 static core_tGameData cirsaGameData    = {0,cirsa_disp,{FLIP_SW(FLIP_L),1,8}};
 static core_tGameData mephistoGameData = {0,mephisto_disp,{FLIP_SW(FLIP_L),0,8,0,0,0,1}};
 static void init_cirsa(void) {
