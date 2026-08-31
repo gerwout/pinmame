@@ -30,6 +30,23 @@ confirmed.** Before: the Sport 2000 sound CPU took the spurious Timer 1 interrup
 exercise exists because of attributes a sound regression to a CPU that has no sound
 role in those games. `[STATIC]`
 
+**Correction (adversarial review, 2026-08-31): Sport 2000 still does not produce audio,
+and the `loud` numbers below must not be read as evidence that it does.** A raw-PCM tap
+on the post-fix `sport2k` stream (60 s, windowed past the boot transient) shows a DC
+level at 98% of full scale, 55.1% of samples hard-clipped at +32,767, a per-second
+standard deviation that is stationary (960–1,005) for all 59 post-boot seconds, and no
+tonal spectrum. The mechanism is the **AY-3-8910**, not the DAC: its tone-period
+registers `R1`-`R6` are never programmed (`0x00`), `R7=0xcf` disables tone on all three
+channels and enables noise on channels B and C, and `R8`/`R9`/`R10=0xcf` fix every
+channel's volume at 15. Channel A is therefore a constant (tone and noise both off at
+nonzero volume) — the DC rail — and channels B/C are the noise generator running at full
+volume — the "variation" that makes `loud` nonzero. The DAC is written only 5 times in
+60 s, to 1 distinct value, and plays no part in this. §5 carries the full number and the
+caveat together, and §9's caveat has been corrected to name the AY rather than the DAC.
+What remains true and is *not* withdrawn: the fix removes a real spurious-interrupt
+defect, the 8051 escapes its lockup, and `IE` reaches `0x92` with `ES` set — see §1 and
+§5.
+
 ## 1. The change (`src/cpu/i8051/i8051.c`, commit `781554e4`)
 
 Three parts, not the two the brief anticipated.
@@ -55,8 +72,12 @@ sites are gone — the dispatch and the `NO_PENDING_IRQ` early-out — replaced 
 defined for the whole build (`src/pinmame.h:57`), so the Timer 2 path was live on I8051
 instances — chips with no Timer 2 register at all.
 
-**(c) A latent jump-to-zero that (a) would have introduced.** This is not in the brief
-and it is not cosmetic.
+**(c) A latent jump-to-zero that (a) would have introduced.** The spec already named
+half of this: it called out that `#ifdef PINMAME` appears in two places, not one — the
+dispatch site and the `NO_PENDING_IRQ` early-out — and warned that fixing only the
+dispatch site leaves the early-out inconsistent. What the spec did not anticipate is the
+*jump-to-zero* consequence of that inconsistency for the four non-Timer-2 sources, which
+is the genuinely new finding here, and it is not cosmetic.
 
 `NO_PENDING_IRQ` tested the raw `TCON` flags (`!(R_TCON & 0xaa)`). Its job is to return
 early when nothing is pending; the six proposal blocks below it then choose a vector.
@@ -87,8 +108,13 @@ It is not a small effect. Same binary, same flags, `-ftr 3600`, three runs each:
 
 | game | NVRAM cleared each run | NVRAM carried over |
 |---|---|---|
-| `bsb105` | `ie0=51 riti=265`, hash `c531474d`, 3/3 | `ie0=8 riti=247`, hash `c73ce5f7`, 3/3 |
+| `bsb105` | `ie0=51 riti=265`, hash `c531474d`, 3/3 | `ie0=51 riti=265` (unchanged), hash `c73ce5f7`, 3/3 |
 | `bbb109` | `riti=8`, 3/3 | `riti=11` (and `riti=23` from a third NVRAM state), 3/3 |
+
+(`bsb105`'s carried-over counters were originally mis-transcribed here as `ie0=8
+riti=247` — that pair belongs to `bsv102`/`pp100`, not `bsb105`. `bsb105`'s own
+interrupt counters do not move between NVRAM states; only its audio digest does, because
+NVRAM changes what plays, not how many interrupts fire. Corrected 2026-08-31.)
 
 Both are perfectly reproducible *once the NVRAM state is pinned*. So the run-to-run
 variation Task 1 attributed to "reads of uninitialised memory in those drivers" is
@@ -104,8 +130,15 @@ and each pair is identical; the committed TSVs are the first pass of each.
 - `docs/findings/2026-08-31-i8051-fixed-sweep.tsv` (post-fix)
 
 Task 1's `2026-08-31-i8051-baseline-sweep.tsv` is left as it is. It was taken with
-NVRAM carried over and disagrees with the clean baseline on `bsb105` and `bbb108`/
-`bbb109`; it is not the comparator for this change and should not be used as one.
+NVRAM carried over and disagrees behaviourally with the clean baseline on **14 of the 35
+games** — `bsb105` and `bbb109` (the pair flagged when NVRAM was first identified as a
+hidden input) plus `wrldtour`, `wrldtou2`, `wrldtou3`, `mystcast`, `mystcasa`, `pstlpkr`,
+`pstlpkr1`, `bsv103`, `bsv102`, `pp100`, `jolypark` and `vrnwrld`. (`bbb108`, despite an
+earlier version of this sentence naming it, is byte-identical across all three TSVs —
+the affected Capcom game is `bbb109` alone.) It is not the comparator for this change
+and should not be used as one; using it would have manufactured 17 "moved" games,
+including four spinball titles, which is exactly the regression this exercise exists to
+rule out.
 
 ## 3. The sweep
 
@@ -220,10 +253,19 @@ enable, and they went up because the CPU is no longer parked. Nothing was added 
 
 ### The other 32 games
 
-Byte-identical audio digest and identical counters in all six sources. Per the design's
-own property — a per-source enable check can only remove dispatches, never add one or
-change one's timing — the fix is *provably* a no-op for them. No explanation needed and
-none is offered. `[OBSERVED]`
+Byte-identical audio digest and identical counters in all six sources — **measured**,
+across two full 35-game passes each for the pre- and post-fix sweep. `[OBSERVED]`
+
+That is the claim, and it is sufficient on its own. It is tempting to go further and say
+the fix is *provably* a no-op for these games, reasoning from the design's own property
+that a per-source enable check can only remove dispatches, never add one or retime one.
+That property is real but it is **pointwise** — true of the predicate at a fixed machine
+state — not global over a whole run: removing a dispatch changes the instruction stream
+from that point on, and this same document shows dispatches *added* elsewhere as a
+consequence (`mephisto`'s `tf0` goes `0 → 584,579`) and timing *changed* (§5's `0x024D`
+count moves by roughly 12%). Nothing here contradicts "32 games unaffected" — none of
+them exercise the state the property would perturb — but the reasoning that would make it
+provable a priori does not exist; only the measurement does.
 
 ## 5. The Sport 2000 prediction, tested explicitly
 
@@ -241,14 +283,38 @@ Measured with PC hit counters on CPU 1 (`/api/debugger/instrument`), `-nosound
 | `0x04A1` | the "give up" trampoline `LJMP 0BD` | **1** | **0** |
 | `0x00BA` | `MOV IE,#092h` — the write that sets `ES` | **0** | **2** |
 | `0x00BD` | `LCALL 024Dh` | 1 | 2 |
-| `0x024D` | the do-nothing subroutine | 7,325,417 | 6,474,267 |
+| `0x024D` | the do-nothing subroutine | ~7,325,417 | ~6,474,267 |
+
+The `0x024D` row is **wall-clock-bounded, not deterministic** — both runs are capped at
+45 s of host time, not a fixed instruction or sample count, so the absolute integers do
+not reproduce exactly. An independent re-run of the same pair on this machine gave
+7,319,178 → 6,410,944: a ~12% drop both times, direction and magnitude confirmed, but not
+the integer. Every other row in this table is exact and repeatable; only this one should
+be read as approximate.
 
 Every element of the prediction holds. The Timer 1 vector is never entered, the
 trampoline is never entered, `0x00BA` executes (twice — once per startup CPU reset), so
 `IE` reaches `0x92` and `ES` is set. `SCON.REN` was already being set at `0x009D`, so
 the serial link is now armed at both ends, and the sweep confirms it: `riti` goes
-`0 → 6` for `sport2k` and `0 → 1,267` for `mephisto`. `sport2k`'s audio also leaves the
-dither floor for the first time — `loud` goes `0 → 478,781` of 479,066 samples.
+`0 → 6` for `sport2k` and `0 → 1,267` for `mephisto`. `sport2k`'s `loud` counter also
+leaves the dither floor for the first time — `loud` goes `0 → 478,781` of 479,066
+samples.
+
+**That is not evidence of audio, and it must not be read as any.** A temporary raw-PCM
+tap on this exact stream (60 s, reverted after use) shows a DC level at 98% of full
+scale with 55.1% of samples hard-clipped at +32,767, stationary (per-second std
+960–1,005) for the whole 59 s post-boot window, and no tonal spectrum — a flat comb from
+40 Hz to 787 Hz, against a real-audio control's clean tone with harmonics. The chip
+responsible is the **AY-3-8910**: `R1`-`R6` (tone period) are `0x00` throughout, `R7 =
+0xcf` disables tone on channels A, B and C while enabling noise on B and C, and
+`R8`/`R9`/`R10 = 0xcf` fix every channel's volume at 15. Channel A — tone and noise both
+disabled at nonzero volume — is the constant DC rail; channels B and C are the noise
+generator running at maximum. The DAC is written only 5 times in 60 s, to 1 distinct
+value, and is not what `loud` is picking up. (`mephisto`'s DAC stream, by contrast, is
+byte-identical before and after this fix — same 65,026 writes, same 255 distinct values,
+same final `0xff` — so nothing about its DAC output changed either; its digest moved only
+because the AY's register state shifted slightly and two DC-offset streams clip past full
+scale at marginally different moments.)
 
 **What this does not do: it does not make Sport 2000's sound work.** The main CPU still
 displays `NO AUDIO` during its boot self-test, before and after, and the rest of the
@@ -281,10 +347,13 @@ The documented prior regression. All seven, before → after: `[OBSERVED]`
 | `jolypark` | `5e3b1bc1` | `5e3b1bc1` | 124 | 320,571 | 0 | 0 | 0 | 0 |
 | `vrnwrld`  | `18f53fe1` | `18f53fe1` | 123 | 320,706 | 0 | 0 | 0 | 0 |
 
-**7 of 7 byte-identical, in the audio checksum and in every counter.** Note that
-`jolypark`'s checksum — which Task 1 found unusable because it moved run to run — is
-stable and usable now that NVRAM is cleared, so this is a real comparison for all seven,
-not six plus a shrug.
+**7 of 7 identical in every behavioural field** — audio checksum and all six interrupt
+counters match for every game. (Three of the seven *lines* are not byte-identical:
+`bushidoa`, `mach2` and `mach2a` differ in the `wall_s` column alone — wall-clock seconds,
+not anything the game measured — so "byte-identical" overstates it; "identical in every
+behavioural field" is the accurate claim.) Note that `jolypark`'s checksum — which Task 1
+found unusable because it moved run to run — is stable and usable now that NVRAM is
+cleared, so this is a real comparison for all seven, not six plus a shrug.
 
 ### Why the 2016 comment was pointing at the wrong thing
 
@@ -393,15 +462,21 @@ this answer for spinball.
 
 - **Timer 2 dispatch is untested by execution.** See §7. This is the one part of the
   change with no measurement behind it.
-- **Sport 2000 sound still does not work.** The 8051 deadlock is fixed and the sound CPU
-  now runs and takes serial interrupts, but the main CPU still shows `NO AUDIO` and the
-  handshake at `0x0616` is still unsatisfied. This fix was necessary, not sufficient.
-- **"Audio output" is inferred from `loud`, not heard.** `sport2k` going from `loud=0` to
-  `loud=478,781` proves the DAC left the dither floor; it does not prove the samples are
-  music. Task 1's caution that a constant idle level reads as `loud` applies.
+- **Sport 2000 sound still does not work, on two independent lines of evidence.** The
+  main CPU still shows `NO AUDIO` at its own boot self-test and the handshake at `0x0616`
+  is still unsatisfied — the 8051 deadlock is fixed and the sound CPU now runs and takes
+  serial interrupts, but that is necessary, not sufficient. And separately, decomposed at
+  the mixer: `sport2k` going from `loud=0` to `loud=478,781` was originally written up as
+  evidence the DAC left the dither floor; that named the wrong chip and overstated the
+  finding. A raw-PCM tap shows the post-fix stream is a DC rail (98% of full scale, 55.1%
+  of samples clipped at +32,767, stationary for 59 s, no tonal spectrum) driven by the
+  **AY-3-8910** — no tone period programmed, tone disabled and noise enabled on channels
+  B/C, all three channels at fixed volume 15 — not the DAC, which is written 5 times in
+  60 s to 1 distinct value. See §5 for the full mechanism, now stated where the claim is
+  made rather than only here.
 - **Gameplay is not covered for any game.** All 35 rows are 60 s from reset, which for
   most of them is attract. A source enabled only during a ball in play would not appear.
-- **The 26 games outside this project's three are byte-identical, not "verified good".**
+- **The 32 games outside this project's three are byte-identical, not "verified good".**
   Identical output means the fix changed nothing for them, which is a strong statement
   about *this* change and no statement at all about their overall accuracy.
 - **The `#if FIXIRQ` interrupt-blocking path** (`i8051.c:80`, active) interacts with `IE`
@@ -412,6 +487,15 @@ this answer for spinball.
   left set, so a later call can dispatch a vector whose flag has since cleared. It behaves
   identically before and after this commit; fixing it would change dispatches rather than
   only remove them, which would have invalidated the sweep's core property.
+- **`TYPE != 8051` is a blacklist, not a whitelist.** The struct's own comment says the
+  field holds "8031, or 8051 for example"; a hypothetical 8031 instance would slip past
+  `TIMER2_IRQ`'s guard the same way an 8051 does, since an 8031 has no Timer 2 either but
+  isn't excluded by name. `TYPE == 8052 || TYPE == 8752` would be the safer form if a new
+  subtype is ever added. Not a defect in any instance that exists in this tree today.
+- **`i8051.c:561` registers `tcon` under the state-save name `"T2CON"`**, not `t2con` —
+  pre-existing, and noticed while reading, not introduced by this change. It matters more
+  now than it used to: `TIMER2_IRQ` reads `GET_TF2` out of `R_T2CON`, so a save-state
+  round trip would feed that predicate a stale register. Not touched here.
 
 ## 10. Commits
 

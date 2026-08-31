@@ -238,11 +238,40 @@ INLINE float triangular(const float r) // from -1..1, c=0 (with random no r=0..1
 /* Bound the digest at this many INT16 values (stereo counts 2 per sample). */
 #define SWEEP_AUDIO_MAX_VALUES	2000000u
 
+/*
+	2026-08-31 addendum: `loud` (|s|>1) tells you a stream left the dither floor, and
+	nothing about *how*.  A DC rail leaves it on sample one and stays there, which is
+	exactly what let a constant AY-3-8910 output score as "ok" upstream in
+	scripts/i8051_sweep.sh -- see the adversarial review that caught it,
+	.superpowers/i8051-fix-review.md section 1.  AC rms (stddev about the running mean)
+	is the discriminator that review used to tell a rail from a varying signal: a rail's
+	AC rms is at most the dither's own ~0.5 LSB, regardless of its DC offset, while every
+	genuinely varying stream measured was two orders of magnitude higher.  Computed with
+	Welford's online algorithm so it stays O(1) memory over a run.
+
+	Skipped over the first SWEEP_AC_SKIP_VALUES values to sit past the boot transient.
+	The review's own per-second breakdown (section 1.2, "per-second std (after boot
+	second)") is the source for how long that transient actually lasts: every stream it
+	measured is already representative from the *second* emulated second onward -- one
+	second, not the 20-24 s window used elsewhere in that document for a more detailed
+	presentation of four specific streams.  One second matters here: `pmv112`, the
+	review's control for "a game genuinely playing something", has its whole burst in
+	seconds 2-3 and is flat for the rest of the 60 s run, so a longer skip (20 s was tried
+	first) throws the one real positive example away and mislabels it a rail.  At the
+	sweep's fake 8 kHz mono rate one second is 8,000 values.
+*/
+#define SWEEP_AC_SKIP_VALUES	8000ull
+
 static unsigned int       sweep_audio_hash	= 2166136261u;	/* FNV-1a offset basis */
 static unsigned long long sweep_audio_seen	= 0;	/* INT16 values produced, unbounded */
 static unsigned long long sweep_audio_n	= 0;	/* INT16 values actually digested   */
 static unsigned long long sweep_audio_nonzero	= 0;	/* of those, != 0  (dither included) */
 static unsigned long long sweep_audio_loud	= 0;	/* of those, |s|>1 (dither excluded) */
+
+static double             sweep_ac_mean	= 0.0;	/* running mean, post-skip samples only */
+static double             sweep_ac_m2		= 0.0;	/* Welford's M2 (sum of squared deviations) */
+static unsigned long long sweep_ac_n		= 0;	/* samples folded into mean/m2 */
+static unsigned long long sweep_ac_clip	= 0;	/* of those, at a full-scale rail */
 
 static void sweep_audio_digest(const INT16 *buf, unsigned int count)
 {
@@ -261,6 +290,18 @@ static void sweep_audio_digest(const INT16 *buf, unsigned int count)
 		if (s != 0)			sweep_audio_nonzero++;
 		if (s > 1 || s < -1)	sweep_audio_loud++;
 
+		if (sweep_audio_n >= SWEEP_AC_SKIP_VALUES)
+		{
+			const double x = (double)s;
+			const double delta = x - sweep_ac_mean;
+
+			sweep_ac_n++;
+			sweep_ac_mean += delta / (double)sweep_ac_n;
+			sweep_ac_m2   += delta * (x - sweep_ac_mean);
+
+			if (s == 32767 || s == -32768)	sweep_ac_clip++;
+		}
+
 		sweep_audio_n++;
 	}
 }
@@ -268,13 +309,20 @@ static void sweep_audio_digest(const INT16 *buf, unsigned int count)
 static void sweep_audio_report(void)
 {
 	static int reported = 0;
+	double ac_rms, clip_pct;
+
 	if (reported) return;
 	reported = 1;
 
-	printf("I8051_SWEEP AUDIO hash=%08x n=%llu seen=%llu nonzero=%llu loud=%llu\n",
+	ac_rms   = (sweep_ac_n > 0) ? sqrt(sweep_ac_m2 / (double)sweep_ac_n) : 0.0;
+	clip_pct = (sweep_ac_n > 0) ? (100.0 * (double)sweep_ac_clip / (double)sweep_ac_n) : 0.0;
+
+	printf("I8051_SWEEP AUDIO hash=%08x n=%llu seen=%llu nonzero=%llu loud=%llu "
+		"ac_rms=%.3f clip_pct=%.3f ac_n=%llu\n",
 		sweep_audio_hash,
 		sweep_audio_n, sweep_audio_seen,
-		sweep_audio_nonzero, sweep_audio_loud);
+		sweep_audio_nonzero, sweep_audio_loud,
+		ac_rms, clip_pct, sweep_ac_n);
 	fflush(stdout);
 }
 

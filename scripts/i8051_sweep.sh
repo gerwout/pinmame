@@ -123,7 +123,10 @@ run_one() {   # $1 = game ; leaves the captured output in $CAP
 }
 
 field() {     # $1 = probe line prefix, $2 = key ; prints the value or "-"
-	sed -n "s/.*$1 .*\\b$2=\\([0-9a-f]*\\).*/\\1/p" "$CAP" | tail -1
+	# Character class covers both hex digests/integer counters (e.g. "1ad5b7ff", "247")
+	# and the decimal metrics added 2026-08-31 (e.g. "982.451"); a "." never appears in
+	# a hex/integer field, so widening the class costs nothing for the old fields.
+	sed -n "s/.*$1 .*\\b$2=\\([0-9a-f.]*\\).*/\\1/p" "$CAP" | tail -1
 }
 
 # ---------------------------------------------------------------------------
@@ -142,21 +145,63 @@ rm -f "$CAP"
 echo "i8051_sweep: self-check ok" >&2
 
 # ---------------------------------------------------------------------------
-printf 'game\trc\twall_s\taudio_hash\taudio_n\taudio_seen\tnonzero\tloud\tie0\ttf0\tie1\ttf1\triti\ttf2\tirq_total\tstatus\n' > "$OUT"
+# Status labels, corrected 2026-08-31.
+#
+# The original logic set status=ok as soon as loud>0 -- "at least one sample
+# anywhere in sixty seconds exceeded +-1 LSB".  A constant DC offset satisfies
+# that on its first sample and every sample thereafter, so a stuck AY-3-8910
+# outputting a flat rail scored exactly the same "ok" as a stream that is
+# actually varying.  Measured case in point: mephisto pre-fix has AC rms
+# *exactly* 0.000 (476,136 of 479,066 samples pinned at +32,767) and scored
+# loud=478,754, status=ok.  See .superpowers/i8051-fix-review.md section 1 for
+# the full audit; that document is what this fix implements.
+#
+# loud==0 remains untouched and is still a valid silence test: dither can
+# never exceed 1 LSB, so loud==0 really does mean nothing left the dither
+# floor.  Only the converse -- treating loud>0 as meaning something -- was
+# broken, and only that direction changes here.
+#
+# For loud>0, ac_rms (mixer.c's Welford stddev, skipping the first emulated
+# second to clear the boot transient -- see the comment above
+# sweep_audio_digest() in src/sound/mixer.c) now decides the label.  A rail's
+# ac_rms is at most the dither floor's own ~0.5 LSB; every genuinely varying
+# stream this project has measured sits at 20+ LSB.  AC_RMS_RAIL_THRESHOLD
+# sits well above the first and below the second, so it does not need to be
+# precise to separate the two groups correctly.  Measured on this tree:
+#   - uboat65 (pure DC + dither, unchanged control):      ac_rms  0.5
+#   - mephisto pre-fix (literally constant):              ac_rms  0.0
+#   - pmv112 (the one game confirmed playing something,
+#     a burst in seconds 2-3 then silence): ac_rms clears the threshold
+#   - sport2k / mephisto post-fix (AY noise generator, not music): ac_rms in
+#     the hundreds -- also NOT a rail by this test, and that is intentional.
+#     "not a rail" is as far as this metric is licensed to go; it does not and
+#     cannot certify that a varying signal is music rather than noise.  See
+#     docs/findings/2026-08-31-i8051-interrupt-fix.md section 5 for why
+#     sport2k's post-fix "not_silent" reading is a stuck noise generator, not
+#     audio.
+AC_RMS_RAIL_THRESHOLD=5.0
+
+is_rail() {   # $1 = ac_rms ; true (0) if below the threshold
+	awk -v v="$1" -v t="$AC_RMS_RAIL_THRESHOLD" 'BEGIN{exit !(v!="" && v+0<t)}'
+}
+
+printf 'game\trc\twall_s\taudio_hash\taudio_n\taudio_seen\tnonzero\tloud\tac_rms\tclip_pct\tac_n\tie0\ttf0\tie1\ttf1\triti\ttf2\tirq_total\tstatus\n' > "$OUT"
 
 for game in $GAMES; do
 	run_one "$game"
 
 	hash=$(field AUDIO hash);  an=$(field AUDIO n);       aseen=$(field AUDIO seen)
 	nz=$(field AUDIO nonzero); loud=$(field AUDIO loud)
+	acrms=$(field AUDIO ac_rms); clippct=$(field AUDIO clip_pct); acn=$(field AUDIO ac_n)
 	ie0=$(field IRQ ie0); tf0=$(field IRQ tf0); ie1=$(field IRQ ie1)
 	tf1=$(field IRQ tf1); riti=$(field IRQ riti); tf2=$(field IRQ tf2)
 
-	status=ok
+	status=not_silent
 	if [ -z "$hash" ] || [ -z "$ie0" ]; then
 		# No probe line at all: the process never reached a clean teardown.
 		if [ "$RC" -ge 124 ]; then status=timeout; else status=no_probe_rc$RC; fi
 		hash=${hash:--}; an=${an:--}; aseen=${aseen:--}; nz=${nz:--}; loud=${loud:--}
+		acrms=${acrms:--}; clippct=${clippct:--}; acn=${acn:--}
 		ie0=${ie0:--}; tf0=${tf0:--}; ie1=${ie1:--}; tf1=${tf1:--}
 		riti=${riti:--}; tf2=${tf2:--}; irqtot=-
 	else
@@ -169,14 +214,22 @@ for game in $GAMES; do
 		# a real silence test.
 		if [ "$loud" -eq 0 ]; then
 			if [ "$status" = no_irq ]; then status=silent_no_irq; else status=silent; fi
+		elif is_rail "$acrms"; then
+			# loud>0 but the signal doesn't vary: a DC offset (at any level)
+			# plus dither, not something worth calling "not silent".
+			if [ "$status" = no_irq ]; then status=rail_no_irq; else status=rail; fi
 		fi
+		# else: loud>0 and ac_rms clears the rail threshold -- leave status at
+		# "not_silent".  That is a claim about variance, not about music; see
+		# the comment block above.
 	fi
 
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 		"$game" "$RC" "$WALL" "$hash" "$an" "$aseen" "$nz" "$loud" \
+		"$acrms" "$clippct" "$acn" \
 		"$ie0" "$tf0" "$ie1" "$tf1" "$riti" "$tf2" "$irqtot" "$status" >> "$OUT"
-	printf '%-10s rc=%-3s %3ss  hash=%-8s loud=%-8s irq=%-8s %s\n' \
-		"$game" "$RC" "$WALL" "$hash" "$loud" "$irqtot" "$status" >&2
+	printf '%-10s rc=%-3s %3ss  hash=%-8s loud=%-8s ac_rms=%-8s clip%%=%-7s irq=%-8s %s\n' \
+		"$game" "$RC" "$WALL" "$hash" "$loud" "$acrms" "$clippct" "$irqtot" "$status" >&2
 
 	rm -f "$CAP"
 done
