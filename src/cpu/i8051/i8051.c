@@ -590,16 +590,16 @@ void i8051_reset(void *param)
 	//made the *second* and every later reset install NULL, leaving the CPU
 	//permanently unable to talk to its driver.  A driver that pulses this CPU's
 	//reset line -- mephisto.c drives RST ASIN that way -- needs the registration
-	//to survive every reset, not just the first.  (hold_eram_iaddr_callback below
-	//has the same shape; it is left as it was because no driver in this tree both
-	//registers it and resets its 8051 more than once.  See
-	//docs/findings/2026-08-31-sound-link-fixes.md.)
+	//to survive every reset, not just the first.  See
+	//docs/findings/2026-08-31-sound-link-fixes.md.
 	i8051.serial_tx_callback = hold_serial_tx_callback;
 	i8051.serial_rx_callback = hold_serial_rx_callback;
 
-	//Setup External ram callback handlers
+	//Setup External ram callback handlers.  Same rule, and it stopped being
+	//hypothetical when mephisto.c registered one: RST ASIN resets that 8051
+	//dozens of times a minute, and clearing the static here put every paged
+	//MOVX @Ri back on page 0 from the second reset onwards.
 	i8051.eram_iaddr_callback = hold_eram_iaddr_callback;
-	hold_eram_iaddr_callback = NULL;
 
 	//Clear Ram (w/0xff)
 	memset(&i8051.IntRam,0xff,sizeof(i8051.IntRam));
@@ -2496,7 +2496,6 @@ void i8752_reset (void *param)
 
 	//Setup External ram callback handlers
 	i8051.eram_iaddr_callback = hold_eram_iaddr_callback;
-	hold_eram_iaddr_callback = NULL;
 
 	//Clear Ram (w/0xff)
 	memset(&i8051.IntRam,0xff,sizeof(i8051.IntRam));

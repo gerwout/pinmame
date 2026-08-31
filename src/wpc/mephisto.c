@@ -29,6 +29,7 @@ static struct {
   UINT8 muartP1Out;     /* MUART port 1 output latch; bit 6 is the 8051's P3.2 */
   UINT8 sndP1;          /* 8051 port 1 output latch = the AY-3-8910 data bus */
   UINT8 sndP3;          /* 8051 port 3 output latch; bits 4/5 = BDIR/BC1 */
+  UINT8 sndP2;          /* 8051 port 2 output latch = XRAM address bits 8-15 */
 } locals;
 
 /*-------------------------------------------------------------------------
@@ -1007,6 +1008,8 @@ static i8155_interface cirsa_i8155 = {
 /* Not declared in any header; core.c defines it at file scope. */
 extern int g_fHandleKeyboard;
 
+static READ32_HANDLER(cirsa_eram_addr);   /* defined with the sound ports below */
+
 static MACHINE_INIT(CIRSA) {
   memset(&locals, 0, sizeof(locals));
 
@@ -1056,6 +1059,7 @@ static MACHINE_INIT(CIRSA) {
      design -- see nuova.c's uboat65 init for the same warning. */
   i8051_set_serial_tx_callback(cirsa_snd_tx);
   i8051_set_serial_rx_callback(cirsa_snd_rx);
+  i8051_set_eram_iaddr_callback(cirsa_eram_addr);
 }
 
 static SWITCH_UPDATE(CIRSA) {
@@ -1207,6 +1211,40 @@ static WRITE_HANDLER(cirsa_sndp3_w) {
     i8256_set_p1_pin(5, (data & 0x08) ? 1 : 0);
 }
 
+static WRITE_HANDLER(cirsa_sndp2_w) {
+  locals.sndP2 = data;                  /* the XRAM page -- see cirsa_eram_addr */
+}
+
+/*-- MOVX @Ri needs Port 2 for the high address byte ---------------------
+/  The firmware pages its 2K of XRAM and sets P2 explicitly every time (it
+/  even keeps a shadow of P2 in IRAM 26h and restores it): page 0 for the
+/  serial packet buffer (0x010B, 0x0186), page 1 for the FM voice state
+/  (0x0545), page 2 for the OPL2 register shadow (0x0626, 0x0967, 0x098F)
+/  and page 3 for the note timers (0x0D00).  PinMAME's MOVX @Ri asks the
+/  driver for the full address through this callback and, with none
+/  registered, falls back to the bare 8-bit offset -- so all four pages
+/  landed on page 0.  That is what made the OPL2 silence sweep read its
+/  shadow out of the packet buffer, and what kept the FM voice engine at
+/  0x0578 reading the serial packet buffer instead of voice state
+/  (docs/findings/2026-08-31-sound-firmware.md sections 3 and 8).
+/
+/  Two things this must get right.  The callback is shared with MOVX @DPTR
+/  (i8051ops.c:621,640), which already has all 16 bits and must be returned
+/  untouched -- mem_mask tells the two apart, 0xFF for @Ri and 0xFFFF for
+/  @DPTR -- and getting that wrong would take the DAC at 0x1000, the OPL2 at
+/  0x1800 and the ROM bank latch at 0x0800 off the map.  And P2 has to come
+/  from a shadow kept here rather than from i8051_internal_r(0xA0): that
+/  routes through sfr_read(), which for a port with RWM clear (MOVX does not
+/  set it) does not return the latch but calls IN(2), i.e. reads the port
+/  back through this same driver.  Measured: with the shadow reading 0x01
+/  and 0x02, i8051_internal_r(0xA0) returned 0x00 every time.  spinb.c's
+/  dmd_eram_address keeps its own P2 copy for the same reason.
+/----------------------------------------------------------------------*/
+static READ32_HANDLER(cirsa_eram_addr) {
+  if (mem_mask > 0xff) return offset;   /* MOVX @DPTR -- already complete */
+  return (UINT32)((locals.sndP2 << 8) | (offset & 0xff));
+}
+
 static READ_HANDLER(cirsa_sndp3_r) {
   /* P3.2 (INT0) is an input driven by MUART Port 1 bit 6 -- see
      cirsa_p1_out().  Every other pin of this port is either an output or
@@ -1257,6 +1295,7 @@ PORT_END
 
 static PORT_WRITE_START(cirsa_writesndport)
   { 1, 1, cirsa_sndp1_w },
+  { 2, 2, cirsa_sndp2_w },
   { 3, 3, cirsa_sndp3_w },
   { 0, 3, port_w },
 PORT_END
