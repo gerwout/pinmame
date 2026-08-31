@@ -252,9 +252,13 @@ static READ_HANDLER(ic9_r) {
 /  sits in the 4094 nearest the CPU and byte 0 in the one furthest away.
 /
 /  For Sport 2000 the four 7-digit player displays occupy segments 0..27 in
-/  cirsa_disp and the credit/match digits 28..32; the mapping of the last
-/  three groups onto those five digits still needs a frame where the game
-/  actually lights them.
+/  cirsa_disp, fed by f[0]/f[1]/f[3]/f[4]; the credit/match/extra-ball
+/  digits 28..32 are fed entirely by f[6], sliced across its five active
+/  columns (0-1, 2, 3-4).  f[2] and f[5] carry no assigned position -- a
+/  live DISPLAY TEST 1-PHASE capture, corroborated by an independent
+/  static-ROM cross-check that predates this task, settled all of this;
+/  see cirsa_shift_frame's own comment and docs/findings/
+/  2026-08-31-display-groups.md's 2026-09-01 addendum.
 /----------------------------------------------------------------------*/
 /* The column-select mask table's byte values -- and which bit each one
    clears -- are NOT shared between the two ROM sets this driver serves.
