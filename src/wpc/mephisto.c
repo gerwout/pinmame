@@ -283,6 +283,19 @@ static READ_HANDLER(ic9_r) {
 /  the wrong place -- settling it needs a live multi-player display test,
 /  which needs the switch matrix wired.  Left open deliberately; do not
 /  guess it.
+/
+/  SEGMENT REMAP ROUND: the bytes placed at each of these positions are,
+/  as of this round, no longer written raw.  Correct character data was
+/  landing in coreGlobals.segments[] with the ROM's own segment bit order
+/  (a=3 b=7 c=5 d=4 e=1 f=2 g=6, plus the 16-segment font's own low-byte
+/  strokes), which is not PinMAME's -- so it drew as scrambled strokes,
+/  not the intended letters/digits.  docs/findings/
+/  2026-09-03-low-byte-strokes.md sec 5 solved both translation tables
+/  (mechanically, from core.c's own core_ascii2seg16/core_bcd2seg7/
+/  segSize1[0]) and cirsa_seg16()/cirsa_seg8d() (defined below, just
+/  ahead of cirsa_shift_frame -- see their own block comment) now apply
+/  them on write.  coreGlobals.segments[] holds PinMAME-order values from
+/  here on.
 /----------------------------------------------------------------------*/
 /* The column-select mask table's byte values -- and which bit each one
    clears -- are NOT shared between the two ROM sets this driver serves.
@@ -317,6 +330,117 @@ static int cirsa_frameLen(void) {
   return core_gameData->hw.gameSpecific1 ? 6 : 8;
 }
 
+/*-- Segment bit-order remap -----------------------------------------------
+/  The ROM's own segment bit order (both the 7-segment numeric font at
+/  0xC143 and the low/high halves of the 16-segment alphanumeric font at
+/  0xBA08) is NOT PinMAME's.  Before this remap, coreGlobals.segments[]
+/  held correct character *data* drawn with the wrong strokes -- see
+/  docs/findings/2026-09-03-low-byte-strokes.md sec 5 (derived
+/  mechanically from core.c's own core_ascii2seg16, segSize1[0] and
+/  core_bcd2seg7) for the full derivation.  Applied here, on write, so
+/  coreGlobals.segments[] ends up holding PinMAME-order values -- what
+/  core_seg_video_update() and any front end actually expect.
+/
+/  Numeric groups (CORE_SEG8D -- all of Mephisto's five, Sport 2000's two
+/  7-digit rows and its credit/match/EB digits): ROM bit -> segment ->
+/  core_bcd2seg7 bit, one-to-one, per the finding's sec 5.2.  ROM bit 0
+/  (dp) has no target in core_bcd2seg7 (a 7-value table, no punctuation
+/  row) and is dropped.
+/
+/  Alphanumeric groups (CORE_SEG16N, Sport 2000 only): 16 ROM bits carry
+/  14 independent strokes plus two hard-wired duplicates -- A2 (low bit 2)
+/  always mirrors A1 (high bit 3), D2 (high bit 0) always mirrors D1 (high
+/  bit 4) -- corroborated by the manual's own A1/A2 and D1/D2 pin pairs on
+/  Plate 15.  Both members of each pair are mapped to the SAME PinMAME
+/  bit (a harmless redundant OR); every other bit is an independent stroke
+/  mapped one-to-one to its PinMAME bit, per the finding's sec 5.1.
+/
+/  One deliberate departure from that section's own prose: it suggested
+/  also forcing high bit 6 (G, the middle bar) to set PinMAME bit 11 (the
+/  right half of PinMAME's own split middle bar) whenever G fires, on top
+/  of low bit 7 (R) separately targeting bit 11, reasoning that the real
+/  chip's G pin is a single full-width segment.  Checked against the
+/  oracle that section itself recommends -- coreGlobals.segments[] should
+/  equal core_ascii2seg16[] for a given character -- that forced OR is
+/  wrong: it makes 'F' (the ROM's one letter that sets G without R) light
+/  a right-hand nub PinMAME's own 'F' does not have, while the plain
+/  one-bit-to-one-bit mapping below reproduces PinMAME's 'F' exactly,
+/  because the ROM already lights R alongside G on every other letter
+/  that wants a full-width bar.  Kept as two independent single-bit
+/  mappings instead.
+/
+/  Low-byte bit 7 (R) itself is the one bit this project rates moderate-,
+/  not high-, confidence -- best-supported as a right-of-centre companion
+/  to the middle bar, not certain (see the finding's sec 3.1 step 4 and
+/  sec 4).  If a character renders wrong in a way that implicates that
+/  stroke (an extra or missing right-hand nub near the vertical centre),
+/  this is the row to revisit.  Every other bit is pinned by intersecting
+/  constraints with zero contradictions across the solid 0x20-0x5A range.
+/---------------------------------------------------------------------*/
+
+/* Numeric font bit -> core_bcd2seg7 bit.  ROM order a=3 b=7 c=5 d=4 e=1
+   f=2 g=6 dp=0 (scripts/decode_display.py, re-verified docs/findings/
+   2026-09-03-low-byte-strokes.md sec 5.2); core_bcd2seg7 (core.c:137) is
+   the classic a=0 b=1 c=2 d=3 e=4 f=5 g=6, no dp bit. */
+static const UINT8 cirsa_seg8dBit[8] = {
+  0,      /* 0: dp -- no core_bcd2seg7 equivalent, dropped */
+  1 << 4, /* 1: e */
+  1 << 5, /* 2: f */
+  1 << 0, /* 3: a */
+  1 << 3, /* 4: d */
+  1 << 2, /* 5: c */
+  1 << 6, /* 6: g */
+  1 << 1, /* 7: b */
+};
+
+static UINT8 cirsa_seg8d(UINT8 v) {
+  UINT8 out = 0;
+  int b;
+  for (b = 0; b < 8; b++)
+    if (v & (1 << b)) out |= cirsa_seg8dBit[b];
+  return out;
+}
+
+/* Alphanumeric font, high byte bit -> CORE_SEG16N bit (docs/findings/
+   2026-09-03-low-byte-strokes.md sec 5.1). Bits 1-7 are the same a-g
+   outline as the numeric font, same positions; bit 0 is D2, the mirrored
+   twin of D1 (bit 4) -- see the block comment above. */
+static const UINT16 cirsa_seg16HiBit[8] = {
+  1 << 3,  /* 0: D2 -> d  (mirrors D1) */
+  1 << 4,  /* 1: E  -> e */
+  1 << 5,  /* 2: F  -> f */
+  1 << 0,  /* 3: A1 -> a */
+  1 << 3,  /* 4: D1 -> d */
+  1 << 2,  /* 5: C  -> c */
+  1 << 6,  /* 6: G  -> g */
+  1 << 1,  /* 7: B  -> b */
+};
+
+/* Alphanumeric font, low byte bit -> CORE_SEG16N bit.  Bit 2 is A2, the
+   mirrored twin of A1 (hi bit 3); the rest are the six-stroke internal
+   cross plus R (bit 7, moderate confidence -- see the block comment
+   above). */
+static const UINT16 cirsa_seg16LoBit[8] = {
+  1 << 12, /* 0: M */
+  1 << 14, /* 1: K */
+  1 << 0,  /* 2: A2 -> a  (mirrors A1) */
+  1 << 8,  /* 3: H */
+  1 << 13, /* 4: L */
+  1 << 10, /* 5: J */
+  1 << 9,  /* 6: I */
+  1 << 11, /* 7: R  -- moderate confidence, see block comment above */
+};
+
+static UINT16 cirsa_seg16(UINT8 lo, UINT8 hi) {
+  UINT16 out = 0;
+  int b;
+  for (b = 0; b < 8; b++) {
+    if (hi & (1 << b)) out |= cirsa_seg16HiBit[b];
+    if (lo & (1 << b)) out |= cirsa_seg16LoBit[b];
+  }
+  return out;
+}
+
 static void cirsa_shift_frame(const UINT8 *f, int len) {
   const UINT8 *colFromBit = core_gameData->hw.gameSpecific1
                               ? colFromBitMephisto : colFromBitSport2k;
@@ -336,28 +460,31 @@ static void cirsa_shift_frame(const UINT8 *f, int len) {
   /* Which of the shift-frame bytes feeds which physical group -- both
      games now characterised (docs/findings/
      2026-09-01-mephisto-display-chain.md, docs/findings/
-     2026-09-02-alphanumeric-segments.md):
+     2026-09-02-alphanumeric-segments.md), and every byte pair below now
+     goes through cirsa_seg16()/cirsa_seg8d() (defined above, see their
+     block comment) rather than being written raw, so coreGlobals.
+     segments[] holds PinMAME-order strokes, not ROM-order ones:
 
        Sport 2000 (7 segment groups + column). f[0]/f[1]/f[3]/f[4] are NOT
        four independent 7-digit displays (see docs/findings/
        2026-08-31-display-groups.md's fix-round-2 retraction for why that
        reading was wrong); they are two high/low byte pairs, each driving
        one 7-character LA8041R-11B alphanumeric row:
-         f[3] (low) / f[4] (high) -> segments[0..6],   CORE_SEG16N
-         f[0] (low) / f[1] (high) -> segments[7..13],  CORE_SEG16N
-         f[5]                     -> segments[14..20], CORE_SEG8D (LTS 3401)
-         f[2]                     -> segments[21..27], CORE_SEG8D (LTS 3401)
-         f[6], columns 0-4        -> segments[28..32] (credit/match/EB)
+         f[3] (low) / f[4] (high) -> segments[0..6],   CORE_SEG16N, via cirsa_seg16()
+         f[0] (low) / f[1] (high) -> segments[7..13],  CORE_SEG16N, via cirsa_seg16()
+         f[5]                     -> segments[14..20], CORE_SEG8D (LTS 3401), via cirsa_seg8d()
+         f[2]                     -> segments[21..27], CORE_SEG8D (LTS 3401), via cirsa_seg8d()
+         f[6], columns 0-4        -> segments[28..32] (credit/match/EB), via cirsa_seg8d()
 
        Mephisto (5 segment groups + column). Its panel has no alphanumeric
        units -- 33 identical LTS 3401 seven-segment digits, all CORE_SEG8D
-       (mephisto_disp). Chain order is credit board first (plate 11: J23 =
-       DATA IN from the control board), then the four player boards
-       (Plate 1's harness trace: CREDITOS -> JUG.4 -> JUG.3 -> JUG.2 ->
-       JUG.1), which puts credit/column last in the frame and gives the
-       natural 1-4 order for the rest -- corroborated, not just inferred
-       from the trace, by the boot-time "NO AUDIO" message reading
-       correctly left to right across f[0] then f[1]:
+       (mephisto_disp), all via cirsa_seg8d(). Chain order is credit board
+       first (plate 11: J23 = DATA IN from the control board), then the
+       four player boards (Plate 1's harness trace: CREDITOS -> JUG.4 ->
+       JUG.3 -> JUG.2 -> JUG.1), which puts credit/column last in the
+       frame and gives the natural 1-4 order for the rest -- corroborated,
+       not just inferred from the trace, by the boot-time "NO AUDIO"
+       message reading correctly left to right across f[0] then f[1]:
          f[0] -> segments[0..6]   (Player 1)
          f[1] -> segments[7..13]  (Player 2)
          f[2] -> segments[14..20] (Player 3)
@@ -382,21 +509,19 @@ static void cirsa_shift_frame(const UINT8 *f, int len) {
      a live multi-player display test once the switch matrix is wired. Do
      not guess it here. */
   if (core_gameData->hw.gameSpecific1) {
-    coreGlobals.segments[0 * 7 + col].w = f[0];
-    coreGlobals.segments[1 * 7 + col].w = f[1];
-    coreGlobals.segments[2 * 7 + col].w = f[2];
-    coreGlobals.segments[3 * 7 + col].w = f[3];
-    if (col < 5) coreGlobals.segments[28 + col].w = f[4];  /* credit/match/EB, cols 0-4 */
+    coreGlobals.segments[0 * 7 + col].w = cirsa_seg8d(f[0]);
+    coreGlobals.segments[1 * 7 + col].w = cirsa_seg8d(f[1]);
+    coreGlobals.segments[2 * 7 + col].w = cirsa_seg8d(f[2]);
+    coreGlobals.segments[3 * 7 + col].w = cirsa_seg8d(f[3]);
+    if (col < 5) coreGlobals.segments[28 + col].w = cirsa_seg8d(f[4]);  /* credit/match/EB, cols 0-4 */
     return;
   }
 
-  coreGlobals.segments[0 * 7 + col].b.lo = f[3];
-  coreGlobals.segments[0 * 7 + col].b.hi = f[4];
-  coreGlobals.segments[1 * 7 + col].b.lo = f[0];
-  coreGlobals.segments[1 * 7 + col].b.hi = f[1];
-  coreGlobals.segments[2 * 7 + col].w    = f[5];
-  coreGlobals.segments[3 * 7 + col].w    = f[2];
-  if (col < 5) coreGlobals.segments[28 + col].w = f[6];  /* credit/match/EB, cols 0-4 */
+  coreGlobals.segments[0 * 7 + col].w = cirsa_seg16(f[3], f[4]);
+  coreGlobals.segments[1 * 7 + col].w = cirsa_seg16(f[0], f[1]);
+  coreGlobals.segments[2 * 7 + col].w = cirsa_seg8d(f[5]);
+  coreGlobals.segments[3 * 7 + col].w = cirsa_seg8d(f[2]);
+  if (col < 5) coreGlobals.segments[28 + col].w = cirsa_seg8d(f[6]);  /* credit/match/EB, cols 0-4 */
 }
 
 static WRITE_HANDLER(shift_w) {
@@ -1006,19 +1131,21 @@ INPUT_PORTS_END
    alphabet, and no CORE_SEG16* variant reinterprets bits beyond that, so
    the "without commas" one that adds nothing unobserved is the right
    declaration). Positions 14..20 and 21..27 stay the real 7-digit LTS 3401
-   numeric rows, CORE_SEG8D, unchanged.
+   numeric rows, CORE_SEG8D.
 
-   CORE_SEG16N controls pixel geometry only, NOT bit interpretation -- and
-   the bits it draws are NOT in PinMAME's own order. The ROM's font bit
+   CORE_SEG16N controls pixel geometry only, NOT bit interpretation, and
+   the ROM's segment bit order was never PinMAME's own: the ROM's font bit
    order is a=3 b=7 c=5 d=4 e=1 f=2 g=6 dp=0 (docs/findings/
    2026-09-02-alphanumeric-segments.md sec 5), but core.c:187's
    core_ascii2seg16 -- PinMAME's own canonical 16-segment bit assignment --
-   puts segment a at bit 0. The two words written below (f[3]/f[4] and
-   f[0]/f[1], verified byte-exact against known ROM strings) are the
-   correct DATA; the strokes core_seg_video_update() draws from them are
-   not, until a per-bit remap (ROM bit -> PinMAME segment bit) is added.
-   That remap is real work with its own verification surface -- not
-   attempted here, see the findings doc sec 5-6.
+   puts segment a at bit 0. As of the segment-remap round, this is no
+   longer a live problem: cirsa_shift_frame() runs every byte pair through
+   cirsa_seg16() (16-segment groups) or cirsa_seg8d() (7-segment groups,
+   including these two numeric rows) before it ever reaches
+   coreGlobals.segments[] -- see cirsa_seg16()/cirsa_seg8d()'s own block
+   comment, just above cirsa_shift_frame, for the per-bit table and
+   docs/findings/2026-09-03-low-byte-strokes.md sec 5 for its derivation.
+   coreGlobals.segments[] now holds PinMAME-order strokes throughout.
 
    Column positions were checked, not just carried over: core.c's
    segData[] table gives CORE_SEG8D and CORE_SEG16N the identical {20,15}
