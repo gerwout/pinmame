@@ -26,6 +26,9 @@ static struct {
   int   qcTransparent;  /* IC9 PC5 high -> latch follows input */
   UINT8 sndToSnd;       /* last byte the MUART sent, latched for the 8051 */
   UINT8 p2Out;          /* last value written to MUART port 2, for edge detect */
+  UINT8 muartP1Out;     /* MUART port 1 output latch; bit 6 is the 8051's P3.2 */
+  UINT8 sndP1;          /* 8051 port 1 output latch = the AY-3-8910 data bus */
+  UINT8 sndP3;          /* 8051 port 3 output latch; bits 4/5 = BDIR/BC1 */
 } locals;
 
 /*-------------------------------------------------------------------------
@@ -652,7 +655,10 @@ static UINT8 cirsa_p1_in(void) {
   /* Port 1 inputs (PORT1C = 5C leaves P10, P11, P15 and P17 as inputs):
        P10 S.C.MAT  - the CONT contact line, inverted
        P11 PPCERO   - mains zero crossing
-       P15          - baud generator / timer 5 trigger
+       P15          - the sound board's BUSY line, driven by the 8051's P3.3;
+                      it arrives through i8256_set_p1_pin(5,...) from
+                      cirsa_sndp3_w, not from here, so this callback must
+                      leave it alone (i8256_port1_read ORs the two sources)
        P17 F.T.     - "falta de tension", power failure
      P17 must rest LOW.  CMD1.BITI routes it to interrupt level 1 and the
      datasheet is explicit that a low-to-high transition is what signals the
@@ -662,7 +668,32 @@ static UINT8 cirsa_p1_in(void) {
 }
 
 static void cirsa_p1_out(UINT8 data) {
-  /* P14 = CL-WD (watchdog kick), P12/P13/P16 not yet used */
+  /* P14 = CL-WD (watchdog kick), P12/P13 not yet used.
+
+     P16 is the other half of the sound link's byte handshake and it is the
+     one thing the sound board cannot run without.  It goes to the 8051's
+     P3.2 (INT0), and the sound firmware's byte transmitter is
+
+         024E: SETB P3.2         ; release the pin
+         0250: LCALL 024D        ; (a bare RET -- a delay)
+         0253: JNB  P3.2, 0250h  ; spin until the main CPU drives it HIGH
+         0256: CLR  21h.0
+         0258: MOV  SBUF,A
+
+     (Mephisto has the identical routine at 0x0222/0x0227.)  JNB on a port
+     bit reads the pin, not the latch, so it lands in cirsa_sndp3_r below.
+     While this stub did nothing that read returned 0 and the loop never
+     exited: docs/findings/2026-08-31-sound-firmware.md section 6 counted
+     the sound CPU entering 0x0250 1,475,198 times in 34.65 s and reaching
+     0x0256 zero times, so it never executed a single one of the commands
+     it had already received and checksummed.
+
+     The main ROM drives it per byte, not as a level: 0x08EE raises it
+     ("I am ready to receive"), 0x0915 lowers it again, and ISR_SerialRX
+     clears it at 0xC9A1 on every byte that arrives.  i8256_port1_write()
+     hands us the value already masked by PORT1C (0x5C, so P16 is an
+     output), which is why nothing in i8256.c has to change. */
+  locals.muartP1Out = data;
 }
 
 /*-- MUART Port 2 (plate 5) ---------------------------------------------
@@ -1116,6 +1147,73 @@ static WRITE_HANDLER(port_w) {
   logerror("SND PORT %x:%02x\n", offset, data);
 }
 
+/*-- The sound CPU's ports 1 and 3 (plate 11 / Mephisto plate 9) ----------
+/  Port 1 is the AY-3-8910's 8-bit data bus and port 3 bits 4 and 5 are its
+/  BDIR and BC1.  The driver used to map port 1 straight to
+/  AY8910_control_port_0_w and port 3 to AY8910_write_port_0_w, which is not
+/  a near miss but the wrong pins: the AY then received the four states of
+/  the handshake port -- c7, cf, df, ff -- as its register data and never a
+/  music byte.  Measured on the tree as it stood, sport2k over 40 s: 14,353
+/  data writes carrying exactly those four values, into whichever register a
+/  stray P1 write had last selected -- 13,503 of them into register 0 and
+/  320 into the two I/O port registers 14 and 15.  After this change the
+/  same run makes 300 data writes and they are the score.
+/
+/  The firmware's output primitive (sport2k 0x0F40, Mephisto 0x0862) is the
+/  AY's own BDIR/BC1 sequence written out longhand:
+/
+/      0F40: MOV P1,R1            ; register number on the data bus
+/      0F44: ORL P3,#30h          ; BDIR=1 BC1=1 -> LATCH ADDRESS
+/      0F47: ANL P3,#CFh          ; both low     -> INACTIVE
+/      0F4C: MOV A,R3             ; the value
+/      0F4D: CJNE R1,#07h,0F54h
+/      0F50: ANL A,#3Fh / ORL A,#40h   ; register 7 -> IOA out, IOB in
+/      0F54: MOV P1,A
+/      0F58: ORL P3,#10h          ; BDIR=1 BC1=0 -> WRITE DATA
+/      0F5B: ANL P3,#CFh
+/
+/  so bit 4 is BDIR and bit 5 is BC1.  Mephisto pins that down from the
+/  other side at 0x05A6, which is the only port 1 *read* in either ROM:
+/  MOV P1,#FFh releases the bus, ORL P3,#20h selects BC1 alone = READ DATA,
+/  and MOV 44h,P1 takes the byte.
+/
+/  The strobes are acted on when the state changes, so the read-modify-write
+/  P3 accesses the firmware makes for the two handshake bits (SETB P3.2,
+/  MOV P3.3,C) cannot re-trigger a latch: they leave bits 4-5 at 0.
+/----------------------------------------------------------------------*/
+static WRITE_HANDLER(cirsa_sndp1_w) {
+  locals.sndP1 = data;                  /* just the data-bus latch */
+}
+
+static READ_HANDLER(cirsa_sndp1_r) {
+  /* Only while BC1 alone is asserted does the AY drive the bus; the rest of
+     the time the 8051's own quasi-bidirectional latch is what a read sees. */
+  if ((locals.sndP3 & 0x30) == 0x20) return AY8910_read_port_0_r(0);
+  return locals.sndP1;
+}
+
+static WRITE_HANDLER(cirsa_sndp3_w) {
+  UINT8 prev = locals.sndP3;
+  locals.sndP3 = data;
+  if ((data ^ prev) & 0x30) {
+    if ((data & 0x30) == 0x30)      AY8910_control_port_0_w(0, locals.sndP1);
+    else if ((data & 0x30) == 0x10) AY8910_write_port_0_w(0, locals.sndP1);
+  }
+  /* P3.3 (INT1, an output here) is the sound board's BUSY line, raised on
+     entry to the serial ISR at 0x0375 and the 100 Hz tick at 0x0450 and
+     restored from flag 20h.6 on the way out.  It lands on MUART Port 1
+     bit 5, which the main ROM tests at 0xCB41 before transmitting. */
+  if ((data ^ prev) & 0x08)
+    i8256_set_p1_pin(5, (data & 0x08) ? 1 : 0);
+}
+
+static READ_HANDLER(cirsa_sndp3_r) {
+  /* P3.2 (INT0) is an input driven by MUART Port 1 bit 6 -- see
+     cirsa_p1_out().  Every other pin of this port is either an output or
+     unconnected, and reads low, exactly as it did through port_r before. */
+  return (UINT8)((locals.muartP1Out & 0x40) ? 0x04 : 0x00);
+}
+
 static MEMORY_READ_START(cirsa_readsnd)
   { 0x00000, 0x07fff, MRA_ROM },
   { 0x08000, 0x0ffff, MRA_BANKNO(1) },
@@ -1152,13 +1250,14 @@ MEMORY_END
    all three games' audio hashes and every interrupt counter are identical. */
 
 static PORT_READ_START(cirsa_readsndport)
-  { 1, 1, AY8910_read_port_0_r },
+  { 1, 1, cirsa_sndp1_r },
+  { 3, 3, cirsa_sndp3_r },
   { 0, 3, port_r },
 PORT_END
 
 static PORT_WRITE_START(cirsa_writesndport)
-  { 1, 1, AY8910_control_port_0_w },
-  { 3, 3, AY8910_write_port_0_w },
+  { 1, 1, cirsa_sndp1_w },
+  { 3, 3, cirsa_sndp3_w },
   { 0, 3, port_w },
 PORT_END
 
