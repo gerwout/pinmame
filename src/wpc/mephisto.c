@@ -25,6 +25,7 @@ static struct {
   UINT8 qcLatch;        /* IC11 (74LS373) held value, read back on IC9 PB */
   int   qcTransparent;  /* IC9 PC5 high -> latch follows input */
   UINT8 sndToSnd;       /* last byte the MUART sent, latched for the 8051 */
+  UINT8 p2Out;          /* last value written to MUART port 2, for edge detect */
 } locals;
 
 /*-------------------------------------------------------------------------
@@ -672,7 +673,29 @@ static void cirsa_p1_out(UINT8 data) {
 /  around 0x0A29, not display strobes as first assumed.
 /----------------------------------------------------------------------*/
 static void cirsa_p2_out(UINT8 data) {
-  /* RST ASIN and the three inhibit lines; nothing consumes them yet. */
+  /* P24 = RST ASIN, the sound board's reset line.  Both manuals draw the same
+     circuit at the audio-board end -- Sport 2000 plate 11 (PDF p.34) and
+     Mephisto plate 9 (PDF p.29), same designators in both: T1, a BC237 NPN
+     wired as an emitter follower.  Collector to +5V, emitter straight to the
+     8051's RST pin, base to RST ASIN with R19 3K3 pulling it up to +5V; R18
+     1K from RST to ground and C29 1uF from RST to +5V are the 8051's ordinary
+     power-on reset network.  There is no inverter in the path, and the 8051's
+     RST is active high, so the line is non-inverting: RST ASIN HIGH holds the
+     sound CPU in reset, LOW releases it.  The 3K3 pull-up also means the board
+     sits in reset until something drives the line low, which is exactly what
+     both ROMs' boot sequence assumes -- OR P2,0x10 / short delay /
+     AND P2,0xEF / long delay / poll STATUS.RBF for the sound CPU's power-on
+     0xA5 (sport2k 0x05EF-0x0603).
+
+     Edge triggered on purpose.  The ROM writes port 2 for the three inhibit
+     lines as well, and cpu_set_reset_line() schedules its work through
+     timer_set(), so re-asserting on every write would keep re-suspending the
+     8051.  scpu is CPU 1: mcpu is added first in MACHINE_DRIVER_START(mephisto).
+
+     P25 INH LF, P26 INH FLIP and P27 INH L.C. still have no consumer. */
+  if ((data ^ locals.p2Out) & 0x10)
+    cpu_set_reset_line(1, (data & 0x10) ? ASSERT_LINE : CLEAR_LINE);
+  locals.p2Out = data;
 }
 
 static UINT8 cirsa_p2_in(void) {
