@@ -251,14 +251,20 @@ static READ_HANDLER(ic9_r) {
 /  byte shifted in travels furthest down the chain, the last byte written
 /  sits in the 4094 nearest the CPU and byte 0 in the one furthest away.
 /
-/  For Sport 2000 the four 7-digit player displays occupy segments 0..27 in
-/  cirsa_disp, fed by f[0]/f[1]/f[3]/f[4]; the credit/match/extra-ball
-/  digits 28..32 are fed entirely by f[6], sliced across its five active
-/  columns (0-1, 2, 3-4).  f[2] and f[5] carry no assigned position -- a
-/  live DISPLAY TEST 1-PHASE capture, corroborated by an independent
-/  static-ROM cross-check that predates this task, settled all of this;
-/  see cirsa_shift_frame's own comment and docs/findings/
-/  2026-08-31-display-groups.md's 2026-09-01 addendum.
+/  CORRECTION (fix round 2): f[0]/f[1]/f[3]/f[4] are NOT four independent
+/  7-digit player displays.  They are two pairs of high/low shift-frame
+/  bytes driving the two 7-character LA8041R-11B alphanumeric rows
+/  (cirsa_disp positions 0..13); f[2] and f[5] are the two real 7-digit
+/  LTS 3401 rows (manual: DIS15-21, DIS27-33; cirsa_disp positions
+/  14..27) that the prior mapping wrongly called unassigned.  The credit/
+/  match/extra-ball digits 28..32, fed entirely by f[6] sliced across its
+/  five active columns (0-1, 2, 3-4), are unaffected and correct.  The
+/  code below still writes the old, wrong reading (four flat 7-digit
+/  groups from f[0]/f[1]/f[3]/f[4], f[2]/f[5] unassigned) pending a
+/  cirsa_disp rework that a correct re-map needs -- see cirsa_shift_
+/  frame's own comment and docs/findings/2026-08-31-display-groups.md's
+/  retraction of its 2026-09-01 "settled" addendum for the evidence and
+/  the open re-map task.
 /----------------------------------------------------------------------*/
 /* The column-select mask table's byte values -- and which bit each one
    clears -- are NOT shared between the two ROM sets this driver serves.
@@ -323,36 +329,61 @@ static void cirsa_shift_frame(const UINT8 *f, int len) {
      until a service-mode display test settles it, write nothing. */
   if (core_gameData->hw.gameSpecific1) return;
 
-  /* Which of the seven shift-frame bytes feeds which physical group --
-     corrected here from a live DISPLAY TEST 1-PHASE capture (docs/findings/
-     2026-08-31-display-groups.md, 2026-09-01 addendum "the mapping,
-     settled"): three complete passes through the test's item list show
-     f[0], f[1], f[3] and f[4] each carrying a full 7-column segment-cascade
-     and column-walk pattern -- these are the four "Display 1/2/3/4" boards
-     the manual names throughout its service-menu sections (e.g. the Lamp/
-     Coil/Switch Test pages' "Display 1 shows...", "Display 2 shows...").
-     f[6] carries a *separate* cascade limited to columns 0-4 (5 of 7) --
-     columns 5 and 6 never light in any of the three cycles -- matching the
-     Credit/Match/Extra-Ball board's 5 real digits (manual Plate 15/16:
-     DIS22-26, "groups of 5 x LTS3401") and the ROM's own dedicated writer
-     for that row (0xBC19-0xBC81, gated by the in-service/message flags at
-     [0x274]/[0x2AA], entirely separate from the per-Display BCD filler at
-     0xB83F/0xB8DD). This replaces the previous f[6-g] mapping, which put
-     f[6] -- now identified as Credit/Match/Extra-Ball -- in "player 1".
+  /* Which of the seven shift-frame bytes feeds which physical group.
 
-     f[2] and f[5] ALSO get a full 7-column cascade in the same test, but
-     the manual's own panel inventory (14 alphanumeric + 19 seven-segment =
-     33 = 4x7 + 5, Plate 15) leaves no physical position for them once the
-     four Display boards and the Credit/Match/Extra-Ball board are
-     accounted for. Rather than guess a position the manual does not
-     describe, they are left unassigned.
+     CORRECTION (fix round 2): the mapping below was believed "settled" by
+     the 2026-09-01 addendum to docs/findings/2026-08-31-display-groups.md,
+     on the theory that f[0], f[1], f[3] and f[4] are four independent
+     7-digit "Display 1/2/3/4" boards and that f[2]/f[5] have no home in
+     the manual's inventory. That is wrong, and the unexplained f[2]/f[5]
+     was the tell. Four lines of evidence (full derivation in the findings
+     doc's retraction of that addendum):
 
-     Not established by this evidence: the specific left-to-right identity
-     of f[0]/f[1]/f[3]/f[4] (i.e. which is literally "Display 1" versus
-     "Display 2", or which cabinet position that is) -- ascending index
-     order is used below as the least presumptuous default, the same
-     principle the sibling Mephisto investigation used for its own group
-     order (docs/findings/2026-09-01-mephisto-display-chain.md). */
+       a. The display board has exactly eight 4094s (manual: "IC1...IC16,
+          alternating ULN2803 and 4094"). A frame is 8 bytes -- 7 segment
+          registers plus 1 column register -- so seven registers give 56
+          drive lines. The panel needs 16+16+8+8+8 = 56: two 16-line
+          alphanumeric rows plus three 8-line (7 real digits + 1 column
+          bit) numeric/credit rows. Exact fit -- no spare register for
+          f[2]/f[5] to be.
+       b. The findings doc's own DISPLAY TEST capture already reads f[3]/
+          f[4] as a high/low BYTE PAIR forming 16-bit words (0x0008,
+          0x0408, ..., 0x04BF) straight off the raw buffer rows
+          "04040404040404"/"08080808080808" -- the addendum then re-read
+          those same rows as two independent 7-digit displays.
+       c. DisplayBufferWriteDigit's own descriptor table (CS:0xB979 =
+          FF 00 09 FF 0E 13 00 1C 1D 00 23 27 00 2A 31) is five entries at
+          start offsets 0/14/28/35/42 with leading flags FF,FF,00,00,00:
+          two 14-byte alphanumeric groups, then three 7-byte numeric
+          groups. 14+14+7+7+5(of 7) = 33 wired positions -- the manual's
+          inventory exactly, nothing left over.
+       d. A 40 s attract-mode sample of DisplayBuffer (addr 0x20594, 49
+          bytes) shows f[3]/f[4] moving as a locked high/low pair (e.g.
+          f[3]=00 04.. with f[4]=A0 BF.. forming word 0x04BF, the same
+          value the findings doc's own table records) and a 4-glyph token
+          walking continuously across the f[5]->f[2] boundary.
+
+     The actual structure: f[0]/f[1] are the high/low shift-frame bytes of
+     one 7-character LA8041R-11B alphanumeric row; f[3]/f[4] are the
+     high/low bytes of the other. f[2] and f[5] are the two real 7-digit
+     LTS 3401 rows (manual: DIS15-21 and DIS27-33) -- not unassigned, just
+     misread as more player displays. f[6] -> Credit/Match/Extra-Ball (5
+     real digits, DIS22-26) is unaffected by this correction and stays as
+     coded below.
+
+     NOT changed this round: the code below still writes f[0]/f[1]/f[3]/
+     f[4] as four flat 7-digit groups (the old, wrong reading) and leaves
+     f[2]/f[5] unassigned. A correct re-map needs cirsa_disp to describe
+     two 16-segment alphanumeric groups for positions 0..13 instead of two
+     flat 7-digit groups -- real work with its own verification surface,
+     out of scope for this foundations branch. Next task: rework
+     cirsa_disp and this function together for positions 0..27.
+
+     Not established by any of this: the specific left-to-right identity
+     of the two alphanumeric rows or the two numeric rows (which is
+     literally "Display 1" versus "Display 2", or which cabinet position
+     that is). See docs/findings/2026-08-31-display-groups.md's retraction
+     for the full evidence and open questions. */
   coreGlobals.segments[0 * 7 + col].w = f[0];
   coreGlobals.segments[1 * 7 + col].w = f[1];
   coreGlobals.segments[2 * 7 + col].w = f[3];
