@@ -1120,6 +1120,7 @@ static MEMORY_READ_START(cirsa_readsnd)
   { 0x00000, 0x07fff, MRA_ROM },
   { 0x08000, 0x0ffff, MRA_BANKNO(1) },
   { 0x10000, 0x107ff, MRA_RAM },
+  { 0x11800, 0x11800, YM3812_status_port_0_r },   /* OPL2 status; see the write map */
 MEMORY_END
 
 static MEMORY_WRITE_START(cirsa_writesnd)
@@ -1127,7 +1128,28 @@ static MEMORY_WRITE_START(cirsa_writesnd)
   { 0x10000, 0x107ff, MWA_RAM },
   { 0x10800, 0x10800, bank_w },
   { 0x11000, 0x11000, DAC_0_data_w },
+  /* The YM3812 (OPL2) the manual puts on this board with its own 14.318 MHz
+     crystal.  MACHINE_DRIVER_START(cirsa) has always added the chip, but
+     nothing was ever mapped for the 8051 to reach it, so every register write
+     the sound ROM made was silently discarded and the OPL2 never produced a
+     note.  Address/data pair, A0 selecting between them.
+
+     Identified from the ROM's own behaviour rather than guessed: a 40 s
+     headless run logs unmapped writes to 0x11800 carrying exactly the OPL2
+     register map, gaps included -- 0x01-0x08 (test/timers/CSM), 0x20-0x25,
+     0x28-0x2D, 0x30-0x35 (the 18 operators), the matching 0x40/0x60/0x80
+     blocks, 0xA0-0xA8 and 0xB0-0xB8 plus 0xBD (9 channels), 0xC0-0xC8, and
+     0xE0-0xF5 (waveform select) -- each followed by a write to 0x11801.
+     No other chip has that register layout. */
+  { 0x11800, 0x11800, YM3812_control_port_0_w },
+  { 0x11801, 0x11801, YM3812_write_port_0_w },
 MEMORY_END
+
+/* Mephisto shares the map above and has no OPL2, but its sound ROM never
+   touches 0x11800/0x11801 -- a 35 s run logs no unmapped access by cpu 1 at
+   all, before this change -- so the two handlers are unreachable there and a
+   separate map would buy nothing.  Measured: with and without this mapping,
+   all three games' audio hashes and every interrupt counter are identical. */
 
 static PORT_READ_START(cirsa_readsndport)
   { 1, 1, AY8910_read_port_0_r },
