@@ -18,6 +18,8 @@ static struct {
                            bytes long -- see cirsa_frameLen() */
   int   shiftPos;
   UINT8 lastKeys;       /* previous cabinet key state, for edge-only updates */
+  int   ppcero;         /* PPCERO, the mains zero-cross square wave: MUART P11,
+                           and (through IC26/IC24) the MUART's EXTINT pin */
   /*-- phase 0 instrumentation state --*/
   int   lastrep;
   char  lastline[192];
@@ -652,20 +654,112 @@ static int cirsa_irq_callback(int irqline) {
   return i8256_inta();
 }
 
+/*-- PPCERO, and what actually drives EXTINT -----------------------------
+/  Traced on the scanned plates at 600 dpi, and the SAME circuit with the
+/  same designators on both boards -- Sport 2000 plate 5 (PDF p.28) and
+/  Mephisto plate 4 (PDF p.24), IC25 LM393 / IC26 74HC02 / IC24 74LS14:
+/
+/      LM393 IC25 (comparator B, pins 5,6 -> 7, open collector, pulled up
+/      by 4K7 to 5V on Sport 2000 / 1K on Mephisto)
+/          |
+/          +--> MUART Port 1 pin 38 = P11, labelled PPCERO on the Sport
+/          |    2000 plate ("paso por cero", mains zero crossing)
+/          |
+/          +--> 74HC02 IC26 pin 6  ..+
+/                                    :  NOR gate 2 -> pin 4 -> 74LS14 IC24
+/      MUART P12 (pin 37, an OUTPUT) :                         pin 9 -> pin 8
+/          -> 74LS14 IC24 pin 3      :                               |
+/             -> pin 4 -> IC26 pin 5 ..+                             v
+/                                                        8256 pin 16 EXTINT
+/
+/  i.e. EXTINT = PPCERO OR NOT(P12).  Every wire in that chain was followed
+/  by pixel-tracing the plate, not read off the transcription: the EXTINT
+/  lane leaves pin 16, runs straight down and turns left into IC24's pin 8
+/  output; P11's lane ends on the continuous horizontal that runs from the
+/  IC25/IC26 node across to it; P12's lane runs down to IC24's pin 3.
+/
+/  Two ROM-side facts corroborate it.  Both level-2 (EXTINT) ISRs read P11
+/  as the very first thing they do -- sport2k 0x0937 `test [0xA010],2`,
+/  mephisto 0x143B `test [0x2010],2` -- which only makes sense if EXTINT and
+/  P11 carry the same signal; and Mephisto uses that bit to decide whether
+/  to update the INH LF / INH FLIP / INH L.C. outputs on MUART port 2
+/  (0x145C-0x14BC), i.e. it re-times the mains-switched loads on the zero
+/  crossing, which is exactly what PPCERO is for.
+/
+/  Sport 2000 goes further and gates the interrupt with it: its ISR writes
+/  RSTINT = 4 (disable level 2) when it finds P11 high (0x093E) and SETINT
+/  = 4 (enable) when it finds it low (0x0973), and the main loop re-arms the
+/  level the same way (0x0894/0x089B and 0x08F6/0x08FD).  So it takes at
+/  most one level-2 interrupt per half cycle by construction.
+/
+/  NOT modelled, deliberately: the NOT(P12) half of the OR.  Both ROMs
+/  clear P12 (with P13) immediately before their first `sti` -- sport2k
+/  0x05B9 and mephisto 0x0783, both `and Port1, 0xF3` -- and neither ever
+/  sets it again, so on the real board that term holds EXTINT asserted for
+/  the whole run and the interrupt rate is set purely by the ROM's own
+/  SETINT/RSTINT gating above.  i8256.c raises a request only on a 0->1
+/  transition of the pin ("if (!old && i8256.extint)"), so feeding it a
+/  permanently-asserted level would yield exactly one level-2 interrupt for
+/  the entire session.  Driving the pin with PPCERO instead reproduces the
+/  rate the ROM is written around, and leaves i8256.c's shared semantics
+/  alone.  If i8256.c ever grows a true level-sensitive EXTINT that
+/  re-requests after EOI, this is the place to revisit.
+/
+/  The 100 Hz figure is 50 Hz Spanish mains, full-wave rectified.  The duty
+/  cycle is a modelling choice, not a measurement: a real zero-cross
+/  detector emits a narrow pulse, but a 50% square is what makes both
+/  ROMs' P11 tests come out on both phases (Mephisto needs to see it HIGH
+/  at ISR entry to update the INH outputs at all; Sport 2000 needs to see
+/  it LOW somewhere to re-arm the level).
+/----------------------------------------------------------------------*/
+#define CIRSA_ZC_HZ 100          /* mains zero crossings per second */
+
+static void cirsa_zc_tick(int dummy) {
+  locals.ppcero = !locals.ppcero;
+  i8256_set_extint(locals.ppcero);
+}
+
 static UINT8 cirsa_p1_in(void) {
   /* Port 1 inputs (PORT1C = 5C leaves P10, P11, P15 and P17 as inputs):
-       P10 S.C.MAT  - the CONT contact line, inverted
-       P11 PPCERO   - mains zero crossing
+       P10 S.C.MAT  - the lamp-matrix fault sense; see below
+       P11 PPCERO   - mains zero crossing, see the block comment above
        P15          - the sound board's BUSY line, driven by the 8051's P3.3;
                       it arrives through i8256_set_p1_pin(5,...) from
                       cirsa_sndp3_w, not from here, so this callback must
                       leave it alone (i8256_port1_read ORs the two sources)
        P17 F.T.     - "falta de tension", power failure
+
      P17 must rest LOW.  CMD1.BITI routes it to interrupt level 1 and the
      datasheet is explicit that a low-to-high transition is what signals the
      fault, so a pin stuck high reads as a permanent power failure and the
-     ROM restarts.  The real sources are connected in a later phase. */
-  return 0x00;
+     ROM restarts.
+
+     P10 rests HIGH -- "no matrix fault".  Each ROM reads Port 1 bit 0 in
+     exactly one place, the lamp scan, and in both it is a health check with
+     HIGH = healthy:
+
+       sport2k  0x0B080  mov al,[0xA010] / and al,1 / mov [0x523],al
+                0x0B0A3  test [0x523],1 -> set  -> per-column counter := 0
+                         else -> counter++, and at 6 -> [bx+0x583] := 1, the
+                         column's "lamp failed" flag
+       mephisto 0x00FAD  mov ax,[0x2010] / and al,1
+                0x00FB2  set -> [bx+0x96] := 0, else ++ and at 7 -> [0x8A]
+                         := 0xFF, the global lamp-fault flag, after which
+                         0x0FD3 turns the whole matrix off
+
+     With the old `return 0x00` stub the pin was permanently low, so both
+     tests condemned every lamp: Mephisto printed FALLO LUCES n. 00..63 and
+     Sport 2000's matrix went dark a few seconds into attract.  This is
+     measured, not assumed -- an A/B with P10 driven and P11 driven is in
+     docs/findings/2026-09-01-extint-and-port1.md section 4; P11 alone
+     changes nothing about the lamps, P10 alone fixes both games.
+
+     Both plates label the net S.C. MAT and the ROM's use of it -- sampled
+     with the lamp rows switched off, HIGH meaning "nothing is drawing
+     current that should not be" -- reads as a matrix short/overload sense.
+     That reading is inference; what is measured is only the polarity the
+     ROM demands. */
+  return (UINT8)(0x01 | (locals.ppcero ? 0x02 : 0x00));
 }
 
 static void cirsa_p1_out(UINT8 data) {
@@ -1073,6 +1167,10 @@ static MACHINE_INIT(CIRSA) {
   core_set_pwm_output_type(CORE_MODOUT_SOL0, 24, CORE_MODOUT_SOL_2_STATE);
 
   i8256_init(&cirsa_i8256);
+  /* PPCERO: a 100 Hz square wave on MUART P11 and, through IC26/IC24,
+     on the MUART's EXTINT pin.  Two edges per cycle, so pulse at twice
+     the crossing rate.  See cirsa_p1_in's block comment. */
+  timer_pulse(TIME_IN_HZ(2.0 * CIRSA_ZC_HZ), 0, cirsa_zc_tick);
   i8155_init(&cirsa_i8155);
   cpu_set_irq_callback(0, cirsa_irq_callback);
 
@@ -1104,28 +1202,20 @@ static INTERRUPT_GEN(cirsa_vblank) {
   if (!core_gameData->hw.gameSpecific1) {
     const UINT8 qc = coreGlobals.swMatrix[12] & 0x1f;
     if (qc != locals.qcState) {
-      const UINT8 newlyClosed = qc & ~locals.qcState;
       locals.qcState = qc;
       if (locals.qcTransparent) locals.qcLatch = qc;   /* '373 is transparent */
-      /* i8256_set_extint() only raises a request on a 0->1 transition of
-         the pin (i8256.c: "if (!old && i8256.extint)") -- it is genuinely
-         level sensitive, not level triggered on every sample, so while one
-         contact is already held closed, a second contact closing changes
-         qc but not the 0/1 level and would otherwise request nothing (the
-         ROM's own ISR_QuickContacts count then misses the second contact
-         for as long as the first stays down). i8256_set_extint()'s
-         semantics are intentionally left alone -- it is a shared device --
-         so model each newly-closed contact as its own falling/rising edge
-         on the driver side instead: drop the line and immediately restate
-         it, which is a genuine 0->1 transition by the callee's own rule
-         whenever the line is meant to be up. This only runs inside the
-         qc != locals.qcState branch, i.e. once per actual change in the
-         debounced contact state, so holding a single contact for the full
-         ~1.2 s closure produces exactly one pulse -- not a storm -- and a
-         contact release with no new contact closing (newlyClosed == 0)
-         is left as a plain level update, same as before. */
-      if (newlyClosed) i8256_set_extint(0);
-      i8256_set_extint(qc ? 1 : 0);
+      /* The quick contacts used to raise EXTINT from here, as a stand-in
+         for a source nobody had identified.  They do not drive it on the
+         real board: EXTINT comes off IC26/IC24 and carries PPCERO (see
+         cirsa_p1_in's block comment), and the contacts reach the CPU only
+         through IC11, the 74LS373 latched here in locals.qcLatch, which
+         ISR_QuickContacts reads back over IC9 Port B.  With PPCERO wired
+         that ISR runs 100 times a second and polls the latch on every one
+         of them, so a contact held for a whole frame cannot be missed, and
+         it costs nothing to re-read an unchanged latch: the ROM's consumer
+         at 0xC8E7 is an edge detector on its own mirror of the byte
+         (`xchg [0x6b3],al / xor / and`), so a value that has not changed
+         raises no event no matter how often it is sampled. */
     }
   }
 }
