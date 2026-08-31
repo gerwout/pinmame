@@ -258,13 +258,31 @@ static READ_HANDLER(ic9_r) {
 /  LTS 3401 rows (manual: DIS15-21, DIS27-33; cirsa_disp positions
 /  14..27) that the prior mapping wrongly called unassigned.  The credit/
 /  match/extra-ball digits 28..32, fed entirely by f[6] sliced across its
-/  five active columns (0-1, 2, 3-4), are unaffected and correct.  The
-/  code below still writes the old, wrong reading (four flat 7-digit
-/  groups from f[0]/f[1]/f[3]/f[4], f[2]/f[5] unassigned) pending a
-/  cirsa_disp rework that a correct re-map needs -- see cirsa_shift_
-/  frame's own comment and docs/findings/2026-08-31-display-groups.md's
-/  retraction of its 2026-09-01 "settled" addendum for the evidence and
-/  the open re-map task.
+/  five active columns (0-1, 2, 3-4), are unaffected and correct.
+/
+/  DISPLAY ROUND: the mapping above is now implemented, for both games,
+/  not just diagnosed.  docs/findings/2026-09-02-alphanumeric-segments.md
+/  settled the one piece fix round 2 left open -- which byte of each
+/  high/low pair is low vs high, and what CORE_SEG* type the two
+/  alphanumeric rows need -- by disassembling the ROM's own
+/  character-staging routine and decoding two independently-captured live
+/  buffers ("NO AUDIO", "SPORT 2000") byte-exact through the resulting
+/  font table.  Mephisto's own chain -- five segment groups, no
+/  alphanumeric units, credit board first then the four player boards --
+/  was independently characterised the same way (docs/findings/
+/  2026-09-01-mephisto-display-chain.md) and its gate (see
+/  cirsa_shift_frame) is now open, having reproduced its own boot-time
+/  "NO AUDIO" message.  See cirsa_shift_frame's own comment for the exact
+/  byte-to-segment mapping for both games.
+/
+/  Not established by any of this: the specific left-to-right identity of
+/  the two alphanumeric rows or the two numeric rows on Sport 2000 (which
+/  is literally "Display 1" versus "Display 2", or which cabinet position
+/  that is), nor which physical row is upper/lower for Mephisto's four
+/  player boards.  A wrong row order still renders readable text, just in
+/  the wrong place -- settling it needs a live multi-player display test,
+/  which needs the switch matrix wired.  Left open deliberately; do not
+/  guess it.
 /----------------------------------------------------------------------*/
 /* The column-select mask table's byte values -- and which bit each one
    clears -- are NOT shared between the two ROM sets this driver serves.
@@ -315,79 +333,60 @@ static void cirsa_shift_frame(const UINT8 *f, int len) {
   if (colFromBit[bit] == 0) return;               /* bit unused as a column */
   col = colFromBit[bit] - 1;                      /* 0..6 digit position */
 
-  /* Sport 2000 only.  Mephisto's five segment groups are NOT characterised:
-     its match/credit board is first in the chain (plate 11: J23 carries DATA
-     IN from the control board, J24 daisy-chains onward), which fixes the
-     column register and the match/credit segments as the last two bytes of
-     the frame -- but nothing establishes which of the remaining four bytes
-     is which player display, which of the seven columns light that board's
-     five digits, or even that Mephisto's segment bit order is Sport 2000's.
-     Nor does cirsa_disp describe Mephisto's panel: it was laid out for Sport
-     2000, whose 33 units are 14 alphanumeric plus 19 seven-segment, where
-     Mephisto has 33 identical LTS 3401 digits.  Writing this frame into that
-     layout would put invented positions on the screen and in /api/info, so
-     until a service-mode display test settles it, write nothing. */
-  if (core_gameData->hw.gameSpecific1) return;
+  /* Which of the shift-frame bytes feeds which physical group -- both
+     games now characterised (docs/findings/
+     2026-09-01-mephisto-display-chain.md, docs/findings/
+     2026-09-02-alphanumeric-segments.md):
 
-  /* Which of the seven shift-frame bytes feeds which physical group.
+       Sport 2000 (7 segment groups + column). f[0]/f[1]/f[3]/f[4] are NOT
+       four independent 7-digit displays (see docs/findings/
+       2026-08-31-display-groups.md's fix-round-2 retraction for why that
+       reading was wrong); they are two high/low byte pairs, each driving
+       one 7-character LA8041R-11B alphanumeric row:
+         f[3] (low) / f[4] (high) -> segments[0..6],   CORE_SEG16N
+         f[0] (low) / f[1] (high) -> segments[7..13],  CORE_SEG16N
+         f[5]                     -> segments[14..20], CORE_SEG8D (LTS 3401)
+         f[2]                     -> segments[21..27], CORE_SEG8D (LTS 3401)
+         f[6], columns 0-4        -> segments[28..32] (credit/match/EB)
 
-     CORRECTION (fix round 2): the mapping below was believed "settled" by
-     the 2026-09-01 addendum to docs/findings/2026-08-31-display-groups.md,
-     on the theory that f[0], f[1], f[3] and f[4] are four independent
-     7-digit "Display 1/2/3/4" boards and that f[2]/f[5] have no home in
-     the manual's inventory. That is wrong, and the unexplained f[2]/f[5]
-     was the tell. Four lines of evidence (full derivation in the findings
-     doc's retraction of that addendum):
+       Mephisto (5 segment groups + column). Its panel has no alphanumeric
+       units -- 33 identical LTS 3401 seven-segment digits, all CORE_SEG8D
+       (mephisto_disp). Chain order is credit board first (plate 11: J23 =
+       DATA IN from the control board), then the four player boards
+       (Plate 1's harness trace: CREDITOS -> JUG.4 -> JUG.3 -> JUG.2 ->
+       JUG.1), which puts credit/column last in the frame and gives the
+       natural 1-4 order for the rest -- corroborated, not just inferred
+       from the trace, by the boot-time "NO AUDIO" message reading
+       correctly left to right across f[0] then f[1]:
+         f[0] -> segments[0..6]   (Player 1)
+         f[1] -> segments[7..13]  (Player 2)
+         f[2] -> segments[14..20] (Player 3)
+         f[3] -> segments[21..27] (Player 4)
+         f[4], columns 0-4        -> segments[28..32] (credit/match/EB)
 
-       a. The display board has exactly eight 4094s (manual: "IC1...IC16,
-          alternating ULN2803 and 4094"). A frame is 8 bytes -- 7 segment
-          registers plus 1 column register -- so seven registers give 56
-          drive lines. The panel needs 16+16+8+8+8 = 56: two 16-line
-          alphanumeric rows plus three 8-line (7 real digits + 1 column
-          bit) numeric/credit rows. Exact fit -- no spare register for
-          f[2]/f[5] to be.
-       b. The findings doc's own DISPLAY TEST capture already reads f[3]/
-          f[4] as a high/low BYTE PAIR forming 16-bit words (0x0008,
-          0x0408, ..., 0x04BF) straight off the raw buffer rows
-          "04040404040404"/"08080808080808" -- the addendum then re-read
-          those same rows as two independent 7-digit displays.
-       c. DisplayBufferWriteDigit's own descriptor table (CS:0xB979 =
-          FF 00 09 FF 0E 13 00 1C 1D 00 23 27 00 2A 31) is five entries at
-          start offsets 0/14/28/35/42 with leading flags FF,FF,00,00,00:
-          two 14-byte alphanumeric groups, then three 7-byte numeric
-          groups. 14+14+7+7+5(of 7) = 33 wired positions -- the manual's
-          inventory exactly, nothing left over.
-       d. A 40 s attract-mode sample of DisplayBuffer (addr 0x20594, 49
-          bytes) shows f[3]/f[4] moving as a locked high/low pair (e.g.
-          f[3]=00 04.. with f[4]=A0 BF.. forming word 0x04BF, the same
-          value the findings doc's own table records) and a 4-glyph token
-          walking continuously across the f[5]->f[2] boundary.
+     Not established for either game: which physical row is upper/lower on
+     the cabinet (which alphanumeric or numeric row is "first", which
+     player position is physically where) -- a wrong row order still
+     renders readable text, just in the wrong place, and settling it needs
+     a live multi-player display test once the switch matrix is wired. Do
+     not guess it here. */
+  if (core_gameData->hw.gameSpecific1) {
+    coreGlobals.segments[0 * 7 + col].w = f[0];
+    coreGlobals.segments[1 * 7 + col].w = f[1];
+    coreGlobals.segments[2 * 7 + col].w = f[2];
+    coreGlobals.segments[3 * 7 + col].w = f[3];
+    if (col < 2)             coreGlobals.segments[28 + col].w       = f[4];
+    if (col == 2)            coreGlobals.segments[30].w             = f[4];
+    if (col >= 3 && col < 5) coreGlobals.segments[31 + (col - 3)].w = f[4];
+    return;
+  }
 
-     The actual structure: f[0]/f[1] are the high/low shift-frame bytes of
-     one 7-character LA8041R-11B alphanumeric row; f[3]/f[4] are the
-     high/low bytes of the other. f[2] and f[5] are the two real 7-digit
-     LTS 3401 rows (manual: DIS15-21 and DIS27-33) -- not unassigned, just
-     misread as more player displays. f[6] -> Credit/Match/Extra-Ball (5
-     real digits, DIS22-26) is unaffected by this correction and stays as
-     coded below.
-
-     NOT changed this round: the code below still writes f[0]/f[1]/f[3]/
-     f[4] as four flat 7-digit groups (the old, wrong reading) and leaves
-     f[2]/f[5] unassigned. A correct re-map needs cirsa_disp to describe
-     two 16-segment alphanumeric groups for positions 0..13 instead of two
-     flat 7-digit groups -- real work with its own verification surface,
-     out of scope for this foundations branch. Next task: rework
-     cirsa_disp and this function together for positions 0..27.
-
-     Not established by any of this: the specific left-to-right identity
-     of the two alphanumeric rows or the two numeric rows (which is
-     literally "Display 1" versus "Display 2", or which cabinet position
-     that is). See docs/findings/2026-08-31-display-groups.md's retraction
-     for the full evidence and open questions. */
-  coreGlobals.segments[0 * 7 + col].w = f[0];
-  coreGlobals.segments[1 * 7 + col].w = f[1];
-  coreGlobals.segments[2 * 7 + col].w = f[3];
-  coreGlobals.segments[3 * 7 + col].w = f[4];
+  coreGlobals.segments[0 * 7 + col].b.lo = f[3];
+  coreGlobals.segments[0 * 7 + col].b.hi = f[4];
+  coreGlobals.segments[1 * 7 + col].b.lo = f[0];
+  coreGlobals.segments[1 * 7 + col].b.hi = f[1];
+  coreGlobals.segments[2 * 7 + col].w    = f[5];
+  coreGlobals.segments[3 * 7 + col].w    = f[2];
   if (col < 2)             coreGlobals.segments[28 + col].w       = f[6];
   if (col == 2)            coreGlobals.segments[30].w             = f[6];
   if (col >= 3 && col < 5) coreGlobals.segments[31 + (col - 3)].w = f[6];
@@ -990,7 +989,36 @@ INPUT_PORTS_START(cirsa)
     COREPORT_BIT(     0x0800, "EG2",     KEYCODE_0)
 INPUT_PORTS_END
 
+/* Positions 0..6 and 7..13 are the two 7-character LA8041R-11B alphanumeric
+   rows -- CORE_SEG16N, not CORE_SEG8D (docs/findings/
+   2026-09-02-alphanumeric-segments.md: the high byte is a-g in the same
+   bit positions as the numeric font, the low byte carries the rest of the
+   alphabet, and no CORE_SEG16* variant reinterprets bits beyond that, so
+   the "without commas" one that adds nothing unobserved is the right
+   declaration). Positions 14..20 and 21..27 stay the real 7-digit LTS 3401
+   numeric rows, CORE_SEG8D, unchanged.
+
+   Column positions were checked, not just carried over: core.c's
+   segData[] table gives CORE_SEG8D and CORE_SEG16N the identical {20,15}
+   cell (cols=15 either way), and core_seg_video_update() advances `left`
+   by the same segData[type].cols+1 per character regardless of type. A
+   16-segment character is drawn in the same size cell as a 7-segment one
+   in this renderer -- it isn't literally wider here -- so the existing
+   {0,16} / {0,16} spacing (7 characters at 2 left-units each = 14, next
+   group at 16, same 2-unit gap CORE_SEG8D had) still fits with no overlap
+   and needs no adjustment. */
 static core_tLCDLayout cirsa_disp[] = {
+  {0, 0, 0, 7,CORE_SEG16N}, {0,16, 7, 7,CORE_SEG16N},
+  {3, 0,14, 7,CORE_SEG8D}, {3,16,21, 7,CORE_SEG8D},
+  {6, 8,28, 2,CORE_SEG8D}, {6,14,30, 1,CORE_SEG8D}, {6,18,31, 2,CORE_SEG8D},
+  {0}
+};
+/* Mephisto's panel is NOT Sport 2000's -- 33 identical LTS 3401
+   seven-segment digits (no alphanumeric units at all), grouped 7+7+7+7+5
+   across the four player boards and the credit/match board (docs/findings/
+   2026-09-01-mephisto-display-chain.md). Same row/column grid as
+   cirsa_disp for visual consistency; every group stays CORE_SEG8D. */
+static core_tLCDLayout mephisto_disp[] = {
   {0, 0, 0, 7,CORE_SEG8D}, {0,16, 7, 7,CORE_SEG8D},
   {3, 0,14, 7,CORE_SEG8D}, {3,16,21, 7,CORE_SEG8D},
   {6, 8,28, 2,CORE_SEG8D}, {6,14,30, 1,CORE_SEG8D}, {6,18,31, 2,CORE_SEG8D},
@@ -1030,7 +1058,7 @@ static core_tLCDLayout cirsa_disp[] = {
    Mephisto coil numbers, nor the quick-contact gate that a later commit
    added to cirsa_vblank. */
 static core_tGameData cirsaGameData    = {0,cirsa_disp,{FLIP_SW(FLIP_L),1,8}};
-static core_tGameData mephistoGameData = {0,cirsa_disp,{FLIP_SW(FLIP_L),0,8,0,0,0,1}};
+static core_tGameData mephistoGameData = {0,mephisto_disp,{FLIP_SW(FLIP_L),0,8,0,0,0,1}};
 static void init_cirsa(void) {
   core_gameData = &cirsaGameData;
 }
