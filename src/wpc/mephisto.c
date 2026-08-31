@@ -540,11 +540,21 @@ static UINT8 cirsa_p2_in(void) {
 /  set.  A driver that only installs the callback (as this one did before
 /  this fix) gets silence: the byte sits in locals.sndToSnd forever and
 /  the 8051 never knows it arrived.  Asserting the line each time a fresh
-/  byte lands is what actually pulls it through cirsa_snd_rx() into SBUF
-/  and raises RI -- same pattern as capcoms.c's send_data_to_8752().  The
-/  case does not look at the line state at all, so a bare ASSERT_LINE per
-/  byte is enough; there is nothing to clear afterwards.  scpu (the 8051)
-/  is cpu 1 here -- mcpu is added first in MACHINE_DRIVER_START(mephisto).
+/  byte lands is what would pull it through cirsa_snd_rx() into SBUF and
+/  raise RI -- same pattern as capcoms.c's send_data_to_8752() -- once the
+/  firmware actually reaches IE.ES=1, which today it never does: this is
+/  wiring, not a working handshake.  check_interrupts() in i8051.c
+/  dispatches Timer 0/1 and External 0/1 off the raw flag bit plus the
+/  global EA alone, without each source's own individual enable bit in
+/  IE, so the boot ROM's bare SETB EA takes a spurious Timer-1 interrupt
+/  into a trampoline that never executes RETI and permanently locks the
+/  interrupt subsystem before MOV IE,#092h (the instruction that would set
+/  ES) is ever reached.  That is a defect in the shared i8051 core, not in
+/  this driver; see docs/findings/2026-09-01-sound-link.md for the traced
+/  PCs and the fix this needs.  The case does not look at the line state
+/  at all, so a bare ASSERT_LINE per byte is enough; there is nothing to
+/  clear afterwards.  scpu (the 8051) is cpu 1 here -- mcpu is added first
+/  in MACHINE_DRIVER_START(mephisto).
 /----------------------------------------------------------------------*/
 static void cirsa_txd_out(UINT8 data) {
   locals.sndToSnd = data;
