@@ -647,6 +647,18 @@ static WRITE_HANDLER(ic9_pa_w) {
          active gameplay, but under 30 ms at idle in attract, so the delay
          itself is state-dependent, not a fixed driver latency. */
   coreGlobals.solenoids |= (locals.qcState & 0x0e);  /* coils 1-3 only */
+
+  /* Feed the PWM integrator with the same 24-bit state, including the
+     quick-contact OR above -- this is what MACHINE_INIT(CIRSA)'s
+     core_set_pwm_output_type(CORE_MODOUT_SOL0, 24, ...) call is for. This
+     handler runs on every hardware write (~280/s), not once a vblank, so
+     it is a far better source for the integrator than sampling
+     coreGlobals.solenoids from cirsa_vblank would be -- see p2k.c:2013-2018
+     on why a once-a-frame sample loses short pulses the integrator needs
+     to see. Sport 2000 only, same gate as the rest of this handler. */
+  core_write_pwm_output_8b(CORE_MODOUT_SOL0,      (UINT8)(coreGlobals.solenoids      & 0xff));
+  core_write_pwm_output_8b(CORE_MODOUT_SOL0 +  8, (UINT8)((coreGlobals.solenoids >> 8)  & 0xff));
+  core_write_pwm_output_8b(CORE_MODOUT_SOL0 + 16, (UINT8)((coreGlobals.solenoids >> 16) & 0xff));
 }
 
 /*-- IC9: general I/O.  PB reads the B0-B7 bus that also feeds the quick
@@ -723,18 +735,25 @@ static MACHINE_INIT(CIRSA) {
     locals.lastKeys = keys;
   }
 
-  /* coreGlobals.nSolenoids is deliberately left at 0 here, for both games.
-     Every other driver that sets it follows with
+  /* coreGlobals.nSolenoids was deliberately left at 0 here for both games
+     until now -- commit d8547e62, "stop advertising nSolenoids without
+     feeding the PWM integrator". p2k.c:2008-2010 spells out why: every
+     other driver that sets the count follows with
      core_set_pwm_output_type(CORE_MODOUT_SOL0, n, CORE_MODOUT_SOL_2_STATE)
-     and writes through core_write_pwm_output*() -- this driver does
-     neither. p2k.c:2008-2010 spells out what happens if the count is set
-     without that: core_getSol() reads physicOutputState[] as soon as the
-     count is non-zero and options.usemodsol is set, so declaring 24 here
-     would report every output as permanently off the moment this game
-     meets a front end with modsol turned on. Not reachable today only
-     because usemodsol is 0 on the unix build. Advertise the count once
-     ic9_pa_w also feeds the PWM integrator -- it already runs on every
-     hardware write, so it is well placed to do both jobs. */
+     and writes through core_write_pwm_output*(); declaring the count
+     without also feeding the integrator makes core_getSol() read
+     physicOutputState[] as soon as options.usemodsol is set, and an
+     integrator nobody feeds reports every output as permanently off --
+     nSolenoids alone makes things worse, not better. This is that same
+     decision completed, not reversed: ic9_pa_w now feeds the integrator
+     on every hardware write (see below), so the count can be advertised
+     honestly. Sport 2000 only -- Mephisto's coil numbering on this same
+     bus is still uncharacterised (see ic9_pa_w's gate), so it must not
+     advertise solenoids it cannot drive. */
+  if (!core_gameData->hw.gameSpecific1) {
+    coreGlobals.nSolenoids = 24;
+    core_set_pwm_output_type(CORE_MODOUT_SOL0, 24, CORE_MODOUT_SOL_2_STATE);
+  }
 
   i8256_init(&cirsa_i8256);
   i8155_init(&cirsa_i8155);
