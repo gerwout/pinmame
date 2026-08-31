@@ -29,8 +29,13 @@
 #     differed, including two audio checksums.  Without it, the same games are
 #     stable (e.g. bsv103's serial count was 11 in one pass and 249 in the
 #     other; without REMOTE_DEBUG it is 249 three times out of three).
-# A residual +-1 jitter remains in the Alvin G games' ie1 count (~0.05%); see
-# docs/findings/2026-08-31-i8051-baseline-sweep.tsv's commit message.
+#   * NVRAM.  Each run is started from a cleared per-game NVRAM file (see
+#     run_one below).  Without that, a game's numbers depend on how many times
+#     it has been booted before, which is not something a before/after diff can
+#     see or control.
+# A residual +-1 jitter remains in the Alvin G games' ie1/tf0 counts (~0.05%),
+# and jolypark's audio checksum still moves run to run with its counters fixed;
+# see docs/findings/2026-08-31-i8051-interrupt-fix.md.
 #
 # Usage:
 #   scripts/i8051_sweep.sh OUTPUT.tsv [BINARY] [ROMPATH]
@@ -89,10 +94,22 @@ ffv104 ffv103 ffv101 bbb109 bbb108 kpb105
 bushido bushidoa bushidob mach2 mach2a jolypark vrnwrld
 "}
 
+# NVRAM is per-game persistent state and it IS written -- every game in this
+# list leaves a $HOME/.xpinmame/nvram/<game>.nv behind.  It changes what the
+# next run measures, and by a lot: with NVRAM carried over, bsb105 reports
+# ie0=8 riti=247, and with it cleared, ie0=51 riti=265 -- a 6x difference on a
+# counter this sweep exists to interpret.  bbb109's riti goes 8 -> 11 -> 23
+# over successive boots from the same virgin state.  Each of those values is
+# perfectly reproducible (3/3 runs) once the NVRAM state is pinned, so this is
+# not emulator nondeterminism, it is a hidden input.  Clear it per game so a
+# before/after comparison measures the code change and nothing else.
+NVDIR=${NVDIR:-$HOME/.xpinmame/nvram}
+
 run_one() {   # $1 = game ; leaves the captured output in $CAP
 	local game=$1
 	CAP=$(mktemp)
 	local t0 t1
+	rm -f "$NVDIR/$game.nv"
 	t0=$(date +%s)
 	timeout -k 5 "$TIMEOUT" "$BIN" \
 		-headless $SNDFLAGS -skip_gamewarnings -skip_gameinfo \
@@ -115,6 +132,7 @@ field() {     # $1 = probe line prefix, $2 = key ; prints the value or "-"
 # ---------------------------------------------------------------------------
 echo "i8051_sweep: self-check on mephisto (ftr=120)..." >&2
 CAP=$(mktemp)
+rm -f "${NVDIR:-$HOME/.xpinmame/nvram}/mephisto.nv"
 timeout -k 5 120 "$BIN" -headless $SNDFLAGS -skip_gamewarnings -skip_gameinfo \
 	-ftr 120 -rompath "$ROMPATH" mephisto >"$CAP" 2>&1
 grep -q "I8051_SWEEP AUDIO" "$CAP" || die "binary printed no AUDIO probe line -- not an I8051_SWEEP build?"
