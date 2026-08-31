@@ -1263,6 +1263,54 @@ static MEMORY_WRITE_START(cirsa_writesnd)
   { 0x00000, 0x07fff, MWA_ROM },
   { 0x10000, 0x107ff, MWA_RAM },
   { 0x10800, 0x10800, bank_w },
+  /* The same latch, reached through a second address.  Still [INFERRED]:
+     the schematic trace has not been read off the plate, and section 5 of
+     docs/findings/2026-08-31-sound-firmware.md is the argument.
+
+     The Timer 0 ISR services two independent PCM streams and writes a bank
+     number immediately before each one's MOVC: stream 1 to xdata 0x0F00
+     (0x0C2C-0x0C2F, which reaches DPTR 0x0F00 by DEC DPH from 0x1000) and
+     stream 2 to xdata 0x0800 (0x0C42-0x0C46).  Only the second was mapped,
+     so every one of stream 1's bank writes was dropped.
+
+     There is exactly one banked window -- the 8051's code space is 64K,
+     0x0000-0x7FFF is the firmware EPROM, and both streams read from
+     0x8000-0xFFFF (the descriptor's start page is loaded as table[0] + 0x80
+     at 0x0CC2 and 0x0CDA) -- so there is one latch to drive it.  Plate 11
+     (PDF p.34) has a 74LS373 feeding IC22, a 74LS138 whose Y0..Y7 are
+     CST0..CST7; a decode of the 0x0800-0x0FFF block that ignores A8-A10
+     aliases that latch across the whole block, 0x0800 and 0x0F00 included.
+     Mephisto's firmware writes only 0x0800, which is why it makes no
+     unmapped access and why this line changes nothing for it.
+
+     The falsifying observation section 5 proposed -- the two streams
+     running at once from different banks -- turns out not to be one.
+     Because each stream rewrites the bank immediately before its own MOVC,
+     one shared latch and two independent latches produce identical results
+     for this firmware, so the two hypotheses are not distinguishable by
+     observing it, and mapping 0x0F00 here is right under either.  What can
+     be said is that the two addresses now demonstrably carry the same kind
+     of value: measured over 40 emulated seconds of sport2k attract on the
+     deterministic build, 0x0800 takes 288,212 writes carrying 00, 01, 03,
+     09, 0B and 0C, and 0x0F00 takes 95,444 carrying 00, 03, 0B and 0C -- a
+     subset, drawn from the same descriptor field.  (On a6a8274a both
+     addresses took 40,704 writes and every one was 0x00, which is why
+     section 5 could not test anything: the board was rebooting before it
+     ever played a sample.)
+
+     A bug this exposes, deliberately not fixed here.  bank_w computes
+     data * 0x8000, and banks 0x0B and 0x0C now really occur, which points
+     it at 0x58000 and 0x60000 inside a REGION_SOUND1 that is 0x50000 long
+     -- an out-of-bounds base for cpu_setbank.  The decode is wrong for
+     sport2k: the descriptor table at 0x5624+3n uses exactly ten values
+     over its 63 sounds, 0x00-0x04 and 0x08-0x0C, with 5, 6 and 7 never
+     appearing, which is five 27512s selected by bits 0-2 (CST0..CST7, only
+     five fitted) and bit 3 choosing which 32K half of the selected chip --
+     not a linear bank index.  Mephisto is the other case and is fine as
+     is: eight 27256s, one 32K bank each, bank number = chip number.  A fix
+     therefore has to be per-game and needs the polarity of bit 3 settled,
+     which nothing here does. */
+  { 0x10f00, 0x10f00, bank_w },
   { 0x11000, 0x11000, DAC_0_data_w },
   /* The YM3812 (OPL2) the manual puts on this board with its own 14.318 MHz
      crystal.  MACHINE_DRIVER_START(cirsa) has always added the chip, but
