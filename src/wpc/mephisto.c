@@ -890,8 +890,36 @@ static const I8256interface cirsa_i8256 = {
 /  PA0-3 select a switch column through IC30 (7445), PA4-6 select a lamp
 /  column through IC29 (7445), and PA7 strobes the WD LUCES lamp watchdog.
 /  PB drives the lamp rows through IC32 (UDN6118-A).  PC reads the switch
-/  rows back through two stages of 74HC14 off pulled-up lines, so a closed
-/  switch reads as 0.
+/  rows back through IC31, a 74HC14 -- ONE inverting stage, not two.
+/
+/  Polarity, and why it matters: plate 6 (PDF p. 29) shows the six CF row
+/  lines resting high through AR9 (4K7 to +5V), entering IC31's inputs
+/  (7414 pins 13/9/3/11/1/5) through the AR7 10K series array, with IC31's
+/  outputs (pins 12/8/4/10/2/6 -- the bubbled ends in the drawing) wired
+/  straight to IC20 PC0-PC5 (package pins 37/38/39/1/2/5).  IC30 (7445)
+/  pulls the selected column LOW, a closed switch pulls its row LOW with
+/  it, and the single inversion turns that into a HIGH at Port C.  So a
+/  closed switch reads as 1 here, and this handler must NOT invert.
+/  Mephisto's manual names the same IC31 74HC14 on its own switch rows.
+/
+/  The ROM agrees, three ways over: 0x0CD31 copies the Port C byte into the
+/  debounced level array at [0x72B] with no NOT of its own and latches an
+/  event on each 0->1 transition, so an event has to mean a closure; the
+/  cabinet buttons on MUART port 2 (cirsa_p2_in, non-inverting) and the
+/  quick contacts on IC9 Port B (ic9_pb_r, likewise) already go through
+/  that identical debouncer; and SWITCH TEST 5-PHASE displays an event
+/  whenever 0x0CF57 finds its level bit set, which the manual describes as
+/  showing "the switch being activated".
+/
+/  Inverting here made every column's level byte read 0x3F at rest, i.e.
+/  all 60 switches permanently closed.  That saturated the event array at
+/  [0x737] to 0x3F as well, moved every event to the release edge, and left
+/  the coin debouncer at 0x068CA seeing all three chutes stuck closed --
+/  which trips its jam path (15 consecutive closed samples: [0x2EE] >= 0x0F
+/  -> [0x2ED] = 0x64, return) before it ever services chutes 2 and 3.  Coins
+/  credited only in the narrow window where that counter had just wrapped:
+/  measured 1 of 12 pulses at a 1.2 s closure and 0 of 18 at shorter ones,
+/  against 18 of 18 after this fix.  See docs/findings/2026-09-02-coins.md.
 /----------------------------------------------------------------------*/
 static WRITE_HANDLER(ic20_pa_w) {
   int col = (data >> 4) & 0x07;
@@ -913,8 +941,11 @@ static WRITE_HANDLER(ic20_pb_w) {
 }
 
 static READ_HANDLER(ic20_pc_r) {
-  if (locals.swCol > 9) return 0x3f;
-  return ~coreGlobals.swMatrix[locals.swCol + 1] & 0x3f;
+  /* IC30 decodes 0-9 only; for 10-15 no column is pulled low, so no switch
+     can pull a row low and every buffered row reads back as "open" -- 0
+     under this active-high convention. */
+  if (locals.swCol > 9) return 0x00;
+  return coreGlobals.swMatrix[locals.swCol + 1] & 0x3f;
 }
 
 /*-- IC9 Port A: the coil bus (plate 9) -----------------------------------
