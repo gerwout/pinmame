@@ -18,7 +18,7 @@ static struct {
                            bytes long -- see cirsa_frameLen() */
   int   shiftPos;
   UINT8 lastKeys;       /* previous cabinet key state, for edge-only updates */
-  int   ppcero;         /* PPCERO, the mains zero-cross square wave: MUART P11,
+  int   ppcero;         /* PPCERO, the mains zero-cross pulse: MUART P11,
                            and (through IC26/IC24) the MUART's EXTINT pin */
   /*-- phase 0 instrumentation state --*/
   int   lastrep;
@@ -705,18 +705,66 @@ static int cirsa_irq_callback(int irqline) {
 /  alone.  If i8256.c ever grows a true level-sensitive EXTINT that
 /  re-requests after EOI, this is the place to revisit.
 /
-/  The 100 Hz figure is 50 Hz Spanish mains, full-wave rectified.  The duty
-/  cycle is a modelling choice, not a measurement: a real zero-cross
-/  detector emits a narrow pulse, but a 50% square is what makes both
-/  ROMs' P11 tests come out on both phases (Mephisto needs to see it HIGH
-/  at ISR entry to update the INH outputs at all; Sport 2000 needs to see
-/  it LOW somewhere to re-arm the level).
+/  The 100 Hz figure is 50 Hz Spanish mains, full-wave rectified.
+/
+/  PPCERO IS A NARROW HIGH PULSE, NOT A SQUARE WAVE, and that matters --
+/  it gates Sport 2000's whole coil pipeline.  Read the comparator off the
+/  same plate: R16 1K feeds node A from +12 and Z2, a 3 V zener, clamps it;
+/  R17 10K takes node A to IC25 pin 6 (inverting), while R18 4K7 / R19 1K
+/  divide 5 V down to 0.877 V on pin 5 (non-inverting).  The open-collector
+/  output therefore sits LOW for as long as node A is above 0.877 V and is
+/  released HIGH by R13 only in the sliver either side of the crossing
+/  where the unsmoothed rail falls below it -- asin(0.877/~17 V) each way,
+/  about 6 degrees of the 180 degree half cycle, i.e. ~0.33 ms of every
+/  10 ms.  CIRSA_ZC_PULSE_US is that sliver.
+/
+/  Why it is load bearing.  Sport 2000 runs its coils from a four phase
+/  round robin (0x08B3), phase 3 of which -- 0xC3CA, the pulse/hold state
+/  machine that turns SolenoidOn requests into the frame bytes -- is the
+/  only writer of [0x67F]/[0x686]/[0x68D].  The phase counter [0x31] is
+/  forced back to 0 by EVERY pass that finds P11 high (0x08AA, 0x090C, and
+/  the level-2 ISR at 0x095A), and it only advances on alternate passes of
+/  a ~727 Hz timer-1 ISR, so reaching phase 3 needs ~8.3 ms of unbroken
+/  P11-low.  With the 50 % square this code used to emit, the low half was
+/  5 ms: [0x31] never once got past 2 in an eight minute game, phase 3
+/  never ran, the frame stayed 'C0 81 82 83 84 85 86 87' with no data bit,
+/  and coreGlobals.solenoids never left 0.  Measured across a sweep, same
+/  build, same stimulus, coin+START then four seconds of sampling:
+/
+/     high time  50us 150us 300us 700us 1500us | 3000us | 5000us (old)
+/     phase 3 in  20   20    20    20    20    |   8    |    0    of 20
+/     coils        y    y     y     y     y    |   y    |   none
+/
+/  so anything from a hairline pulse up to ~1.5 ms behaves identically and
+/  the shipped 5 ms was the one value that broke it.  The plateau is wide
+/  because the reset does not depend on a main-loop pass happening to land
+/  inside the pulse -- the level-2 ISR is entered on the rising edge and
+/  reads P11 as its first instruction, so a crossing narrower than one
+/  timer-1 tick still resets the counter.  It is not airtight either way:
+/  at 300 us [0x31] samples 4..8 about a quarter of the time, i.e. the odd
+/  crossing does go unnoticed and the round robin simply runs an extra lap
+/  of do-nothing phases.  That is harmless -- phases 4+ fall straight
+/  through to the increment -- and 0..3 still complete every crossing that
+/  is seen.
+/
+/  Mephisto needs the pulse for the opposite reason -- its level-2 ISR
+/  (0x143B) updates INH LF / INH FLIP / INH L.C. only when it finds P11
+/  HIGH, so resting the pin low would freeze those outputs.  Its coils are
+/  not gated on P11 at all (the only Port 1 reads in that ROM are 0x096E,
+/  0x0FAD and the ISR itself), which is why this bug was Sport 2000 only.
 /----------------------------------------------------------------------*/
 #define CIRSA_ZC_HZ 100          /* mains zero crossings per second */
+#define CIRSA_ZC_PULSE_US 300    /* PPCERO high time per crossing, see above */
+
+static void cirsa_zc_off(int dummy) {
+  locals.ppcero = 0;
+  i8256_set_extint(0);
+}
 
 static void cirsa_zc_tick(int dummy) {
-  locals.ppcero = !locals.ppcero;
-  i8256_set_extint(locals.ppcero);
+  locals.ppcero = 1;
+  i8256_set_extint(1);
+  timer_set(TIME_IN_USEC(CIRSA_ZC_PULSE_US), 0, cirsa_zc_off);
 }
 
 static UINT8 cirsa_p1_in(void) {
@@ -1198,10 +1246,11 @@ static MACHINE_INIT(CIRSA) {
   core_set_pwm_output_type(CORE_MODOUT_SOL0, 24, CORE_MODOUT_SOL_2_STATE);
 
   i8256_init(&cirsa_i8256);
-  /* PPCERO: a 100 Hz square wave on MUART P11 and, through IC26/IC24,
-     on the MUART's EXTINT pin.  Two edges per cycle, so pulse at twice
-     the crossing rate.  See cirsa_p1_in's block comment. */
-  timer_pulse(TIME_IN_HZ(2.0 * CIRSA_ZC_HZ), 0, cirsa_zc_tick);
+  /* PPCERO: a narrow 100 Hz pulse on MUART P11 and, through IC26/IC24,
+     on the MUART's EXTINT pin.  One timer per crossing; the falling edge
+     is scheduled by cirsa_zc_tick itself.  See cirsa_p1_in's block
+     comment for why the width matters. */
+  timer_pulse(TIME_IN_HZ(CIRSA_ZC_HZ), 0, cirsa_zc_tick);
   i8155_init(&cirsa_i8155);
   cpu_set_irq_callback(0, cirsa_irq_callback);
 
