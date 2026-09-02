@@ -1423,9 +1423,25 @@ static struct DACinterface cirsa_dacInt = { 1, { 50 }};
 /  reason, and the two games populate them differently:
 /
 /    Mephisto  eight 27256 (0x8000 each), CST0..CST7 -> 0x00000..0x38000.
-/              A15F does nothing.  bank = data, flat: data * 0x8000.
+/              A15F is Vpp here and does nothing to the address, so bit 3
+/              must be MASKED OFF: chip = data & 7.
 /    Sport2000 five 27512 (0x10000 each) on CST0..CST4.  bits 0-2 pick the
 /              chip, bit 3 picks the 32K half within it.
+/
+/  Mephisto's firmware settles its own arithmetic.  Its PCM descriptor table
+/  is at ic15_02 0x073E, three bytes per entry (start page, page count,
+/  bank), 24 entries, and every bank byte in it is 0x08-0x0F -- bit 3 always
+/  set, because on a 27256 pin 1 is Vpp and has to sit at +5V for the part
+/  to read at all.  Under the old `data * 0x8000` those select 0x40000 to
+/  0x78000 inside a REGION_SOUND1 that is 0x40000 long: all 24 descriptors
+/  out of bounds, and measured live, every bank write the firmware makes is
+/  out of range (18 of 18 in a 60 s run driven with sample commands).  With
+/  bit 3 masked off all 24 land inside the region on data that is
+/  unmistakably 8-bit unsigned PCM -- median mean-absolute-first-difference
+/  10.5 against 83.9 for uniform random, 79% of bytes within 0x50-0xB0 of
+/  mid-scale.  MAME's own mephisto driver encodes the same conclusion from
+/  the other side: it loads the eight ROMs at 0x40000-0x7FFFF of a 0x80000
+/  region and banks with `data & 0xf`, i.e. bank 0x08 = ic14_s0.
 /
 /  The old flat arithmetic was right for Mephisto and wrong for Sport 2000,
 /  whose descriptor table uses 0x00-0x04 and 0x08-0x0C.  Under data*0x8000
@@ -1441,7 +1457,7 @@ static WRITE_HANDLER(bank_w) {
   UINT32 off;
 
   if (core_gameData->hw.gameSpecific1)          /* Mephisto: 8 x 27256 */
-    off = data * 0x8000;
+    off = (data & 0x07) * 0x8000;
   else                                          /* Sport 2000: 5 x 27512 */
     off = (data & 0x07) * 0x10000 + (((data >> 3) & 1) * 0x8000);
 
