@@ -22,6 +22,8 @@ static struct {
                            bytes long -- see cirsa_frameLen() */
   int   shiftPos;
   UINT8 lastKeys;       /* previous cabinet key state, for edge-only updates */
+  UINT8 lastPlayKeys;   /* coin 1/2/3 + start, previous state */
+  UINT8 lastTrough;     /* ball trough toggle, previous state */
   int   ppcero;         /* PPCERO, the mains zero-cross pulse: MUART P11,
                            and (through IC26/IC24) the MUART's EXTINT pin */
   /*-- phase 0 instrumentation state --*/
@@ -1326,18 +1328,63 @@ static MACHINE_INIT(CIRSA) {
   i8051_set_eram_iaddr_callback(cirsa_eram_addr);
 }
 
+/* Coin 1/2/3 and Start, as {swMatrix index, bit mask}, measured through each
+   ROM's own SWITCH TEST -- see docs/reference/switch-matrices.md.  Sport 2000
+   takes all three chutes and Start on one column; Mephisto spreads them, and
+   its chute order comes from the ROM's own tables at 0x1C49 / 0x1C4C. */
+static const UINT8 cirsaCoinSw[4][2] = {
+  {7, 0x08},  /* Coin 1 -> 25 chute      */
+  {7, 0x10},  /* Coin 2 -> centre chute  */
+  {7, 0x20},  /* Coin 3 -> 100 chute     */
+  {7, 0x04}   /* Start                   */
+};
+static const UINT8 mephCoinSw[4][2] = {
+  {6, 0x10},  /* Coin 1 -> chute 0, 1 credit  */
+  {4, 0x20},  /* Coin 2 -> chute 1, 2 credits */
+  {7, 0x10},  /* Coin 3 -> chute 2, 5 credits */
+  {4, 0x04}   /* Start                        */
+};
+/* The ball trough: a whole column's worth of switches held closed by the balls. */
+static const UINT8 cirsaTrough[2] = {6, 0x3c};   /* BALL TROUGH 1-4  */
+static const UINT8 mephTrough[2]  = {7, 0x0e};   /* elements 38,39,40 */
+
 static SWITCH_UPDATE(CIRSA) {
-  /* Write a cabinet bit only when the key behind it has actually changed.
+  /* Write a bit only when the key behind it has actually changed.
      Rewriting the whole row every frame stamps out anything else that set
      one of these switches -- a front end, or the remote debugger -- before
      the ROM has had a chance to poll it.  Same reasoning as rfranco.c. */
   if (inports) {
+    const int meph = core_gameData->hw.gameSpecific1;
+    const UINT8 (*coin)[2] = meph ? mephCoinSw : cirsaCoinSw;
+    const UINT8 *trough    = meph ? mephTrough : cirsaTrough;
     UINT8 keys    = (UINT8)((inports[CORE_COREINPORT] >> 8) & 0x0f);
     UINT8 changed = (UINT8)(keys ^ locals.lastKeys);
+    UINT8 now, diff;
+    int i;
+
     if (changed) {
       coreGlobals.swMatrix[0] = (UINT8)((coreGlobals.swMatrix[0] & ~changed) |
                                         (keys & changed));
       locals.lastKeys = keys;
+    }
+
+    /* Coin 1/2/3 and Start, same change-only discipline, one bit each. */
+    now  = (UINT8)(inports[CORE_COREINPORT] & 0x0f);
+    diff = (UINT8)(now ^ locals.lastPlayKeys);
+    for (i = 0; i < 4; i++)
+      if (diff & (1 << i)) {
+        const UINT8 idx = coin[i][0], msk = coin[i][1];
+        if (now & (1 << i)) coreGlobals.swMatrix[idx] |=  msk;
+        else                coreGlobals.swMatrix[idx] &= ~msk;
+      }
+    locals.lastPlayKeys = now;
+
+    /* Ball trough -- a toggle, so follow its level rather than its edge. */
+    now  = (UINT8)((inports[CORE_COREINPORT] >> 4) & 1);
+    if (now != locals.lastTrough) {
+      if (now) coreGlobals.swMatrix[trough[0]] |=  trough[1];
+      else     coreGlobals.swMatrix[trough[0]] &= ~trough[1];
+      locals.lastTrough = now;
     }
   }
 }
@@ -1781,10 +1828,34 @@ MACHINE_DRIVER_START(cirsa)
   MDRV_SOUND_ADD(YM3812, cirsa_ym3812Int)
 MACHINE_DRIVER_END
 
+/*-- Input ports (CORE_COREINPORT, i.e. port 2) --------------------------
+/  Bits 0x0100-0x0800 are the four cabinet buttons on the service bracket.
+/
+/  Bits 0x0001-0x0040 are coin, start and the ball trough.  Those are all
+/  playfield matrix switches on the real machine, not cabinet wiring, so
+/  before this they were reachable only through core.c's generic
+/  column+row entry (Q..I plus A..K) -- workable but obscure, and it is
+/  not what the rest of PinMAME does.  capcom.h, atari.h and gp.h all bind
+/  coin and start on their own port and translate to the matrix in their
+/  SWITCH_UPDATE; this follows that pattern, and uses the conventional
+/  keys: 5 = coin, 1 = start.
+/
+/  The trough is a BITTOG because it is a level, not an event: the balls
+/  sit on those switches and hold them closed for the whole game.  Held on
+/  a momentary key you would have to keep a finger down to play at all.
+/
+/  Which matrix bit each one lands on differs per game and is set out in
+/  cirsaCoinSw/mephCoinSw below.
+/----------------------------------------------------------------------*/
 INPUT_PORTS_START(cirsa)
   CORE_PORTS
   SIM_PORTS(1)
-  PORT_START /* 0 */
+  PORT_START /* CORE_COREINPORT */
+    COREPORT_BIT(     0x0001, "Coin 1",      KEYCODE_5)
+    COREPORT_BIT(     0x0002, "Coin 2",      KEYCODE_6)
+    COREPORT_BIT(     0x0004, "Coin 3",      KEYCODE_4)
+    COREPORT_BIT(     0x0008, "Start",       KEYCODE_1)
+    COREPORT_BITTOG(  0x0010, "Ball Trough", KEYCODE_B)
     COREPORT_BIT(     0x0100, "Test",    KEYCODE_7)
     COREPORT_BIT(     0x0200, "Advance", KEYCODE_8)
     COREPORT_BIT(     0x0400, "EG1",     KEYCODE_9)
