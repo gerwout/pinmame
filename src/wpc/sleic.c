@@ -1976,6 +1976,15 @@ MEMORY_END
  * the reason above -- the manual's SW5 "servicio: no se dispensan bolas" is the same
  * behaviour the 0xED handler shows, and with no ball model 0 is the state to hold. */
 static UINT8 iomoon_port04(void) {
+  /* debug: SLEIC_PROBE_COUNTRY=n -- force the country switches to n (0..7) instead of the
+   * DIP.  A headless run has no way to set a DIP, and the country changes enough (pricing
+   * preset, menu record table, attract variant) to be worth exercising from a script */
+  { static int probe = -2;
+    if (probe == -2) { const char *e = getenv("SLEIC_PROBE_COUNTRY");
+                       probe = e ? (int)strtol(e, NULL, 0) : -1; }
+    if (probe >= 0)
+      return (UINT8)((IOMOON_PORT04_IDLE & ~0x0e) | ((probe & 7) << 1));
+  }
   return (UINT8)((IOMOON_PORT04_IDLE & ~0x0e) | (core_getDip(0) & 0x0e));
 }
 
@@ -2779,7 +2788,9 @@ static void iomoon_swburst_frame(void) {
  * three earlier navigation guesses ("0x3F = select", Bike-Race-style scroll/select, "0x33
  * opens the menu") without offering a replacement, and F14 only establishes that each menu
  * item "waits for ANY inbound byte." This probe reports what the index does in response,
- * not what it is supposed to mean.
+ * not what it is supposed to mean.  (Task 16 has since read the dispatcher and settled it
+ * -- see SLEIC_PROBE_MENUWALK below, which also explains why 413C:015A is the wrong cell
+ * to watch.  This probe is kept as it was reviewed: a semantics-free stress run.)
  *
  *   SLEIC_PROBE_MENU        run it
  *   SLEIC_PROBE_MENUAT=n    open the menu at frame n (default 900)
@@ -3267,10 +3278,298 @@ static void iomoon_oki_probe_frame(void) {
   }
 }
 
+/*-------------------------------------------------------------------------------------
+/  debug: SLEIC_PROBE_KEY -- Task 16.  Press cabinet BUTTONS, not switch bits.
+/
+/  SLEIC_PROBE_CAB above ORs bits straight into swMatrix[9], which skips the one step this
+/  task changed: the inport -> swMatrix[9] translation in SWITCH_UPDATE(SLEIC2).  This
+/  probe ORs into the core inport word instead, so a scripted press travels the whole path
+/  a keypress does -- inport bit -> cabinet bit -> Z80 port 0x03 -> the Z80's own debounce
+/  and per-button routine -> the F5 code over J1 -> the 80188.  Nothing downstream is
+/  touched, and with the probe unset the expression is inports[...] | 0.
+/
+/    SLEIC_PROBE_KEY="frame:mask,..."   press the buttons in <mask> from frame <frame>
+/    SLEIC_PROBE_KEYHOLD=n              frames each press is held (default 10)
+/
+/  <mask> is the core inport word, so it is written the way the port is defined in
+/  sleic.h: 0001 L-flipper, 0002 R-flipper, 0100 START, 0200 COIN, 0400 TILT, 0800 TEST.
+/  0x0200 (COIN) held for ~10 frames is one coin; the Z80's port-0x03 bit-5 handler
+/  sub_0D15 emits one 0x32 per 0x32 ticks of its C046 debounce while the input is low. */
+static UINT16 iomoon_probe_key(void) {
+  static const char *list = NULL; static int started = 0, hold = 10, frame = 0;
+  UINT16 mask = 0;
+  const char *p;
+  if (!started) { const char *h = getenv("SLEIC_PROBE_KEYHOLD");
+                  started = 1; list = getenv("SLEIC_PROBE_KEY");
+                  if (h) hold = (int)strtol(h, NULL, 10); }
+  frame++;
+  if (!list) return 0;
+  for (p = list; *p; ) {
+    char *end;
+    const long at = strtol(p, &end, 10);
+    p = end; if (*p == ':') p++;
+    { const long bits = strtol(p, &end, 16);
+      p = end; if (*p == ',') p++;
+      if (frame >= at && frame < at + hold) mask |= (UINT16)bits;
+    }
+  }
+  return mask;
+}
+
+/*-------------------------------------------------------------------------------------
+/  debug: SLEIC_PROBE_CREDIT -- Task 16.  The coin -> credit -> game-start chain, reported
+/  from the firmware's own cells so nothing has to be inferred from the display.
+/
+/  Everything below is read, never written.  The addresses, and why each one is the one
+/  that matters:
+/
+/    4000:1144  the coin PULSE counter.  The NMI (D000:0190) tests the inbound byte for
+/               0x32 and increments this instead of queueing it, so this is the only place
+/               a coin exists before pricing runs.  Watching it separates "the button
+/               reached the Z80 and the code reached the 80188" from "pricing ran".
+/    413C:00D5  the pulse accumulator sub_D800A folds [1144] into, and the remainder the
+/               pricing routine writes back after taking whole coins out of it.
+/    413C:00A9..00B0  the pricing table sub_D6A36 loads from NVRAM 0x1C4-0x1CF at boot:
+/               00AD/00AE/00AF are the three coin values in PULSES (the divisors) and
+/               00A9/00AA/00AB the credit units each of those coins is worth; 00AB is also
+/               the units-per-credit threshold sub_DD1C1 compares against.  A zero divisor
+/               here would be a divide-by-zero trap, so they are worth seeing.
+/    413C:00D4  the credit balance the rest of the firmware reads (main_loop's mode-2 test
+/               at D3067, sub_D8066's refusal at D809C).  It is a CACHE: the persistent
+/               copy is the F10 triplicated NVRAM byte 0x83/0x116/0x20C, with the partial
+/               (sub-credit) count in 0x84/0x117/0x20D, and 00D4 is recomputed from both.
+/               Both are printed so a mismatch between cache and store is visible.
+/    413C:00D7  players, 413C:014F the mode.  Start is only observable as mode 2 -> 3.
+/
+/  The NVRAM triples are read out of iomoon_nvram[] rather than through cpu_readmem20,
+/  which is deliberate: the firmware reaches them only with the PCS0 bit-3/4 window open
+/  (F10), and the probe has no business opening or closing that window. */
+#define IOMOON_CR_PULSECNT 0x41144 /* 4000:1144 coin pulses the NMI counted            */
+#define IOMOON_CR_PULSEACC 0x41495 /* 413C:00D5 pulse accumulator (sub_D800A)          */
+#define IOMOON_CR_PLAYERS  0x41497 /* 413C:00D7 players in the current game            */
+#define IOMOON_CR_PRICING  0x41469 /* 413C:00A9, eight bytes through 00B0              */
+#define IOMOON_CR_COUNTRY  0x41001 /* 4000:1001 country byte (NVRAM 0x1BF), picks the  */
+                                   /*           pricing routine at D8048               */
+#define IOMOON_NV_CREDITS  0x83    /* NVRAM: whole credits, triplicated at 0x116/0x20C */
+#define IOMOON_NV_PARTIAL  0x84    /* NVRAM: sub-credit units, at 0x117/0x20D          */
+
+static struct {
+  int on, started, every, lastReport, dumped;
+  int awards, mode1to2, mode2to3;
+  UINT8 lastMode, lastCredits, lastPulseAcc, lastPulseCnt, lastPlayers, lastNvC, lastNvP;
+} iomoon_crp; //!!
+
+static void iomoon_credit_probe_frame(void) {
+  static int frame = 0;
+  UINT8 mode, credits, pacc, pcnt, players, nvc, nvp;
+  if (!iomoon_crp.started) {
+    const char *e = getenv("SLEIC_PROBE_CREDIT");
+    const char *v = getenv("SLEIC_PROBE_CREDITEVERY");
+    iomoon_crp.started = 1;
+    iomoon_crp.on    = e ? 1 : 0;
+    iomoon_crp.every = v ? (int)strtol(v, NULL, 10) : 600;
+  }
+  if (!iomoon_crp.on) return;
+  frame++;
+
+  mode    = cpu_readmem20(IOMOON_MODE_BYTE);
+  credits = cpu_readmem20(IOMOON_CREDIT_BYTE);
+  pacc    = cpu_readmem20(IOMOON_CR_PULSEACC);
+  pcnt    = cpu_readmem20(IOMOON_CR_PULSECNT);
+  players = cpu_readmem20(IOMOON_CR_PLAYERS);
+  nvc     = iomoon_nvram[IOMOON_NV_CREDITS];
+  nvp     = iomoon_nvram[IOMOON_NV_PARTIAL];
+
+  /* One-shot: the pricing table, once the boot load has actually put something in it.
+   * Printing it before that would only show the power-on zeroes */
+  if (!iomoon_crp.dumped && cpu_readmem20(IOMOON_CR_PRICING + 4)) {
+    unsigned i;
+    iomoon_crp.dumped = 1;
+    fprintf(stderr, "[cr] frame %5d  country [4000:1001]=%d  pricing 413C:00A9..00B0 =",
+            frame, cpu_readmem20(IOMOON_CR_COUNTRY));
+    for (i = 0; i < 8; i++) fprintf(stderr, " %02X", cpu_readmem20(IOMOON_CR_PRICING + i));
+    fprintf(stderr, "\n[cr]   coin values (pulses) 00AD=%d 00AE=%d 00AF=%d;  credit units "
+                    "00A9=%d 00AA=%d 00AB=%d (00AB is also the units per credit)\n",
+            cpu_readmem20(IOMOON_CR_PRICING + 4), cpu_readmem20(IOMOON_CR_PRICING + 5),
+            cpu_readmem20(IOMOON_CR_PRICING + 6), cpu_readmem20(IOMOON_CR_PRICING + 0),
+            cpu_readmem20(IOMOON_CR_PRICING + 1), cpu_readmem20(IOMOON_CR_PRICING + 2));
+  }
+
+  if (!iomoon_crp.lastReport) { /* first pass: seed, do not report a change against zero */
+    iomoon_crp.lastReport = frame;
+    iomoon_crp.lastMode = mode; iomoon_crp.lastCredits = credits;
+    iomoon_crp.lastPulseAcc = pacc; iomoon_crp.lastPulseCnt = pcnt;
+    iomoon_crp.lastPlayers = players; iomoon_crp.lastNvC = nvc; iomoon_crp.lastNvP = nvp;
+    return;
+  }
+
+  if (pcnt != iomoon_crp.lastPulseCnt && pcnt)
+    fprintf(stderr, "[cr] frame %5d  coin pulse: [4000:1144] %d -> %d\n",
+            frame, iomoon_crp.lastPulseCnt, pcnt);
+  if (credits != iomoon_crp.lastCredits) {
+    if (credits > iomoon_crp.lastCredits) iomoon_crp.awards++;
+    fprintf(stderr, "[cr] frame %5d  credits 413C:00D4 %d -> %d   NVRAM 0x83=%d 0x84=%d  "
+                    "pulse acc 00D5=%d\n",
+            frame, iomoon_crp.lastCredits, credits, nvc, nvp, pacc);
+  }
+  if (mode != iomoon_crp.lastMode) {
+    if (iomoon_crp.lastMode == 1 && mode == 2) iomoon_crp.mode1to2++;
+    if (iomoon_crp.lastMode == 2 && mode == 3) iomoon_crp.mode2to3++;
+    fprintf(stderr, "[cr] frame %5d  mode 413C:014F %d -> %d  (1 attract, 2 coined, "
+                    "3 in game)  credits=%d players=%d\n",
+            frame, iomoon_crp.lastMode, mode, credits, players);
+  }
+  if (players != iomoon_crp.lastPlayers)
+    fprintf(stderr, "[cr] frame %5d  players 413C:00D7 %d -> %d\n",
+            frame, iomoon_crp.lastPlayers, players);
+  if (nvc != iomoon_crp.lastNvC || nvp != iomoon_crp.lastNvP) {
+    /* The triples are the point of F10's majority-vote store: if the three copies ever
+     * disagree the firmware zeroes all three, so a driver that persists only one of them
+     * would wipe the credits on the next boot.  Print all three of each */
+    fprintf(stderr, "[cr] frame %5d  NVRAM credits %d->%d (copies %d/%d/%d)  partial "
+                    "%d->%d (copies %d/%d/%d)\n",
+            frame, iomoon_crp.lastNvC, nvc, iomoon_nvram[0x83], iomoon_nvram[0x116],
+            iomoon_nvram[0x20c], iomoon_crp.lastNvP, nvp, iomoon_nvram[0x84],
+            iomoon_nvram[0x117], iomoon_nvram[0x20d]);
+  }
+
+  iomoon_crp.lastMode = mode; iomoon_crp.lastCredits = credits;
+  iomoon_crp.lastPulseAcc = pacc; iomoon_crp.lastPulseCnt = pcnt;
+  iomoon_crp.lastPlayers = players; iomoon_crp.lastNvC = nvc; iomoon_crp.lastNvP = nvp;
+
+  if (frame - iomoon_crp.lastReport >= iomoon_crp.every) {
+    iomoon_crp.lastReport = frame;
+    fprintf(stderr, "[cr] frame %5d  mode=%d credits=%d (NVRAM %d + %d partial) players=%d "
+                    "pulses acc=%d pending=%d  awards=%d starts=%d\n",
+            frame, mode, credits, nvc, nvp, players, pacc, pcnt,
+            iomoon_crp.awards, iomoon_crp.mode2to3);
+  }
+}
+
+/*-------------------------------------------------------------------------------------
+/  debug: SLEIC_PROBE_MENUWALK -- Task 16.  Walk the service menu with the codes its own
+/  dispatcher accepts, and watch the state it actually navigates with.
+/
+/  SLEIC_PROBE_MENU above rotates four codes without claiming what they mean, because F14
+/  left the navigation open.  The dispatcher settles it.  Every menu item handler polls a
+/  byte and range-checks it against exactly four codes before dispatching through a table
+/  of four (sub_DD480, the first of the fourteen record handlers):
+/
+/    DD4E1: CALL sub_DF9D4 / CMP [001B],0 / JE DD4E1     ; block until a byte arrives
+/    DD4F5: SUB AX, 0003F / CMP BX,3 / JNBE DD4E1        ; only 0x3F..0x42 get past
+/    DD501: JMP CS:W[BX + 00337]  -> table at DD587: 032B 030D 02B6 02FE
+/
+/    0x3F -> DD57B   redraw and return 1 -- leaves this item, i.e. EXIT/back to the caller
+/    0x40 -> DD55D   at record index 0 the same exit; otherwise sub_DF829 and stay
+/    0x41 -> DD506   [4137:0013]++ with a wrap at record[2]-1, recompute the display line
+/                    413C:0158, redraw -- this is the SCROLL
+/    0x42 -> DD54E   sub_DF764([4137:0013]) -- act on the line under the cursor, SELECT
+/
+/  So the walk is: TEST opens, LEFT flipper scrolls, RIGHT flipper selects, TEST or START
+/  leaves.  The cursor is [4137:0013], NOT the record index 413C:015A -- 015A is written
+/  in exactly one place in the whole ROM (DD263, set to 0 on entry), which is why the
+/  Task 14 probe saw it "stuck at 0": it is the record being displayed, and the record
+/  table pointer [4137:004B] is what a descent changes.  This probe reports all four.
+/
+/    SLEIC_PROBE_MENUWALK       run it
+/    SLEIC_PROBE_MWAT=n         open the menu at frame n (default 900)
+/    SLEIC_PROBE_MWSTEP=n       frames per walk step (default 60; press for the first 10)
+/    SLEIC_PROBE_MWSCRIPT=s     the walk, one character per step, default "LLLLRLLRTT":
+/                               L = scroll (0x41), R = select (0x42), B = back (0x40),
+/                               T = exit (0x3F), . = idle */
+#define IOMOON_MW_CURSOR 0x41383 /* 4137:0013 cursor within the record's item list      */
+#define IOMOON_MW_LINE   0x41518 /* 413C:0158 display line the cursor maps to           */
+#define IOMOON_MW_RECORD 0x4151a /* 413C:015A record index (word)                       */
+#define IOMOON_MW_TABLE  0x413bb /* 4137:004B far pointer to the 0x2E-byte record table */
+#define IOMOON_MW_PAGE   0x414b4 /* 413C:00F4 page id the draw routines switch on       */
+
+static struct {
+  int on, started, at, step, done, active, openT, walkT, prints;
+  const char *script;
+  UINT8 lastCursor, lastPage, lastC068;
+  UINT16 lastLine, lastRecord, lastTable;
+} iomoon_mw; //!!
+
+static void iomoon_menuwalk_frame(void) {
+  static int frame = 0;
+  frame++;
+
+  if (!iomoon_mw.started) {
+    const char *a = getenv("SLEIC_PROBE_MWAT");
+    const char *s = getenv("SLEIC_PROBE_MWSTEP");
+    const char *c = getenv("SLEIC_PROBE_MWSCRIPT");
+    iomoon_mw.started = 1;
+    iomoon_mw.on     = getenv("SLEIC_PROBE_MENUWALK") ? 1 : 0;
+    iomoon_mw.at     = a ? (int)strtol(a, NULL, 10) : 900;
+    iomoon_mw.step   = s ? (int)strtol(s, NULL, 10) : 60;
+    iomoon_mw.script = c ? c : "LLLLRLLRTT";
+    if (iomoon_mw.step < 12) iomoon_mw.step = 12;
+  }
+  if (!iomoon_mw.on || iomoon_mw.done) return;
+
+  if (!iomoon_mw.active) {
+    if (frame < iomoon_mw.at) return;
+    if (iomoon_mw.openT < 8) { /* cabinet bit 1 -> code 0x3F opens the menu (F14) */
+      coreGlobals.swMatrix[9] |= 0x02;
+      iomoon_mw.openT++;
+      return;
+    }
+    iomoon_mw.active = 1;
+    fprintf(stderr, "[mw] menu opened at frame %d, walking \"%s\" at %d frames/step\n",
+            frame, iomoon_mw.script, iomoon_mw.step);
+  }
+
+  { const int idx   = iomoon_mw.walkT / iomoon_mw.step;
+    const int phase = iomoon_mw.walkT % iomoon_mw.step;
+    if (idx >= (int)strlen(iomoon_mw.script)) {
+      iomoon_mw.done = 1;
+      fprintf(stderr, "[mw] walk finished at frame %d: cursor=%d line=%d record=%d "
+                      "table=%04X page=%02X C068=%02X  (%d state changes)\n",
+              frame, cpu_readmem20(IOMOON_MW_CURSOR), iomoon_mw.lastLine,
+              iomoon_mw.lastRecord, iomoon_mw.lastTable, iomoon_mw.lastPage,
+              cpunum_read_byte(SLEIC_IO_CPU, 0xc068), iomoon_mw.prints);
+      return;
+    }
+    if (phase == 0)
+      fprintf(stderr, "[mw] frame %5d  step %d: '%c'\n", frame, idx, iomoon_mw.script[idx]);
+    if (phase < 10) {
+      switch (iomoon_mw.script[idx]) {
+        case 'L': coreGlobals.swMatrix[9] |= 0x08; break; /* bit3 -> 0x41 scroll  */
+        case 'R': coreGlobals.swMatrix[9] |= 0x04; break; /* bit2 -> 0x42 select  */
+        case 'B': coreGlobals.swMatrix[9] |= 0x10; break; /* bit4 -> 0x40 back    */
+        case 'T': coreGlobals.swMatrix[9] |= 0x02; break; /* bit1 -> 0x3F exit    */
+        default: break;
+      }
+    }
+    iomoon_mw.walkT++;
+  }
+
+  { const UINT8  cur  = cpu_readmem20(IOMOON_MW_CURSOR);
+    const UINT8  page = cpu_readmem20(IOMOON_MW_PAGE);
+    const UINT8  c68  = cpunum_read_byte(SLEIC_IO_CPU, 0xc068);
+    const UINT16 line = (UINT16)(cpu_readmem20(IOMOON_MW_LINE)   | (cpu_readmem20(IOMOON_MW_LINE + 1) << 8));
+    const UINT16 rec  = (UINT16)(cpu_readmem20(IOMOON_MW_RECORD) | (cpu_readmem20(IOMOON_MW_RECORD + 1) << 8));
+    const UINT16 tbl  = (UINT16)(cpu_readmem20(IOMOON_MW_TABLE)  | (cpu_readmem20(IOMOON_MW_TABLE + 1) << 8));
+    if (cur != iomoon_mw.lastCursor || line != iomoon_mw.lastLine || rec != iomoon_mw.lastRecord ||
+        tbl != iomoon_mw.lastTable  || page != iomoon_mw.lastPage || c68 != iomoon_mw.lastC068) {
+      fprintf(stderr, "[mw] frame %5d  cursor %d->%d  line %d->%d  record %d->%d  "
+                      "table %04X->%04X  page %02X->%02X  C068 %02X->%02X\n",
+              frame, iomoon_mw.lastCursor, cur, iomoon_mw.lastLine, line,
+              iomoon_mw.lastRecord, rec, iomoon_mw.lastTable, tbl,
+              iomoon_mw.lastPage, page, iomoon_mw.lastC068, c68);
+      iomoon_mw.prints++;
+      iomoon_mw.lastCursor = cur; iomoon_mw.lastLine = line; iomoon_mw.lastRecord = rec;
+      iomoon_mw.lastTable  = tbl; iomoon_mw.lastPage = page; iomoon_mw.lastC068 = c68;
+    }
+  }
+}
+
 static SWITCH_UPDATE(SLEIC2) {
   unsigned i;
   if (inports) {
-    const UINT16 in = inports[CORE_COREINPORT];
+    /* debug: SLEIC_PROBE_KEY -- a scripted press ORed in at the INPORT, so it goes through
+     * the same translation below that a keypress does.  Returns 0 with the probe unset */
+    const UINT16 in = (UINT16)(inports[CORE_COREINPORT] | iomoon_probe_key());
     /* Cabinet inputs -> swMatrix[9] = Z80 port 0x03, one bit per input.  The bit -> CODE
      * map is exact (F5/F14, see iomoon_z80_read).  The bit -> BUTTON map is no longer a
      * choice for four of the six: the 80188 firmware says outright what it does with each
@@ -3324,6 +3623,8 @@ static SWITCH_UPDATE(SLEIC2) {
   iomoon_swprobe_frame(); /* debug: SLEIC_PROBE_SW */
   iomoon_swburst_frame(); /* debug: SLEIC_PROBE_SWBURST -- Task 11 scenario 2 */
   iomoon_menu_frame();    /* debug: SLEIC_PROBE_MENU -- Task 11 scenario 3 */
+  iomoon_credit_probe_frame(); /* debug: SLEIC_PROBE_CREDIT -- Task 16 coin/credit chain */
+  iomoon_menuwalk_frame();/* debug: SLEIC_PROBE_MENUWALK -- Task 16 menu navigation */
   iomoon_ym_probe_frame();/* debug: SLEIC_PROBE_YM -- Task 14 FM stream summary */
   iomoon_oki_probe_frame();/* debug: SLEIC_PROBE_OKI -- Task 15 speech/FX summary */
 }
