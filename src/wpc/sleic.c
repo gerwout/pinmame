@@ -1724,6 +1724,153 @@ static READ_HANDLER(iomoon_z80_read) {
   return 0;
 }
 
+/*-------------------------------------------------------------------------------------
+/  debug: SLEIC_PROBE_LAMP -- Task 13.  What a headless run can say about the F7 lamp and
+/  driver decode, without a display and without a person watching the playfield:
+/
+/    * is the I/O board driving the latches at all, and at the rate F7 implies (one lamp
+/      column per Z80 interrupt, so eight writes to each of 0x83/0x84 per full refresh);
+/    * does the geometry hold -- every 0x83 strobe one-hot and inside 0..7, and every one
+/      of them preceded by its own 0x84 row byte (F7's "row first, column second");
+/    * what does the matrix actually HOLD over time, as a time series rather than a single
+/      end-of-run sample, which is what shows an attract chase running;
+/    * which driver bits fire, when, and for how long -- logged at the write rather than
+/      sampled, so a coil pulse shorter than a frame cannot be missed;
+/    * and does the VBLANK copy in SLEIC_interface_update carry both through, i.e. are
+/      coreGlobals.lampMatrix / .solenoids what the port handler put in the shadows.
+/
+/  All of it hangs off iomoon_z80_write, so it is SLEIC2-only by construction.
+/
+/    SLEIC_PROBE_LAMP         turn it on
+/    SLEIC_PROBE_LAMPEVERY=N  periodic time-series line every N frames (default 100)
+/    SLEIC_PROBE_LAMPMAX=N    stop printing individual lamp-column changes after N of them
+/                             (default 400; 0 = the periodic line only)
+/    SLEIC_PROBE_SOLMAX=N     the same budget for driver-latch edges, counted separately
+/                             because they are the rarer and more interesting event and a
+/                             run usually wants all of them and few or no lamp lines
+/                             (default 2000)
+/-----------------------------------------------------------------------------------*/
+static struct {
+  int   on, started, every, max, solMax;
+  int   w[4];        /* writes seen per port, 0x83 0x84 0x85 0x86                        */
+  int   changes;     /* lamp-column commits that changed the column's byte               */
+  int   printed;     /* how many of those were printed                                   */
+  int   solEdges;    /* driver-latch writes that changed the latch                       */
+  int   badStrobe;   /* 0x83 writes that were not a single bit in 0x01..0x80             */
+  int   unpaired;    /* 0x83 strobes with no 0x84 since the previous strobe              */
+  int   rowPending;  /* a 0x84 has been seen since the last 0x83                         */
+  int   firstFrame, lastReport;
+  UINT8 lamp[8];     /* last byte committed per column, for edge detection               */
+  UINT8 drv[2];      /* last raw 0x85 / 0x86 byte, as written (active low)               */
+} iomoon_lp; //!!
+
+static void iomoon_probe_lamp_init(void) {
+  const char *e;
+  if (iomoon_lp.started) return;
+  iomoon_lp.started = 1;
+  iomoon_lp.on      = getenv("SLEIC_PROBE_LAMP") ? 1 : 0;
+  e = getenv("SLEIC_PROBE_LAMPEVERY"); iomoon_lp.every = e ? (int)strtol(e, NULL, 10) : 100;
+  e = getenv("SLEIC_PROBE_LAMPMAX");   iomoon_lp.max    = e ? (int)strtol(e, NULL, 10) : 400;
+  e = getenv("SLEIC_PROBE_SOLMAX");    iomoon_lp.solMax = e ? (int)strtol(e, NULL, 10) : 2000;
+  if (iomoon_lp.every < 1) iomoon_lp.every = 1;
+  iomoon_lp.firstFrame = -1;
+  /* boot_port_init leaves both driver latches at 0xFF = everything off, so start the
+   * edge detector there and the first real write shows up as the edge it is */
+  iomoon_lp.drv[0] = iomoon_lp.drv[1] = 0xff;
+}
+
+/* The time series.  Printed from the lamp hook, which is the busiest of the four, so a
+ * run that drives no lamps at all produces no lines -- itself the answer to "is the I/O
+ * board running".  Both sides of the VBLANK copy are printed together */
+static void iomoon_probe_lamp_report(void) {
+  char tmp[8 * 3 + 1], cor[8 * 3 + 1];
+  int i, litTmp = 0, litCor = 0;
+  if (locals.vblankCount - iomoon_lp.lastReport < iomoon_lp.every) return;
+  iomoon_lp.lastReport = locals.vblankCount;
+  for (i = 0; i < 8; i++) {
+    const UINT8 t = coreGlobals.tmpLampMatrix[i], c = coreGlobals.lampMatrix[i];
+    int b;
+    for (b = 0; b < 8; b++) { litTmp += (t >> b) & 1; litCor += (c >> b) & 1; }
+    sprintf(tmp + 3 * i, "%02x ", t);
+    sprintf(cor + 3 * i, "%02x ", c);
+  }
+  /* C068 and C06A say whether a coil COULD fire at all: most of the driver commands
+   * (0xCB-0xD3) return immediately unless C068 (test mode, set by command 0xF7) is set,
+   * and the flipper button handlers sub_1292 / sub_12D8 return unless C06A (flippers
+   * enabled, command 0xC7) is.  Printing them keeps "no coil fired" separable from
+   * "the decode is broken" */
+  fprintf(stderr, "[lamp] frame %5d  tmp %s(%2d lit)  core %s(%2d lit)  sol=%04X core=%08X"
+                  "  writes 83=%d 84=%d 85=%d 86=%d  col changes=%d  sol edges=%d"
+                  "  Z80 C068=%02X C06A=%02X\n",
+          locals.vblankCount, tmp, litTmp, cor, litCor,
+          (unsigned)(locals.solenoids & 0xffff), (unsigned)coreGlobals.solenoids,
+          iomoon_lp.w[0], iomoon_lp.w[1], iomoon_lp.w[2], iomoon_lp.w[3],
+          iomoon_lp.changes, iomoon_lp.solEdges,
+          cpunum_read_byte(SLEIC_IO_CPU, 0xc068), cpunum_read_byte(SLEIC_IO_CPU, 0xc06a));
+}
+
+/* Hook for the 0x83 commit: called AFTER the commit, with the column and the row byte
+ * that was written into it */
+static void iomoon_probe_lamp_commit(int strobe, unsigned col, UINT8 row) {
+  iomoon_probe_lamp_init();
+  if (!iomoon_lp.on) return;
+  iomoon_lp.w[0]++;
+  if (iomoon_lp.firstFrame < 0) {
+    iomoon_lp.firstFrame = locals.vblankCount;
+    fprintf(stderr, "[lamp] first lamp-column strobe at frame %d (port 0x83 = %02X)\n",
+            iomoon_lp.firstFrame, (unsigned)strobe);
+  }
+  /* geometry: F7 says one-hot 0x01..0x80, i.e. eight columns and nothing else */
+  if ((strobe & (strobe - 1)) || strobe > 0x80) {
+    if (++iomoon_lp.badStrobe <= 8)
+      fprintf(stderr, "[lamp] frame %5d  NOT one-hot: port 0x83 = %02X\n",
+              locals.vblankCount, (unsigned)strobe);
+  }
+  /* ordering: F7 says row byte first, column strobe second */
+  if (!iomoon_lp.rowPending) {
+    if (++iomoon_lp.unpaired <= 8)
+      fprintf(stderr, "[lamp] frame %5d  column %u strobed with no 0x84 row byte since the "
+                      "previous strobe\n", locals.vblankCount, col);
+  }
+  iomoon_lp.rowPending = 0;
+  if (col < 8 && iomoon_lp.lamp[col] != row) {
+    iomoon_lp.changes++;
+    if (iomoon_lp.printed < iomoon_lp.max) {
+      iomoon_lp.printed++;
+      fprintf(stderr, "[lamp] frame %5d  col%u %02X -> %02X\n",
+              locals.vblankCount, col, iomoon_lp.lamp[col], row);
+    }
+    iomoon_lp.lamp[col] = row;
+  }
+  iomoon_probe_lamp_report();
+}
+
+/* Hook for the 0x84 row write: only the count and the pairing flag */
+static void iomoon_probe_lamp_row(void) {
+  iomoon_probe_lamp_init();
+  if (!iomoon_lp.on) return;
+  iomoon_lp.w[1]++;
+  iomoon_lp.rowPending = 1;
+}
+
+/* Hook for the 0x85 / 0x86 driver latches, called with the RAW (active-low) byte, so
+ * "fired" is a 1 -> 0 edge and "released" a 0 -> 1 edge */
+static void iomoon_probe_drv(int which, UINT8 raw) {
+  UINT8 prev;
+  iomoon_probe_lamp_init(); /* seeds drv[] with the 0xFF boot_port_init leaves behind */
+  if (!iomoon_lp.on) return;
+  prev = iomoon_lp.drv[which];
+  iomoon_lp.w[2 + which]++;
+  if (raw == prev) return;
+  iomoon_lp.drv[which] = raw;
+  iomoon_lp.solEdges++;
+  if (iomoon_lp.solEdges <= iomoon_lp.solMax)
+    fprintf(stderr, "[sol]  frame %5d  port 0x8%d %02X -> %02X  fired %02X  released %02X  "
+                    "solenoids=%04X\n", locals.vblankCount, 5 + which,
+            prev, raw, (unsigned)(prev & ~raw), (unsigned)(~prev & raw & 0xff),
+            (unsigned)(locals.solenoids & 0xffff));
+}
+
 static WRITE_HANDLER(iomoon_z80_write) {
   switch (offset) {
     case 0x00: /* port 0x80: the byte onto the J1 data lines (written before the strobe) */
@@ -1763,7 +1910,9 @@ static WRITE_HANDLER(iomoon_z80_write) {
                 * matrix is refreshed every 8 Z80 interrupts) writes the row byte to 0x84
                 * FIRST and pulses the column here second, so the pair commits on this
                 * strobe with the row latched by the preceding 0x84 */
-      if (data) coreGlobals.tmpLampMatrix[core_BitColToNum(data & -data)] = sleic_io.lampRow;
+      if (data) { const unsigned col = core_BitColToNum(data & -data);
+                  coreGlobals.tmpLampMatrix[col] = sleic_io.lampRow;
+                  iomoon_probe_lamp_commit(data, col, sleic_io.lampRow); } /* debug: SLEIC_PROBE_LAMP */
       break;
     case 0x04: /* port 0x84: lamp-matrix ROW data, ACTIVE HIGH -- no inversion.  The byte is
                 * one of C10F..C116, which sub_353A fills either verbatim from the "lit" bank
@@ -1772,6 +1921,7 @@ static WRITE_HANDLER(iomoon_z80_write) {
                 * so a 1 bit is a lamp that is on; boot_port_init 043A starts it at 0x00.
                 * Latched here, committed on the 0x83 strobe */
       sleic_io.lampRow = data;
+      iomoon_probe_lamp_row(); /* debug: SLEIC_PROBE_LAMP */
       break;
     case 0x05: /* port 0x85: driver latch A -> solenoids 1-8.  ACTIVE LOW, so the byte is
                 * inverted here and coreGlobals carries positive logic: boot_port_init 0427
@@ -1789,12 +1939,14 @@ static WRITE_HANDLER(iomoon_z80_write) {
                 * mapping is the plain one, driver bit b -> solenoid b+1, and no coil is
                 * named here -- unlike Sleic Pin-Ball, whose manual numbering is verified */
       locals.solenoids = (locals.solenoids & ~(UINT32)0x00ff) | (UINT32)(data ^ 0xff);
+      iomoon_probe_drv(0, (UINT8)data); /* debug: SLEIC_PROBE_LAMP */
       break;
     case 0x06: /* port 0x86: driver latch B -> solenoids 9-16.  Same active-low convention
                 * (boot_port_init 042C also writes 0xFF), but all eight bits are independent:
                 * fired at 0706-07D1, released at 081B-0892, plus the timed auto-release path
                 * at 0ADA-0C51 inside the Z80's IRQ handler (F7) */
       locals.solenoids = (locals.solenoids & ~(UINT32)0xff00) | ((UINT32)(data ^ 0xff) << 8);
+      iomoon_probe_drv(1, (UINT8)data); /* debug: SLEIC_PROBE_LAMP */
       break;
     case 0x07: /* port 0x87: NOT a driver output.  Low nibble = direct_input_scan's 16-way
                 * mux index (0DEA-0E01; the selected input comes back on port-0x01 bit 5, and
