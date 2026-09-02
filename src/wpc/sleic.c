@@ -91,16 +91,10 @@ static void sleic_dmd_dump(const UINT8 *frame) {
 static int SLEIC_sw2m(int no) { return (no/10 - 4)*8 + no%10; }
 static int SLEIC_m2sw(int col, int row) { return 40 + col*10 + row; }
 
+/* The base machine's placeholder: a vector-less pulse of IRQ line 0.  Every concrete
+ * machine below now overrides it (sleic1_irq_gen / iomoon_irq_gen / sleic3_irq_gen), so
+ * nothing that ships reaches this */
 static INTERRUPT_GEN(SLEIC_irq_i80188) {
-  /* debug: boot probe -- separate "the memory map is wrong" from "the interrupt model
-   * is".  SLEIC_PROBE_NOIRQ suppresses the base driver's vector-less 120 Hz IRQ0
-   * entirely; SLEIC_PROBE_T0 instead delivers it as the timer-0 vector 0x08 that the
-   * resident IVT actually has a handler for (findings F1/F3) */
-  { static int probe = -1;
-    if (probe < 0) probe = getenv("SLEIC_PROBE_NOIRQ") ? 1 : getenv("SLEIC_PROBE_T0") ? 2 : 0;
-    if (probe == 1) return;
-    if (probe == 2) { cpu_set_irq_line_and_vector(SLEIC_MAIN_CPU, 0, HOLD_LINE, 0x08); return; }
-  }
   cpu_set_irq_line(SLEIC_MAIN_CPU, 0, PULSE_LINE);
 }
 
@@ -221,24 +215,104 @@ static INTERRUPT_GEN(sleic1_irq_gen) {
 static double iomoon_int0_acc, iomoon_t0_acc; //!!
 static int    iomoon_int0_pend, iomoon_t0_pend; //!!
 
+/* debug: interrupt-model probe.  Every part of it is inert unless its variable is set.
+ *
+ *   SLEIC_PROBE_IRQ       count timer-0 / INT0 requests, the acknowledgements the CPU
+ *                         actually takes, and the share of ticks that find the firmware
+ *                         inside an ISR.  req and ack differ when a source comes due again
+ *                         while its previous request is still latched, i.e. when the CPU
+ *                         cannot keep up; in-ISR% divided by the ack rate is the mean
+ *                         handler duration, which is how the INT0 rate was measured
+ *   SLEIC_PROBE_INT0HZ=n  run INT0 at n Hz instead of IOMOON_INT0_HZ, for that sweep
+ *   SLEIC_PROBE_NOIRQ     generate neither vectored source
+ *   SLEIC_PROBE_J1[=hex]  stand in for the Z80 the J1 task will wire: latch <hex> (empty
+ *                         or 0 = 47, the Z80's boot "alive" byte) where the NMI handler
+ *                         reads PCS2 0xA0100 and raise the NMI, every SLEIC_PROBE_J1EVERY
+ *                         ticks (default one second's worth).  This is what tells a park
+ *                         at D2F59 apart from a hang: with it the poll is satisfied and
+ *                         the firmware moves on
+ */
+static int   iomoon_irq_req[2], iomoon_irq_ack[2]; /* [0] = timer 0, [1] = INT0 */ //!!
+static int   iomoon_probe_vec, iomoon_probe_nmis;  /* vector in flight; NMIs injected */ //!!
+static int   iomoon_probe_ticks, iomoon_probe_busy; /* ticks seen; ticks with IF clear */ //!!
+static UINT8 iomoon_probe_j1_latch;                /* byte waiting at PCS2 0xA0100 */ //!!
+
+/* debug: counts the interrupts the CPU accepts; installed only when SLEIC_PROBE_IRQ is
+ * set, and returns the same vector the request carried so delivery is unchanged */
+static int iomoon_probe_irq_ack(int irqline) {
+  iomoon_irq_ack[iomoon_probe_vec == 0x0c]++;
+  return iomoon_probe_vec;
+}
+
+/* debug: SLEIC_PROBE_J1 -- deliver an inbound J1 byte the way the Z80 will */
+static void iomoon_probe_j1(void) {
+  static int probe = -1, every, ticks;
+  static UINT8 byte;
+  if (probe < 0) {
+    const char *e = getenv("SLEIC_PROBE_J1"), *n = getenv("SLEIC_PROBE_J1EVERY");
+    probe = e ? 1 : 0;
+    if (probe) {
+      const long v = strtol(e, NULL, 16);
+      byte  = v ? (UINT8)v : 0x47;
+      every = n ? (int)strtol(n, NULL, 10) : (int)IOMOON_IRQ_TICK_HZ;
+      if (every < 1) every = 1;
+    }
+  }
+  if (!probe || ++ticks < every) return;
+  ticks = 0;
+  iomoon_probe_j1_latch = byte;
+  iomoon_probe_nmis++;
+  cpu_set_irq_line(SLEIC_MAIN_CPU, IRQ_LINE_NMI, PULSE_LINE); /* handler D000:016D */
+}
+
+/* debug: SLEIC_PROBE_INT0HZ -- override the unconfirmed INT0 rate without a rebuild, so
+ * the rate the firmware can actually sustain can be measured against the F3 candidates */
+static double iomoon_probe_int0_hz(void) {
+  static double hz = 0.0;
+  if (hz == 0.0) {
+    const char *e = getenv("SLEIC_PROBE_INT0HZ");
+    hz = e ? strtod(e, NULL) : IOMOON_INT0_HZ;
+    if (hz <= 0.0) hz = IOMOON_INT0_HZ;
+  }
+  return hz;
+}
+
 static INTERRUPT_GEN(iomoon_irq_gen) {
-  iomoon_int0_acc += IOMOON_INT0_HZ   / IOMOON_IRQ_TICK_HZ;
+  /* debug: SLEIC_PROBE_NOIRQ / SLEIC_PROBE_J1 */
+  { static int probe = -1;
+    if (probe < 0) probe = getenv("SLEIC_PROBE_NOIRQ") ? 1 : 0;
+    iomoon_probe_j1();
+    if (probe) return;
+  }
+  iomoon_int0_acc += iomoon_probe_int0_hz() / IOMOON_IRQ_TICK_HZ; /* debug: = IOMOON_INT0_HZ */
   iomoon_t0_acc   += IOMOON_TIMER0_HZ / IOMOON_IRQ_TICK_HZ;
-  if (iomoon_int0_acc >= 1.0) { iomoon_int0_acc -= 1.0; iomoon_int0_pend = 1; }
-  if (iomoon_t0_acc   >= 1.0) { iomoon_t0_acc   -= 1.0; iomoon_t0_pend   = 1; }
+  if (iomoon_int0_acc >= 1.0) {
+    iomoon_int0_acc -= 1.0; iomoon_int0_pend = 1;
+    iomoon_irq_req[1]++; /* debug: SLEIC_PROBE_IRQ */
+  }
+  if (iomoon_t0_acc >= 1.0) {
+    iomoon_t0_acc -= 1.0; iomoon_t0_pend = 1;
+    iomoon_irq_req[0]++; /* debug: SLEIC_PROBE_IRQ */
+  }
 
   /* IF clear = the firmware is inside an ISR: keep both requests latched and try again */
-  if (!(activecpu_get_reg(I86_FLAGS) & 0x200)) return;
+  iomoon_probe_ticks++; /* debug: SLEIC_PROBE_IRQ */
+  if (!(activecpu_get_reg(I86_FLAGS) & 0x200)) {
+    iomoon_probe_busy++; /* debug: SLEIC_PROBE_IRQ -- ticks spent inside an ISR */
+    return;
+  }
 
   /* Only one vector can be delivered at a time, so when both are pending INT0 goes first:
    * it is the higher-priority source on the real controller (level 0 against the timer's
    * 1), and the timer takes the next tick */
   if (iomoon_int0_pend) {
     iomoon_int0_pend = 0;
+    iomoon_probe_vec = 0x0c; /* debug: SLEIC_PROBE_IRQ */
     cpu_set_irq_line_and_vector(SLEIC_MAIN_CPU, 0, HOLD_LINE, 0x0c); /* INT0    -> D000:0343 */
   }
   else if (iomoon_t0_pend) {
     iomoon_t0_pend = 0;
+    iomoon_probe_vec = 0x08; /* debug: SLEIC_PROBE_IRQ */
     cpu_set_irq_line_and_vector(SLEIC_MAIN_CPU, 0, HOLD_LINE, 0x08); /* timer 0 -> D000:024F */
   }
 }
@@ -412,11 +486,28 @@ static INTERRUPT_GEN(SLEIC_interface_update) {
       fprintf(stderr, "[nv] frame %4d  seg-5040 reads=%d writes=%d\n",
               locals.vblankCount, iomoon_nv_reads, iomoon_nv_writes);
     if (probe && locals.vblankCount <= 400)
-      fprintf(stderr, "[pc] frame %4d  PC=%05X  blit rows=%04X cols=%04X stride=%04X\n",
+      fprintf(stderr, "[pc] frame %4d  PC=%05X  IF=%d  blit rows=%04X cols=%04X stride=%04X\n",
               locals.vblankCount, (unsigned)activecpu_get_pc(),
+              (activecpu_get_reg(I86_FLAGS) >> 9) & 1,
               cpu_readmem20(0x410b8) | (cpu_readmem20(0x410b9) << 8),
               cpu_readmem20(0x410ba) | (cpu_readmem20(0x410bb) << 8),
               cpu_readmem20(0x410bc) | (cpu_readmem20(0x410bd) << 8));
+  }
+
+  /* debug: interrupt-model probe -- how many timer-0 / INT0 requests were raised and how
+   * many the CPU accepted, plus any J1 bytes the SLEIC_PROBE_J1 stand-in delivered */
+  { static int probe = -1;
+    if (probe < 0) probe = getenv("SLEIC_PROBE_IRQ") ? 1 : 0;
+    if (probe && (locals.vblankCount % 100) == 0) {
+      const double secs = locals.vblankCount / (double)Machine->drv->frames_per_second;
+      fprintf(stderr, "[irq] frame %4d  timer0 req=%5d ack=%5d (%5.1f/s)  "
+                      "INT0 req=%5d ack=%5d (%5.1f/s)  in-ISR=%4.1f%%  nmi=%d\n",
+              locals.vblankCount,
+              iomoon_irq_req[0], iomoon_irq_ack[0], iomoon_irq_ack[0] / secs,
+              iomoon_irq_req[1], iomoon_irq_ack[1], iomoon_irq_ack[1] / secs,
+              iomoon_probe_ticks ? 100.0 * iomoon_probe_busy / iomoon_probe_ticks : 0.0,
+              iomoon_probe_nmis);
+    }
   }
 
   /*-- lamps --*/
@@ -937,6 +1028,13 @@ static WRITE_HANDLER(sleic2_periph_w) {
  * link and sound work.  Deliberately NOT the base sleic_periph_r -- its 0x37 "no event"
  * idle and 0xA0180 ready bit are Bike Race conventions that do not apply here */
 static READ_HANDLER(sleic2_periph_r) {
+  /* debug: SLEIC_PROBE_J1 -- hand the injected byte to the NMI handler's single 0xA0100
+   * read (the latch is only ever non-zero while that probe is running) */
+  if (offset == 0x100 && iomoon_probe_j1_latch) {
+    const UINT8 b = iomoon_probe_j1_latch;
+    iomoon_probe_j1_latch = 0;
+    return b;
+  }
   return 0;
 }
 
@@ -1323,6 +1421,8 @@ static MACHINE_INIT(SLEIC2) {
   iomoon_set_gfx_bank(iomoon_pcs0);
   iomoon_int0_acc = iomoon_t0_acc = 0.0;
   iomoon_int0_pend = iomoon_t0_pend = 0;
+  /* debug: SLEIC_PROBE_IRQ -- count the vectored interrupts the CPU actually accepts */
+  if (getenv("SLEIC_PROBE_IRQ")) cpu_set_irq_callback(SLEIC_MAIN_CPU, iomoon_probe_irq_ack);
 }
 
 /* Bike Race (SLEIC3) playfield-matrix test keys. The 40 matrix positions (Z80 switch
