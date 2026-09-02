@@ -2046,10 +2046,13 @@ static void iomoon_swburst_j1(UINT8 byte, int where) {
 static void iomoon_swburst_release(int slot) {
   int row; UINT8 bit, code;
   iomoon_swprobe_entry(iomoon_swb.slotIdx[slot], &row, &bit, &code);
-  /* matrix rows self-clear every frame (the pf_keys loop in SWITCH_UPDATE, ahead of this
-   * probe in call order); the cabinet row (9) has nothing else touching it and needs an
-   * explicit release */
-  if (row == 9) coreGlobals.swMatrix[9] &= ~bit;
+  /* Unconditional, every row -- NOT just the cabinet row (9).  iomoon_pf_keys (rows 1-6)
+   * and CORE_SETKEYSW (row 9) both re-clear every code THEY cover each frame, which is
+   * exactly why the still-live loop in iomoon_swburst_frame has to re-assert its bits each
+   * frame now rather than once at fill time -- but codes 0x38-0x3B (matrix column 5, bits
+   * 0x10-0x80) are dead positions (F5: sub_1348, a bare RET) that iomoon_pf_keys
+   * deliberately does not map, so nothing else ever clears them; this probe must */
+  coreGlobals.swMatrix[row] &= ~bit;
 }
 
 static void iomoon_swburst_frame(void) {
@@ -2083,8 +2086,19 @@ static void iomoon_swburst_frame(void) {
 
   limit = iomoon_swb.matrixOnly ? 48 : IOMOON_SWP_ENTRIES;
 
+  /* Re-assert every still-live slot's bit THIS frame, then count it down.
+   * iomoon_pf_keys (rows 1-6) and CORE_SETKEYSW (row 9) both run earlier in
+   * SWITCH_UPDATE(SLEIC2) and unconditionally clear every bit they cover before this probe
+   * runs at all -- exactly like SLEIC_PROBE_SW's own "if (timer < hold) swMatrix[row] |=
+   * bit" has to.  A slot that only set its bit once, at fill time, reads back low again on
+   * the very next frame regardless of its timer, i.e. every hold was silently 1 frame -- the
+   * bug a review caught before this report shipped (see the Task 11 report, Scenario 2) */
   for (s = 0; s < IOMOON_SWB_SLOTS; s++) {
     if (iomoon_swb.slotIdx[s] < 0) continue;
+    { int row; UINT8 bit, code;
+      iomoon_swprobe_entry(iomoon_swb.slotIdx[s], &row, &bit, &code);
+      coreGlobals.swMatrix[row] |= bit;
+    }
     iomoon_swb.slotTimer[s]--;
     if (iomoon_swb.slotTimer[s] <= 0) {
       iomoon_swburst_release(s);
@@ -2097,7 +2111,9 @@ static void iomoon_swburst_frame(void) {
     for (s = 0; s < IOMOON_SWB_SLOTS; s++) if (iomoon_swb.slotIdx[s] < 0) free++;
     /* fill 1..free new slots THIS frame -- sometimes several at once (the "2-4 switches in
      * one frame" case), sometimes one (the "adjacent frame" case, since the other slots'
-     * timers keep counting down independently) */
+     * timers keep counting down independently).  The bit is set here too (not just by the
+     * reassert loop above, which already ran this frame) so a freshly-filled slot is
+     * visible starting THIS frame rather than one frame late */
     n = free > 0 ? 1 + (int)(iomoon_swb_rand() % (unsigned)free) : 0;
     for (s = 0; s < IOMOON_SWB_SLOTS && n > 0; s++) {
       int row; UINT8 bit, code;
