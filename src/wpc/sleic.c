@@ -1381,15 +1381,21 @@ static void iomoon_j1_trace(const char *dir, UINT8 byte) {
 /-----------------------------------------------------------------------------------*/
 static UINT8 iomoon_oki_latch; /* PCS6 0xA0300: bit 7 = CH2, bits 0-6 = phrase number */ //!!
 
+/* debug: SLEIC_PROBE_OKI -- defined with the probe further down.  what = 0 a latch write,
+ * 1 a start (the voice it went to), 2 the sub_D0CB8 stop-both */
+static void iomoon_oki_probe(int what, UINT8 latch, int voice);
+
 static void iomoon_oki_strobe(void) {
   const UINT8 phrase = iomoon_oki_latch & 0x7f;
   /* CH2 -> the core's voice bit: bit 4 = voice 0, bit 5 = voice 1 (adpcm.c, data >> 4) */
   const UINT8 voice  = (iomoon_oki_latch & 0x80) ? 1 : 0;
 
   if (!phrase) {                      /* sub_D0CB8: latch 0, ST low -- silence both */
+    iomoon_oki_probe(2, iomoon_oki_latch, -1);    /* debug: SLEIC_PROBE_OKI */
     OKIM6376_data_0_w(0, 0x18);       /* no command pending -> bits 3,4 = stop voices 0,1 */
     return;
   }
+  iomoon_oki_probe(1, iomoon_oki_latch, voice);   /* debug: SLEIC_PROBE_OKI */
   OKIM6376_data_0_w(0, (UINT8)(0x08 << voice));   /* abort this channel first (see above) */
   OKIM6376_data_0_w(0, (UINT8)(0x80 | phrase));   /* phrase number on D0-D6              */
   OKIM6376_data_0_w(0, (UINT8)(0x10 << voice));   /* start it on the CH2-selected voice  */
@@ -1462,6 +1468,7 @@ static WRITE_HANDLER(sleic2_periph_w) {
                  * nothing -- the PCS0 bit-5 pulse above does -- which is why the boot's
                  * 0x80 (D00C6) and trigger_b's trailing rewrite (D0CAE) are silent here */
       iomoon_oki_latch = data;
+      iomoon_oki_probe(0, data, -1);    /* debug: SLEIC_PROBE_OKI */
       return;
     default:                          /* PCS2, PCS3 */
 #ifdef DEBUG_SLEIC
@@ -2995,6 +3002,211 @@ static void iomoon_ym_probe_frame(void) {
   }
 }
 
+/*-------------------------------------------------------------------------------------
+/  debug: SLEIC_PROBE_OKI -- Task 15.  Everything the OKI MSM6376 path does, at the two
+/  points F9 defines it at: the PCS6 latch write and the PCS0 bit-5 strobe.
+/
+/  Each start line is CROSS-CHECKED against three independent statements of what phrase n
+/  is, so a wrong decode shows up as a disagreement rather than as a plausible-looking
+/  number.  Nothing is hard-coded: all three are read out of the emulated ROMs.
+/
+/    1. the SAMPLE ROM's own phrase table (REGION_USER1 offset n*4, a 3-byte big-endian
+/       start address masked to 0x1FFFFF -- the same arithmetic adpcm.c does), plus the
+/       length of the chained ADPCM blocks it points at;
+/    2. the FIRMWARE's duration table (CS:0C1F + 2*(n-1), F9), in timer-0 ticks;
+/    3. the two together: nibbles / seconds = the playback rate the pair implies, which is
+/       what IOMOON_OKI_SAMPLE_RATE is derived from.  A line whose implied rate is far off
+/       the constant means the region layout or the phrase index is wrong.
+/
+/  A phrase whose table entry is NULL is called out as such.  That is not hypothetical:
+/  F9's random-attract list at CS:0C19 holds 0x29 0x31 0x2A 0x24 0x2D 0x3E, all past the 28
+/  phrases the ROMs contain, and the chip can only be silent for them -- on this board as on
+/  a real one.  The probe reports them so that silence is identified rather than mysterious.
+/
+/    SLEIC_PROBE_OKI          turn it on
+/    SLEIC_PROBE_OKIMAX=N     stop printing individual events after N (default 200)
+/    SLEIC_PROBE_OKIEVERY=N   summary line every N frames (default 200)
+/-----------------------------------------------------------------------------------*/
+#define IOMOON_OKI_DURTBL  0xd0c1f /* CS:0C1F, 28 duration words, in ROM (F9)          */
+#define IOMOON_OKI_RNDTBL  0xd0c19 /* CS:0C19, the six random-attract sample numbers   */
+#define IOMOON_OKI_PHRASES 28      /* what the sample ROMs actually contain            */
+
+static struct {
+  int on, started, max, every, printed, lastReport;
+  int latchW, starts, stops, nullPhrase, voice[2];
+  int seen[128];
+} iomoon_okip; //!!
+
+static void iomoon_oki_probe_init(void) {
+  const char *e, *m, *v;
+  if (iomoon_okip.started) return;
+  iomoon_okip.started = 1;
+  e = getenv("SLEIC_PROBE_OKI");
+  m = getenv("SLEIC_PROBE_OKIMAX");
+  v = getenv("SLEIC_PROBE_OKIEVERY");
+  iomoon_okip.on    = e ? 1 : 0;
+  iomoon_okip.max   = m ? (int)strtol(m, NULL, 10) : 200;
+  iomoon_okip.every = v ? (int)strtol(v, NULL, 10) : 200;
+  if (iomoon_okip.every < 1) iomoon_okip.every = 1;
+}
+
+/* phrase n -> (start address, nibble count) out of the sample ROMs themselves */
+static UINT32 iomoon_oki_phrase_start(UINT8 n, UINT32 *nibbles) {
+  const UINT8 *rgn = memory_region(REGION_USER1);
+  const UINT32 size = memory_region_length(REGION_USER1);
+  UINT32 start, a, bytes = 0;
+  *nibbles = 0;
+  if (!rgn || (UINT32)(n * 4 + 3) >= size) return 0;
+  start = (((UINT32)rgn[n*4] << 16) | ((UINT32)rgn[n*4+1] << 8) | rgn[n*4+2]) & 0x1fffff;
+  if (!start || start >= size) return start;
+  for (a = start; a < size; ) {          /* chained blocks, length byte then that many */
+    const UINT8 len = rgn[a] & 0x7f;
+    if (!len) break;
+    bytes += len; a += len + 1;
+  }
+  *nibbles = bytes * 2;
+  return start;
+}
+
+static void iomoon_oki_probe(int what, UINT8 latch, int voice) {
+  const UINT8 phrase = latch & 0x7f;
+  iomoon_oki_probe_init();
+  if (!iomoon_okip.on) return;
+
+  if (what == 0) { iomoon_okip.latchW++; return; }   /* latch writes are counted only */
+  if (what == 2) {
+    iomoon_okip.stops++;
+    if (iomoon_okip.printed < iomoon_okip.max) {
+      iomoon_okip.printed++;
+      fprintf(stderr, "[oki] t=%8.4f  STOP both voices (sub_D0CB8: latch 00, ST left low)\n",
+              timer_get_time());
+    }
+    return;
+  }
+
+  iomoon_okip.starts++;
+  if (voice >= 0 && voice < 2) iomoon_okip.voice[voice]++;
+  iomoon_okip.seen[phrase]++;
+  { UINT32 nib = 0;
+    const UINT32 start = iomoon_oki_phrase_start(phrase, &nib);
+    const UINT16 dur   = (UINT16)(cpu_readmem20(IOMOON_OKI_DURTBL + 2*(phrase-1)) |
+                                 (cpu_readmem20(IOMOON_OKI_DURTBL + 2*(phrase-1) + 1) << 8));
+    const double secs  = dur / IOMOON_TIMER0_HZ;
+    if (!start) iomoon_okip.nullPhrase++;
+    if (iomoon_okip.printed < iomoon_okip.max) {
+      iomoon_okip.printed++;
+      if (!start)
+        fprintf(stderr, "[oki] t=%8.4f  phrase %02X -> voice %d (CH2=%d)  NO SAMPLE: table "
+                        "entry %d is null (the ROMs hold %d phrases; F9's CS:0C19 list)\n",
+                timer_get_time(), phrase, voice, (latch >> 7) & 1, phrase, IOMOON_OKI_PHRASES);
+      else
+        fprintf(stderr, "[oki] t=%8.4f  phrase %02X -> voice %d (CH2=%d)  rom %06X %6u nib"
+                        "  fw duration %4d ticks = %5.3fs -> %5.0f Hz\n",
+                timer_get_time(), phrase, voice, (latch >> 7) & 1, start, nib, dur, secs,
+                secs > 0.0 ? nib / secs : 0.0);
+    }
+  }
+}
+
+/*  debug: SLEIC_FORCE_OKI="frame:seq[:nn],..." -- DEBUG ONLY, and the only thing in this
+/  file that makes the machine do something its firmware did not ask for.  It exists
+/  because no OKI trigger is reachable in a headless run today: attract is silent, the
+/  service menu collapses after ~2 frames (F14) and a coin awards no credit (F11's open
+/  gap), so the 81 call sites of the dispatcher are all behind doors that do not open here.
+/  Rather than leave the path untested until those are fixed, this replays the exact BUS
+/  SEQUENCES F9 lists, through sleic2_periph_w -- the driver decode under test is not
+/  bypassed, only the firmware that would normally produce the writes:
+/
+/    a:nn   oki_trigger_a D0C57:  0xA0300 <- 0x80|nn, then the okcs_strobe pulse
+/    b:nn   oki_trigger_b D0C84:  0xA0300 <- nn&0x7F, strobe, 0xA0300 <- 0x80|nn (no strobe)
+/    s      sub_D0CB8:            0xA0300 <- 0, then PCS0 bit 5 low and LEFT low
+/
+/  What it proves is the driver half end to end (latch -> strobe edge -> the phrase the
+/  sample ROMs hold -> OKIM6376_data_0_w -> a voice actually playing, which the status line
+/  below reports).  What it does NOT prove, and what stays unobserved until F11/F14 are
+/  closed, is that the firmware calls those routines with the sample numbers and at the
+/  moments a real machine would */
+static void iomoon_force_oki(int frame) {
+  static const char *list = NULL; static int started = 0;
+  const char *p;
+  if (!started) { started = 1; list = getenv("SLEIC_FORCE_OKI"); }
+  if (!list) return;
+  for (p = list; *p; ) {
+    char *end;
+    const long at = strtol(p, &end, 10);
+    char seq;
+    long n = 0;
+    p = end; if (*p == ':') p++;
+    seq = *p ? *p++ : 0;
+    if (*p == ':') { p++; n = strtol(p, &end, 16); p = end; }
+    if (*p == ',') p++;
+    if (frame != at) continue;
+    fprintf(stderr, "[oki] frame %5d  FORCED %c sample %02lX (debug: SLEIC_FORCE_OKI)\n",
+            frame, seq, n);
+    switch (seq) {
+      case 'a':
+        sleic2_periph_w(0x300, (UINT8)(0x80 | (n & 0x7f)));
+        sleic2_periph_w(0x000, (UINT8)(iomoon_pcs0 & ~0x20));
+        sleic2_periph_w(0x000, (UINT8)(iomoon_pcs0 |  0x20));
+        break;
+      case 'b':
+        sleic2_periph_w(0x300, (UINT8)(n & 0x7f));
+        sleic2_periph_w(0x000, (UINT8)(iomoon_pcs0 & ~0x20));
+        sleic2_periph_w(0x000, (UINT8)(iomoon_pcs0 |  0x20));
+        sleic2_periph_w(0x300, (UINT8)(0x80 | (n & 0x7f)));
+        break;
+      case 's':
+        sleic2_periph_w(0x300, 0x00);
+        sleic2_periph_w(0x000, (UINT8)(iomoon_pcs0 & ~0x20));
+        break;
+      default: break;
+    }
+  }
+}
+
+/* Called once a frame from SWITCH_UPDATE(SLEIC2), like the FM one, and reporting the same
+ * two state bytes: "no speech" and "never left attract" are different failures */
+static void iomoon_oki_probe_frame(void) {
+  static int frame = 0;
+  static UINT8 lastStatus = 0xf0;
+  UINT8 status;
+  iomoon_oki_probe_init();
+  if (!iomoon_okip.on) return;
+  frame++;
+  iomoon_force_oki(frame);   /* debug: SLEIC_FORCE_OKI, see above */
+
+  /* What the CORE thinks is playing, straight out of adpcm.c: bits 0/1 are voices 0/1.
+   * This is the far end of the path -- a start line above with no voice bit here would mean
+   * the two-byte translation reached the chip but never started it */
+  status = (UINT8)OKIM6295_status_0_r(0);
+  if (status != lastStatus) {
+    fprintf(stderr, "[oki] frame %5d t=%8.4f  voices playing: %s%s (status %02X)\n",
+            frame, timer_get_time(),
+            (status & 1) ? "0 " : "", (status & 2) ? "1 " : "",
+            status);
+    if (!(status & 3)) fprintf(stderr, "[oki] frame %5d t=%8.4f  all voices idle\n",
+                               frame, timer_get_time());
+    lastStatus = status;
+  }
+  if (frame - iomoon_okip.lastReport >= iomoon_okip.every) {
+    int i, distinct = 0;
+    char hist[256], *h = hist;
+    iomoon_okip.lastReport = frame;
+    for (i = 1; i < 128; i++)
+      if (iomoon_okip.seen[i]) {
+        distinct++;
+        if (h - hist < (int)sizeof hist - 16)
+          h += sprintf(h, " %02X:%d", i, iomoon_okip.seen[i]);
+      }
+    *h = 0;
+    fprintf(stderr, "[oki] frame %5d  latch writes=%d starts=%d (v0=%d v1=%d) stops=%d "
+                    "null=%d  distinct phrases=%d%s  mode=%d credits=%d\n",
+            frame, iomoon_okip.latchW, iomoon_okip.starts, iomoon_okip.voice[0],
+            iomoon_okip.voice[1], iomoon_okip.stops, iomoon_okip.nullPhrase, distinct, hist,
+            cpu_readmem20(IOMOON_MODE_BYTE), cpu_readmem20(IOMOON_CREDIT_BYTE));
+  }
+}
+
 static SWITCH_UPDATE(SLEIC2) {
   unsigned i;
   if (inports) {
@@ -3028,6 +3240,7 @@ static SWITCH_UPDATE(SLEIC2) {
   iomoon_swburst_frame(); /* debug: SLEIC_PROBE_SWBURST -- Task 11 scenario 2 */
   iomoon_menu_frame();    /* debug: SLEIC_PROBE_MENU -- Task 11 scenario 3 */
   iomoon_ym_probe_frame();/* debug: SLEIC_PROBE_YM -- Task 14 FM stream summary */
+  iomoon_oki_probe_frame();/* debug: SLEIC_PROBE_OKI -- Task 15 speech/FX summary */
 }
 
 /* Bike Race (SLEIC3) playfield-matrix test keys. The 40 matrix positions (Z80 switch
