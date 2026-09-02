@@ -1452,14 +1452,44 @@ static struct DACinterface cirsa_dacInt = { 1, { 50 }};
 /  Bit 3's polarity is confirmed twice over: the schematic path above, and a
 /  measurement -- DAC discontinuity across a bank change is 2.73x the
 /  within-bank step size non-inverted against 3.55x inverted.
+/
+/  cirsa_cst[] is the other half, and it is not a re-ordering of anything
+/  the schematic says: it is which physical chip sits in which socket.  The
+/  five Sport 2000 27512s go in the same descending sockets Mephisto uses --
+/  CST0 = IC14, CST1 = IC13, CST2 = IC12, CST3 = IC11, CST4 = IC16 -- but
+/  their dump names count the other way, s1 in IC11 through s4 in IC14 and
+/  s5 in IC16, so CST0..CST4 hold s411, s311, s211, s117, s511.  ROM_START
+/  loads them in name order, which is upstream's and MAME's order and is
+/  left alone; this table maps the CST index onto it.
+/
+/  Derived from the sample set, not guessed.  The descriptor table tiles
+/  each 32K bank, and the pages it does not claim must be the pages the
+/  EPROM does not program.  Scoring all 5! x 2 candidate maps (chip order x
+/  bit-3 polarity) against the 49 fully-0xFF pages in the 320K set leaves
+/  exactly one that claims none of them; the runner-up claims 2 and the
+/  order used before this change claims 41.  The same map is the only one
+/  whose per-bank unclaimed tail matches the block's erased tail for all
+/  ten bank values (15, 12, 12, 5, 3, 1, 1 pages and three full banks), and
+/  it puts 89% of descriptor first and last bytes within 8 counts of
+/  mid-scale against 60% for the old one -- samples that start and end in
+/  silence.
+/
+/  Live confirmation, sport2k, 60 s headless with the five sample commands
+/  whose scripts reach those erased pages (0x6B, 0x6D, 0x73, 0x74, 0x7C):
+/  DAC writes at full scale 0xFF fall from 75,771 to 360.  Under the old
+/  order 13% of every sample played was erased EPROM held at full scale.
 /-----------------------------------------------------------------------*/
 static WRITE_HANDLER(bank_w) {
+  /* CST0..CST4 -> which 64K chip of REGION_SOUND1, in ROM_START's load order
+     s117, s211, s311, s411, s511.  CST5..CST7 are unfitted on this board and
+     never appear in the descriptor table; they fold onto chip 0. */
+  static const UINT8 cirsa_cst[8] = { 3, 2, 1, 0, 4, 0, 0, 0 };
   UINT32 off;
 
   if (core_gameData->hw.gameSpecific1)          /* Mephisto: 8 x 27256 */
     off = (data & 0x07) * 0x8000;
   else                                          /* Sport 2000: 5 x 27512 */
-    off = (data & 0x07) * 0x10000 + (((data >> 3) & 1) * 0x8000);
+    off = cirsa_cst[data & 0x07] * 0x10000 + (((data >> 3) & 1) * 0x8000);
 
   cpu_setbank(1, memory_region(REGION_SOUND1) + off);
   logerror("SND BANK %x:%02x -> %05x\n", offset, data, off);
