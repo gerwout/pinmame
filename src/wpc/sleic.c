@@ -3296,8 +3296,15 @@ static void iomoon_oki_probe_frame(void) {
 /
 /  <mask> is the core inport word, so it is written the way the port is defined in
 /  sleic.h: 0001 L-flipper, 0002 R-flipper, 0100 START, 0200 COIN, 0400 TILT, 0800 TEST.
-/  0x0200 (COIN) held for ~10 frames is one coin; the Z80's port-0x03 bit-5 handler
-/  sub_0D15 emits one 0x32 per 0x32 ticks of its C046 debounce while the input is low. */
+/
+/  One press = one code, NOT a repeat while held.  sub_0D15 debounces port-0x03 bit 5 for
+/  0x32 ticks of C046 and then sends one 0x32, but on the way out it calls sub_33FA, which
+/  ORs the bit into BOTH C0F8 and C0E3; C0E3 is rebuilt every scan as IN($03) | C0F8, so a
+/  still-held button reads as released and no second code is sent.  sub_3335 clears the
+/  mask again with C0F8 &= C0F7 (C0F7 = ~IN($03)) once the button is physically let go.
+/  Measured: 0x0200 held for 400 frames produced exactly one 0x32.  So one COIN press is
+/  one coin-mech PULSE -- what that is worth is the pricing table's business, and under
+/  the UK default it takes three of them to make the 30p coin. */
 static UINT16 iomoon_probe_key(void) {
   static const char *list = NULL; static int started = 0, hold = 10, frame = 0;
   UINT16 mask = 0;
