@@ -251,6 +251,10 @@ static int    iomoon_int0_pend, iomoon_t0_pend; //!!
 static int   iomoon_irq_req[2], iomoon_irq_ack[2]; /* [0] = timer 0, [1] = INT0 */ //!!
 static int   iomoon_probe_vec, iomoon_probe_nmis;  /* vector in flight; NMIs raised by J1 */ //!!
 static int   iomoon_probe_ticks, iomoon_probe_busy; /* ticks seen; ticks with IF clear */ //!!
+/* debug: J1 bytes the NMI actually took out of the PCS2 latch.  It has to match the count
+ * of bytes the Z80 strobed (iomoon_probe_nmis); a shortfall is a latch overrun, i.e. lost
+ * switch codes, which is the failure mode this whole path exists to avoid */
+static int   iomoon_j1_taken; //!!
 
 /* debug: counts the interrupts the CPU accepts; installed only when SLEIC_PROBE_IRQ is
  * set, and returns the same vector the request carried so delivery is unchanged */
@@ -271,7 +275,10 @@ static double iomoon_probe_int0_hz(void) {
   return hz;
 }
 
+static void iomoon_swprobe_sample(void); /* debug: SLEIC_PROBE_SW, defined with the probe */
+
 static INTERRUPT_GEN(iomoon_irq_gen) {
+  iomoon_swprobe_sample(); /* debug: SLEIC_PROBE_SW -- watch the F5 switch-code shadow */
   /* debug: SLEIC_PROBE_NOIRQ */
   { static int probe = -1;
     if (probe < 0) probe = getenv("SLEIC_PROBE_NOIRQ") ? 1 : 0;
@@ -478,6 +485,19 @@ static INTERRUPT_GEN(SLEIC_interface_update) {
     if (probe && (locals.vblankCount % 100) == 0)
       fprintf(stderr, "[nv] frame %4d  seg-5040 reads=%d writes=%d\n",
               locals.vblankCount, iomoon_nv_reads, iomoon_nv_writes);
+    /* debug: both J1 queues in firmware RAM, which is where a stalled link shows up --
+     * an outbound queue that never drains means the Z80 is not taking its bytes, and an
+     * inbound write pointer that never moves means the NMI is not queueing them */
+    if (probe && (locals.vblankCount % 100) == 0)
+      fprintf(stderr, "[j1q] frame %4d  out 4000:1158 rd=%04X wr=%04X head=%02X (INT0/8 gate %02X)"
+                      "  in 4000:1220 rd=%04X wr=%04X pending=%02X  0x32 count=%02X\n",
+              locals.vblankCount,
+              cpu_readmem20(0x4114c) | (cpu_readmem20(0x4114d) << 8),   /* qout read  [114C] */
+              cpu_readmem20(0x4114e) | (cpu_readmem20(0x4114f) << 8),   /* qout write [114E] */
+              cpu_readmem20(0x41158), cpu_readmem20(0x41145),
+              cpu_readmem20(0x41150) | (cpu_readmem20(0x41151) << 8),   /* FIFO read  [1150] */
+              cpu_readmem20(0x41154) | (cpu_readmem20(0x41155) << 8),   /* FIFO write [1154] */
+              cpu_readmem20(0x41147), cpu_readmem20(0x41144));
     if (probe && locals.vblankCount <= 400)
       fprintf(stderr, "[pc] frame %4d  PC=%05X  IF=%d  blit rows=%04X cols=%04X stride=%04X\n",
               locals.vblankCount, (unsigned)activecpu_get_pc(),
@@ -485,6 +505,35 @@ static INTERRUPT_GEN(SLEIC_interface_update) {
               cpu_readmem20(0x410b8) | (cpu_readmem20(0x410b9) << 8),
               cpu_readmem20(0x410ba) | (cpu_readmem20(0x410bb) << 8),
               cpu_readmem20(0x410bc) | (cpu_readmem20(0x410bd) << 8));
+    /* debug: and a running histogram of the same sample, which is what says "the firmware
+     * is going round its loop" rather than "it is parked on one instruction" */
+    { enum { PCH = 256 };
+      static unsigned pc[PCH]; static int hits[PCH], n, ifset, over;
+      if (probe) {
+        const unsigned p = (unsigned)activecpu_get_pc();
+        int i;
+        if (activecpu_get_reg(I86_FLAGS) & 0x200) ifset++;
+        for (i = 0; i < n && pc[i] != p; i++) ;
+        if (i < PCH) { if (i == n) { pc[n] = p; n++; } hits[i]++; } else over++;
+        if ((locals.vblankCount % 500) == 0) {
+          int j, k, m, picked[8];
+          fprintf(stderr, "[pch] frame %4d  IF set in %d%% of samples, %d distinct PCs%s:",
+                  locals.vblankCount, 100 * ifset / locals.vblankCount, n,
+                  over ? " (table full)" : "");
+          for (k = 0; k < 8 && k < n; k++) {  /* the k busiest, one pass each */
+            int best = -1;
+            for (j = 0; j < n; j++) {
+              for (m = 0; m < k && picked[m] != j; m++) ;
+              if (m < k) continue;
+              if (best < 0 || hits[j] > hits[best]) best = j;
+            }
+            picked[k] = best;
+            fprintf(stderr, " %05X:%d", pc[best], hits[best]);
+          }
+          fprintf(stderr, "\n");
+        }
+      }
+    }
   }
 
   /* debug: interrupt-model probe -- how many timer-0 / INT0 requests were raised and how
@@ -1052,6 +1101,17 @@ static struct {
   UINT8 swCol;     /* Z80 port 0x82: switch-matrix column strobe, decoded to 0..5      */
 } iomoon_j1; //!!
 
+/* debug: SLEIC_PROBE_SW -- the two exact points a J1 byte passes, defined with the probe:
+ * where = 0 the Z80 strobed it, where = 1 the 80188's NMI took it out of the latch */
+static void iomoon_swprobe_j1(UINT8 byte, int where);
+
+/* debug: SLEIC_PROBE_J1 -- one line per byte in either direction, both ends named */
+static void iomoon_j1_trace(const char *dir, UINT8 byte) {
+  static int probe = -1;
+  if (probe < 0) probe = getenv("SLEIC_PROBE_J1") ? 1 : 0;
+  if (probe) fprintf(stderr, "[j1] %s %02X\n", dir, byte);
+}
+
 /* Io Moon 80188 peripheral write.  PCS0's page select (F2) and the J1 outbound half
  * (PCS1 data + the PCS4 bit-5 strobe, F6) are wired; PCS5 YM3812 (F8), PCS6 OKI (F9)
  * and the PCS0 NVRAM gate (F10) are later tasks and are only logged */
@@ -1082,6 +1142,7 @@ static WRITE_HANDLER(sleic2_periph_w) {
                  * is F13/Task 11's, not this one's */
       if ((data & 0x20) && !(iomoon_j1.pcs4 & 0x20)) {
         iomoon_j1.toZ80Full = 1;
+        iomoon_j1_trace("188->Z80", iomoon_j1.toZ80); /* debug: SLEIC_PROBE_J1 */
         cpu_set_irq_line(SLEIC_IO_CPU, IRQ_LINE_NMI, PULSE_LINE); /* Z80 handler 0x0066 */
       }
       iomoon_j1.pcs4 = data;
@@ -1104,6 +1165,10 @@ static READ_HANDLER(sleic2_periph_r) {
                  * handler D018C (F4).  The read is what frees the port for the Z80's
                  * next byte, so clear the busy flag and leave the latch itself standing
                  * -- a hardware latch holds its last value */
+      if (iomoon_j1.latchFull) {
+        iomoon_j1_taken++;                            /* debug: SLEIC_PROBE_IRQ */
+        iomoon_swprobe_j1(iomoon_j1.latch, 1);        /* debug: SLEIC_PROBE_SW  */
+      }
       iomoon_j1.latchFull = 0;
       return iomoon_j1.latch;
     case 0x180: /* PCS3 bit 0: "receiver ready".  qout_service_pcs1 tests it (D0206) and
@@ -1538,6 +1603,9 @@ static WRITE_HANDLER(iomoon_z80_write) {
         if (rise & 0x24) {
           iomoon_j1.latch = iomoon_j1.to188;
           iomoon_j1.latchFull = 1;
+          iomoon_probe_nmis++; /* debug: SLEIC_PROBE_IRQ */
+          iomoon_j1_trace("Z80->188", iomoon_j1.latch); /* debug: SLEIC_PROBE_J1 */
+          iomoon_swprobe_j1(iomoon_j1.latch, 0);        /* debug: SLEIC_PROBE_SW */
           cpu_set_irq_line(SLEIC_MAIN_CPU, IRQ_LINE_NMI, PULSE_LINE); /* handler D000:016D */
         }
       }
@@ -1648,6 +1716,206 @@ static const struct { int key; UINT8 col; UINT8 bit; } iomoon_pf_keys[] = {
   {KEYCODE_T,6,0x01},{KEYCODE_8_PAD,6,0x02},{KEYCODE_9_PAD,6,0x04},{KEYCODE_MINUS_PAD,6,0x08}, /* col5 0x34-0x37 */
 };
 
+/* debug: SLEIC_PROBE_CAB="frame:bits,frame:bits,..." -- hold the given swMatrix[9] bits
+ * (hex, i.e. the Z80 port-0x03 cabinet inputs) for SLEIC_PROBE_CABHOLD frames (default 10)
+ * from each frame given.  It presses the buttons a person would press; the codes still
+ * travel the whole J1 path.  A headless run needs at least one of these, because a machine
+ * with a blank NVRAM legitimately stops at its factory-defaults prompt (sub_D5449 draws it
+ * and then waits for code 0x40 = START, exactly as Bike Race's FABRICA prompt does) */
+static void iomoon_probe_cab(int frame) {
+  static const char *list = NULL; static int started = 0, hold = 10;
+  const char *p;
+  if (!started) { const char *h = getenv("SLEIC_PROBE_CABHOLD");
+                  started = 1; list = getenv("SLEIC_PROBE_CAB");
+                  if (h) hold = (int)strtol(h, NULL, 10); }
+  if (!list) return;
+  for (p = list; *p; ) {
+    char *end;
+    const long at = strtol(p, &end, 10);
+    p = end; if (*p == ':') p++;
+    { const long bits = strtol(p, &end, 16);
+      p = end; if (*p == ',') p++;
+      if (frame >= at && frame < at + hold) coreGlobals.swMatrix[9] |= (UINT8)bits;
+    }
+  }
+}
+
+/* debug: SLEIC_PROBE_SW -- the switch-delivery regression.  It drives the REAL path end to
+ * end and asserts nothing about the driver's internals: close a contact in the matrix ->
+ * the Z80's own scan notices it -> its per-switch routine sends the F5 code over J1 ->
+ * the strobe latches it at PCS2 and raises the NMI -> D000:016D queues it -> the 80188's
+ * dispatcher sub_D7453 stores it in the shadow at 413C:00D6 = flat 0x41496, which is
+ * where the probe looks.  Nothing is injected into the latch, the FIFO or the shadow.
+ *
+ *   SLEIC_PROBE_SW        run it
+ *   SLEIC_PROBE_SWAT=n    first injection at frame n (default 900: after the boot chain)
+ *   SLEIC_PROBE_SWROUNDS  passes over the whole table (default 5)
+ *   SLEIC_PROBE_SWHOLD    frames a contact is held / left open (default 6 / 6)
+ *
+ * Two things make the sweep meaningful only in TEST MODE, and the probe therefore opens
+ * it the way an operator does -- by pulsing the port-0x03 bit-1 contact, whose code 0x3F
+ * makes the 80188 open the service menu (F14) and push Z80 command 0xF7 back over J1
+ * (which is itself a full round trip through both directions):
+ *   - about half the per-switch routines gate their send on the test-mode flag C068
+ *     (e.g. sub_161E: "LD A,($C068) / AND A / JP NZ,send", else it needs a ball in play);
+ *   - the ones that do send in attract fire game logic as a side effect.
+ * The probe reports C068 so a run where the menu did not open is visible rather than
+ * silently scoring zeroes */
+static struct {
+  int on, started, at, rounds, hold, entry, round, phase, timer, armed;
+  int sentHit, takenHit, shadowHit, sent[64], taken[64], shadow[64], attempts[64];
+  UINT8 expect, lastShadow;
+} iomoon_swp; //!!
+
+/* 48 matrix positions + the cabinet codes 0x3E and 0x40.  0x3F is deliberately NOT swept:
+ * it opens the service menu (F14), which would change the firmware's state under the rest
+ * of the sweep.  It is exercised on its own by SLEIC_PROBE_SWMENU, where the proof that it
+ * arrived is stronger than a shadow byte -- the 80188 answers it with Z80 command 0xF7 */
+#define IOMOON_SWP_ENTRIES 50
+
+/* entry -> (swMatrix row, bit, the F5 code the Z80 sends for it) */
+static void iomoon_swprobe_entry(int i, int *row, UINT8 *bit, UINT8 *code) {
+  if (i < 48) { *row = 1 + i / 8; *bit = (UINT8)(1u << (i % 8)); *code = (UINT8)(i < 40 ? 0x0a + i : 0x34 + (i - 40)); }
+  else { *row = 9; *bit = (UINT8)(i == 48 ? 0x01 : 0x10); *code = (UINT8)(i == 48 ? 0x3e : 0x40); }
+}
+
+/* Three things are counted per contact, and they answer three different questions.
+ *
+ *   sent    the Z80 strobed this code across J1.  Whether it does is FIRMWARE: about a
+ *           quarter of the per-switch routines send only in test mode or with a ball in
+ *           play (sub_161E, sub_164A, ...), so a zero here is the I/O board declining to
+ *           report the contact, not a lost byte.
+ *   taken   the 80188's NMI read that same byte out of the PCS2 latch.  THIS is the
+ *           driver's contract and the regression this probe exists for: taken must equal
+ *           sent, code by code, every round.  Anything less is a byte the latch lost.
+ *   shadow  the code appeared at 413C:00D6 = 0x41496 (F5).  Only the general dispatcher
+ *           sub_D7453 writes it, so a byte lands there only while the firmware is in a
+ *           state that runs that dispatcher; in any other state the poll routine it is
+ *           spinning in pops the byte and drops it unless it is the value that routine
+ *           wants.  F4 states this and says a driver must not compensate for it, so this
+ *           is a firmware-state observation and NOT a delivery metric.
+ *
+ * sent and taken are exact -- they are counted at the two hooks the byte physically passes
+ * -- while the shadow is sampled at IOMOON_IRQ_TICK_HZ from iomoon_irq_gen (where the
+ * 80188 is the active CPU).  Sampling is good enough there because a shadow byte sits
+ * until the next dispatch, and it is the only one of the three that could not be hooked:
+ * the shadow is plain work RAM */
+static void iomoon_swprobe_j1(UINT8 byte, int where) {
+  if (!iomoon_swp.armed || byte != iomoon_swp.expect) return;
+  if (where) iomoon_swp.takenHit++; else iomoon_swp.sentHit++;
+}
+
+static void iomoon_swprobe_sample(void) {
+  UINT8 v;
+  if (!iomoon_swp.on || !iomoon_swp.armed) return;
+  v = cpu_readmem20(0x41496);
+  if (v != iomoon_swp.lastShadow) {
+    iomoon_swp.lastShadow = v;
+    if (v == iomoon_swp.expect) iomoon_swp.shadowHit = 1;
+  }
+}
+
+/* Called once a frame from SWITCH_UPDATE(SLEIC2), after the key mapping, so the injected
+ * contact is the last word on the matrix for that frame */
+static void iomoon_swprobe_frame(void) {
+  static int frame = 0;
+  int row; UINT8 bit, code;
+  iomoon_probe_cab(++frame); /* debug: SLEIC_PROBE_CAB */
+  if (!iomoon_swp.started) {
+    const char *e = getenv("SLEIC_PROBE_SW"), *a = getenv("SLEIC_PROBE_SWAT");
+    const char *r = getenv("SLEIC_PROBE_SWROUNDS"), *h = getenv("SLEIC_PROBE_SWHOLD");
+    iomoon_swp.started = 1;
+    iomoon_swp.on     = e ? 1 : 0;
+    iomoon_swp.at     = a ? (int)strtol(a, NULL, 10) : 900;
+    iomoon_swp.rounds = r ? (int)strtol(r, NULL, 10) : 5;
+    iomoon_swp.hold   = h ? (int)strtol(h, NULL, 10) : 6;
+    if (iomoon_swp.hold < 1) iomoon_swp.hold = 1;
+  }
+  if (!iomoon_swp.on) return;
+  if (frame < iomoon_swp.at) return;
+
+  /* phase 0: pulse the service-menu contact (code 0x3F) and let the 0xF7 come back.
+   * Off by default -- see the SLEIC_PROBE_SWMENU note above */
+  if (iomoon_swp.phase == 0 && !getenv("SLEIC_PROBE_SWMENU")) {
+    iomoon_swp.phase = 1; iomoon_swp.timer = 0; iomoon_swp.entry = 0; iomoon_swp.armed = 0;
+  }
+  if (iomoon_swp.phase == 0) {
+    if (iomoon_swp.timer < iomoon_swp.hold) coreGlobals.swMatrix[9] |= 0x02;
+    if (++iomoon_swp.timer >= 60) {
+      fprintf(stderr, "[sw] test mode: Z80 C068 = %02X (0xF7 from the 80188 sets it), "
+                      "J1 bytes strobed=%d read by the NMI=%d\n",
+              cpunum_read_byte(SLEIC_IO_CPU, 0xc068), iomoon_probe_nmis, iomoon_j1_taken);
+      iomoon_swp.phase = 1; iomoon_swp.timer = 0; iomoon_swp.entry = 0; iomoon_swp.armed = 0;
+    }
+    return;
+  }
+
+  iomoon_swprobe_entry(iomoon_swp.entry, &row, &bit, &code);
+  if (iomoon_swp.timer == 0) {                 /* arm: start watching for this code */
+    iomoon_swp.expect     = code;
+    iomoon_swp.lastShadow = cpu_readmem20(0x41496);
+    iomoon_swp.sentHit    = iomoon_swp.takenHit = iomoon_swp.shadowHit = 0;
+    iomoon_swp.armed      = 1;
+    iomoon_swp.attempts[iomoon_swp.entry]++;
+  }
+  if (iomoon_swp.timer < iomoon_swp.hold)      /* closed */
+    coreGlobals.swMatrix[row] |= bit;
+  if (++iomoon_swp.timer >= 2 * iomoon_swp.hold) {  /* open again, and score it */
+    iomoon_swp.sent[iomoon_swp.entry]   += iomoon_swp.sentHit;
+    iomoon_swp.taken[iomoon_swp.entry]  += iomoon_swp.takenHit;
+    iomoon_swp.shadow[iomoon_swp.entry] += iomoon_swp.shadowHit;
+    iomoon_swp.armed = 0;
+    iomoon_swp.timer = 0;
+    if (++iomoon_swp.entry >= IOMOON_SWP_ENTRIES) {
+      int i, lost = 0, quiet = 0, sh = 0, dead = 0, sent = 0, taken = 0;
+      iomoon_swp.entry = 0;
+      iomoon_swp.round++;
+      for (i = 0; i < IOMOON_SWP_ENTRIES; i++) {
+        int r2; UINT8 b2, c2;
+        iomoon_swprobe_entry(i, &r2, &b2, &c2);
+        /* codes 0x13 and 0x38-0x3B dispatch to sub_1348 (a bare RET): never sent */
+        if (c2 == 0x13 || (c2 >= 0x38 && c2 <= 0x3b)) { dead++; continue; }
+        sent += iomoon_swp.sent[i]; taken += iomoon_swp.taken[i];
+        if (iomoon_swp.shadow[i]) sh++;
+        if (iomoon_swp.sent[i] == 0) { quiet++;
+          fprintf(stderr, "[sw] code %02X (row %d bit %02X): the Z80 sent it %d times in "
+                          "%d presses -- its handler is gated (test mode / ball in play)\n",
+                  c2, r2, b2, iomoon_swp.sent[i], iomoon_swp.attempts[i]);
+        }
+        else if (iomoon_swp.taken[i] != iomoon_swp.sent[i]) { lost++;
+          fprintf(stderr, "[sw] code %02X (row %d bit %02X): LOST -- sent %d, the 80188 "
+                          "took %d\n", c2, r2, b2, iomoon_swp.sent[i], iomoon_swp.taken[i]);
+        }
+      }
+      fprintf(stderr, "[sw] round %d: %d codes sent %d times, taken by the 80188 %d times, "
+                      "%d LOST; %d silent (firmware-gated), %d no-ops; %d codes reached the "
+                      "413C:00D6 shadow.  J1 totals: strobed=%d read by the NMI=%d\n",
+              iomoon_swp.round, IOMOON_SWP_ENTRIES - dead - quiet, sent, taken, lost,
+              quiet, dead, sh, iomoon_probe_nmis, iomoon_j1_taken);
+      if (iomoon_swp.round >= iomoon_swp.rounds) {  /* the per-contact table */
+        int col = 0;
+        iomoon_swp.on = 0;
+        fprintf(stderr, "[sw] code:sent/taken/shadow over %d presses each --",
+                iomoon_swp.attempts[0]);
+        for (i = 0; i < IOMOON_SWP_ENTRIES; i++) {
+          int r2; UINT8 b2, c2;
+          iomoon_swprobe_entry(i, &r2, &b2, &c2);
+          if (col++ % 10 == 0) fprintf(stderr, "\n[sw] ");
+          fprintf(stderr, " %02X:%d/%d/%d", c2, iomoon_swp.sent[i], iomoon_swp.taken[i],
+                  iomoon_swp.shadow[i]);
+        }
+        fprintf(stderr, "\n");
+      }
+      /* Re-open the menu for the next round: the sweep's own codes navigate it, and one of
+       * them eventually picks the exit, whose Z80 command 0xF8 reboots the I/O board (F14).
+       * Without this only round 1 sees test mode */
+      else if (iomoon_swp.phase == 1 && getenv("SLEIC_PROBE_SWMENU")) {
+        iomoon_swp.phase = 0; iomoon_swp.timer = 0;
+      }
+    }
+  }
+}
+
 static SWITCH_UPDATE(SLEIC2) {
   unsigned i;
   if (inports) {
@@ -1677,6 +1945,7 @@ static SWITCH_UPDATE(SLEIC2) {
     else
       coreGlobals.swMatrix[iomoon_pf_keys[i].col] &= ~iomoon_pf_keys[i].bit;
   }
+  iomoon_swprobe_frame(); /* debug: SLEIC_PROBE_SW */
 }
 
 /* Bike Race (SLEIC3) playfield-matrix test keys. The 40 matrix positions (Z80 switch
