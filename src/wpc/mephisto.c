@@ -1333,10 +1333,15 @@ static MACHINE_INIT(CIRSA) {
    takes all three chutes and Start on one column; Mephisto spreads them, and
    its chute order comes from the ROM's own tables at 0x1C49 / 0x1C4C. */
 static const UINT8 cirsaCoinSw[4][2] = {
-  {7, 0x08},  /* Coin 1 -> 25 chute      */
-  {7, 0x10},  /* Coin 2 -> centre chute  */
-  {7, 0x20},  /* Coin 3 -> 100 chute     */
-  {7, 0x04}   /* Start                   */
+  /* Coin 1 is the centre chute on purpose, not the 25 chute.  The chutes are
+     priced differently -- 25 chute takes TWO coins per credit, centre gives 1,
+     100 gives 3 -- and key 5 is the one a person reaches for first, so it has
+     to be the one that visibly does something on a single press.  Putting the
+     two-for-one chute there makes the machine look broken. */
+  {7, 0x10},  /* Coin 1 -> centre chute, 1 credit      */
+  {7, 0x08},  /* Coin 2 -> 25 chute, 2 coins = 1 credit */
+  {7, 0x20},  /* Coin 3 -> 100 chute, 3 credits        */
+  {7, 0x04}   /* Start                                 */
 };
 static const UINT8 mephCoinSw[4][2] = {
   {6, 0x10},  /* Coin 1 -> chute 0, 1 credit  */
@@ -1847,13 +1852,34 @@ MACHINE_DRIVER_END
 /  Which matrix bit each one lands on differs per game and is set out in
 /  cirsaCoinSw/mephCoinSw below.
 /----------------------------------------------------------------------*/
+/* A coin is an event, not a level, and both ROMs enforce that.  Their coin
+   debouncers count consecutive closed samples and treat a long one as a jammed
+   mech: measured on sport2k, a closure credits 3/3 at every hold from 0.05 s to
+   0.50 s, 1/3 at 0.60 s and 0/3 at 0.80 s and beyond, with the knee at ~0.58 s
+   where 0x068EE compares the run length against 0x0F.  A plain momentary key
+   therefore fails for anyone who presses it deliberately rather than tapping,
+   which is a trap for a human and was one for this project's own test harness.
+
+   IPF_IMPULSE holds the bit for a fixed number of frames however long the key
+   is actually held, so the ROM sees the same closure every time.  8 frames at
+   the 60 FPS this machine runs at is 133 ms: comfortably above the ~50 ms the
+   debouncer needs to see it at all, and comfortably below the ~580 ms that
+   makes it a jam.  COREPORT_BITIMP would be 1 frame, 17 ms, which is under the
+   debounce tick (~26 Hz) and can be missed entirely.
+
+   Start is deliberately left momentary -- it has no jam timeout, and holding
+   it is what the real button does. */
+#define CIRSA_COIN(mask, name, key) \
+  PORT_BITX(mask, IP_ACTIVE_HIGH, IPT_BUTTON1 | IPF_IMPULSE | (8<<8), \
+            name, key, IP_JOY_NONE)
+
 INPUT_PORTS_START(cirsa)
   CORE_PORTS
   SIM_PORTS(1)
   PORT_START /* CORE_COREINPORT */
-    COREPORT_BIT(     0x0001, "Coin 1",      KEYCODE_5)
-    COREPORT_BIT(     0x0002, "Coin 2",      KEYCODE_6)
-    COREPORT_BIT(     0x0004, "Coin 3",      KEYCODE_4)
+    CIRSA_COIN(       0x0001, "Coin 1",      KEYCODE_5)
+    CIRSA_COIN(       0x0002, "Coin 2",      KEYCODE_6)
+    CIRSA_COIN(       0x0004, "Coin 3",      KEYCODE_4)
     COREPORT_BIT(     0x0008, "Start",       KEYCODE_1)
     COREPORT_BITTOG(  0x0010, "Ball Trough", KEYCODE_B)
     COREPORT_BIT(     0x0100, "Test",    KEYCODE_7)
