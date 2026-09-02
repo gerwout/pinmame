@@ -91,6 +91,15 @@ static int SLEIC_sw2m(int no) { return (no/10 - 4)*8 + no%10; }
 static int SLEIC_m2sw(int col, int row) { return 40 + col*10 + row; }
 
 static INTERRUPT_GEN(SLEIC_irq_i80188) {
+  /* debug: boot probe -- separate "the memory map is wrong" from "the interrupt model
+   * is".  SLEIC_PROBE_NOIRQ suppresses the base driver's vector-less 120 Hz IRQ0
+   * entirely; SLEIC_PROBE_T0 instead delivers it as the timer-0 vector 0x08 that the
+   * resident IVT actually has a handler for (findings F1/F3) */
+  { static int probe = -1;
+    if (probe < 0) probe = getenv("SLEIC_PROBE_NOIRQ") ? 1 : getenv("SLEIC_PROBE_T0") ? 2 : 0;
+    if (probe == 1) return;
+    if (probe == 2) { cpu_set_irq_line_and_vector(SLEIC_MAIN_CPU, 0, HOLD_LINE, 0x08); return; }
+  }
   cpu_set_irq_line(SLEIC_MAIN_CPU, 0, PULSE_LINE);
 }
 
@@ -236,11 +245,52 @@ static INTERRUPT_GEN(SLEIC_irq_z80) {
   cpu_set_irq_line(SLEIC_IO_CPU, 0, PULSE_LINE);
 }
 
+/* debug: boot probe -- segment-5040 access counters (Io Moon NVRAM handlers) */
+static int iomoon_nv_reads, iomoon_nv_writes; //!!
+
 /*-------------------------------
 /  copy local data to interface
 /--------------------------------*/
 static INTERRUPT_GEN(SLEIC_interface_update) {
   locals.vblankCount++;
+
+  /* debug: boot probe -- sample the 80188 PC once a frame when SLEIC_PROBE_PC is set,
+   * and dump one byte out of every mapped window on the first frame */
+  { static int probe = -1;
+    if (probe < 0) probe = getenv("SLEIC_PROBE_PC") ? 1 : 0;
+    if (probe && locals.vblankCount == 1) {
+      static const struct { unsigned addr; const char *what; } spots[] = {
+        {0x00000, "LMCS  IVT[0]        (expect 00 F0 F0 FF)"},
+        {0x00008, "LMCS  IVT[2] NMI    (expect 6D 01 00 D0)"},
+        {0x00020, "LMCS  IVT[8] timer0 (expect 4F 02 00 D0)"},
+        {0x29154, "LMCS  glyph outline (expect 00 F0 F8 0C)"},
+        {0x60000, "MCS2  gfx page 0 hdr(expect 20 00 10 00)"},
+        {0xc0000, "UMCS  ROM1 0x40000  (expect FF FF FF FF)"},
+        {0xffff0, "UMCS  reset vector  (expect EA 00 00 F0)"},
+        {0xfff00, "UMCS  reset stub    (expect BA A0 FF B8)"},
+      };
+      unsigned i;
+      { const UINT8 *rgn = memory_region(SLEIC_MEMREG_CPU);
+        static const unsigned ro[] = {0x00000, 0x29154, 0x40000, 0x80000, 0xa9154, 0xc0000, 0xffff0};
+        for (i = 0; i < sizeof ro / sizeof ro[0]; i++)
+          fprintf(stderr, "[rgn] CPU1+%05X: %02X %02X %02X %02X\n", ro[i],
+                  rgn[ro[i]], rgn[ro[i]+1], rgn[ro[i]+2], rgn[ro[i]+3]);
+      }
+      for (i = 0; i < sizeof spots / sizeof spots[0]; i++)
+        fprintf(stderr, "[map] %05X: %02X %02X %02X %02X  %s\n", spots[i].addr,
+                cpu_readmem20(spots[i].addr),   cpu_readmem20(spots[i].addr+1),
+                cpu_readmem20(spots[i].addr+2), cpu_readmem20(spots[i].addr+3), spots[i].what);
+    }
+    if (probe && (locals.vblankCount % 100) == 0)
+      fprintf(stderr, "[nv] frame %4d  seg-5040 reads=%d writes=%d\n",
+              locals.vblankCount, iomoon_nv_reads, iomoon_nv_writes);
+    if (probe && locals.vblankCount <= 400)
+      fprintf(stderr, "[pc] frame %4d  PC=%05X  blit rows=%04X cols=%04X stride=%04X\n",
+              locals.vblankCount, (unsigned)activecpu_get_pc(),
+              cpu_readmem20(0x410b8) | (cpu_readmem20(0x410b9) << 8),
+              cpu_readmem20(0x410ba) | (cpu_readmem20(0x410bb) << 8),
+              cpu_readmem20(0x410bc) | (cpu_readmem20(0x410bd) << 8));
+  }
 
   /*-- lamps --*/
   if ((locals.vblankCount % SLEIC_LAMPSMOOTH) == 0)
@@ -705,8 +755,8 @@ MEMORY_END
 #define IOMOON_NVRAM_BASE 0x50400
 #define IOMOON_NVRAM_SIZE 0x2000
 static UINT8 iomoon_nvram[IOMOON_NVRAM_SIZE]; //!!
-static READ_HANDLER(iomoon_nvram_r)  { return iomoon_nvram[offset]; }
-static WRITE_HANDLER(iomoon_nvram_w) { iomoon_nvram[offset] = data; }
+static READ_HANDLER(iomoon_nvram_r)  { iomoon_nv_reads++;  return iomoon_nvram[offset]; }
+static WRITE_HANDLER(iomoon_nvram_w) { iomoon_nv_writes++; iomoon_nvram[offset] = data; }
 static NVRAM_HANDLER(SLEIC2) {
   core_nvram(file, read_or_write, iomoon_nvram, sizeof iomoon_nvram, 0x00);
 }
@@ -738,6 +788,12 @@ static void iomoon_set_gfx_bank(UINT8 pcs0) {
 static WRITE_HANDLER(sleic2_periph_w) {
   switch (offset) {
     case 0x000: /* PCS0: bits 0-2 graphics page (F2), 3/4 NVRAM window gate (F10), 5 = OKI /OKCS (F9) */
+      /* debug: boot probe -- trace the PCS0 shadow when SLEIC_PROBE_PCS0 is set */
+      { static int probe = -1, seen = 0;
+        if (probe < 0) probe = getenv("SLEIC_PROBE_PCS0") ? 1 : 0;
+        if (probe && seen < 40) { seen++;
+          fprintf(stderr, "[pcs0] %02X -> %02X  (gfx page %d)\n", iomoon_pcs0, data, data & 7); }
+      }
       if ((data ^ iomoon_pcs0) & 0x07) iomoon_set_gfx_bank(data);
       iomoon_pcs0 = data;
       return;
@@ -847,6 +903,13 @@ static WRITE_HANDLER(i80188_write_port) {
   /* 80188 internal Peripheral Control Block writes (chip-selects at 0xFFA0+, timer/
    * interrupt-controller config, EOI at 0xFF2C). The I188 core does not model these;
    * they are no-ops here. The interrupt sources are generated by sleic3_irq_gen */
+  /* debug: boot probe -- log the chip-select/PCB writes when SLEIC_PROBE_PCB is set.
+   * OUT DX,AX arrives as two byte writes (low byte at the even port, high byte at +1) */
+  { static int probe = -1, seen = 0;
+    if (probe < 0) probe = getenv("SLEIC_PROBE_PCB") ? 1 : 0;
+    if (probe && seen < 80) { seen++;
+      fprintf(stderr, "[pcb] port %04X = %02X\n", 0xff00 + offset, data); }
+  }
 }
 
 static READ_HANDLER(i8039_read_test) {

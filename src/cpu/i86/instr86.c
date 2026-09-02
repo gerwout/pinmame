@@ -1983,6 +1983,13 @@ static void PREFIX86(_call_far)(void)
 	tmp2 += FETCH << 8;
 
 	ip = I.pc - I.base[CS];
+	/* debug: boot probe -- log the first far calls when SLEIC_PROBE_FAR is set */
+	{ static int probe = -1, seen = 0;
+	  if (probe < 0) probe = getenv("SLEIC_PROBE_FAR") ? 1 : 0;
+	  if (probe && seen < 24) { seen++;
+	    fprintf(stderr, "[far] CALL %04X:%04X  (from %04X:%04X)\n",
+	            (unsigned)tmp2, (unsigned)tmp, (unsigned)I.sregs[CS], (unsigned)ip); }
+	}
 	PUSH(I.sregs[CS]);
 	PUSH(ip);
 
@@ -2648,6 +2655,14 @@ static void PREFIX86(_jmp_far)(void)    /* Opcode 0xea */
 	tmp1 = FETCH;
 	tmp1 += FETCH << 8;
 
+	/* debug: boot probe -- log the first far jumps when SLEIC_PROBE_FAR is set */
+	{ static int probe = -1, seen = 0;
+	  if (probe < 0) probe = getenv("SLEIC_PROBE_FAR") ? 1 : 0;
+	  if (probe && seen < 24) { seen++;
+	    fprintf(stderr, "[far] JMP  %04X:%04X  (from %04X:%04X)\n",
+	            (unsigned)tmp1, (unsigned)tmp, (unsigned)I.sregs[CS],
+	            (unsigned)((I.pc - I.base[CS]) & 0xffff)); }
+	}
 #ifdef I286
 	i286_code_descriptor(tmp1,tmp);
 #else
