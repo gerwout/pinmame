@@ -36,6 +36,8 @@ static struct {
   UINT8 sndP1;          /* 8051 port 1 output latch = the AY-3-8910 data bus */
   UINT8 sndP3;          /* 8051 port 3 output latch; bits 4/5 = BDIR/BC1 */
   UINT8 sndP2;          /* 8051 port 2 output latch = XRAM address bits 8-15 */
+  UINT8 ayPortA;        /* AY-3-8910 IOA output latch -- the audio board's own
+                           column strobe and pulsed outputs, see ay8910_porta_w */
 } locals;
 
 /*-------------------------------------------------------------------------
@@ -1382,10 +1384,61 @@ static INTERRUPT_GEN(cirsa_vblank) {
   }
 }
 
-static READ_HANDLER(ay8910_porta_r)   { return coreGlobals.swMatrix[0]; }
-static READ_HANDLER(ay8910_portb_r)   { return coreGlobals.swMatrix[1]; }
-static WRITE_HANDLER(ay8910_porta_w)  { coreGlobals.tmpLampMatrix[0] = data; }
-static WRITE_HANDLER(ay8910_portb_w)  { coreGlobals.tmpLampMatrix[1] = data; }
+/*-- The AY-3-8910's own I/O ports (plate 11 / Mephisto plate 9) ---------
+/  IOA is an OUTPUT and IOB an INPUT: the sequencer's register-7 special
+/  case forces exactly that on every write ((v & 0x3F) | 0x40, sport2k
+/  0x0F50, mephisto 0x0862), and no score can override it.
+/
+/  They are not the playfield lamp or switch matrix.  They are the audio
+/  board's own connectors: both manuals letter J17 "T COLUMN 1..5, T ROW
+/  1..3", J18 "A COLUMN 3/4/5, A ROW 4/5", J19 "COUNTER 1/2" and J20
+/  "COIN 1/2/3, COIN INHIBIT 1/2" (Sport 2000 plate 11, PDF p.34;
+/  Mephisto plate 9, PDF p.29 -- identical lists).
+/
+/  Mephisto's firmware uses them and shows the layout directly.  0x05E6
+/  writes IOA from IRAM 0x43 on every 100 Hz tick, and 0x05A6 reads IOB
+/  back for the column just strobed and stores it at XRAM 0x0074+col:
+/
+/      05A6: MOV P1,#0Fh          ; AY register 15 = port B
+/      05AF: MOV P1,#FFh          ; release the 8051's bus
+/      05B2: ORL P3,#20h          ; BC1 alone = READ DATA
+/      05B5: MOV 44h,P1
+/      05C1: MOV A,#74h / ADD A,41h / MOV R0,A / MOVX @R0,A
+/
+/  The column pattern comes from a five-entry table at 0x05E1, which reads
+/  08 10 20 40 80 -- one bit each for IOA bits 3..7, five columns.  IRAM
+/  0x41 cycles 0..4, so the strobe is a walking bit at 100/5 = 20 Hz per
+/  column; measured live it is exactly that, 5,785 IOA writes in 59.4 s
+/  cycling 10 20 40 80 08.  Bits 1 and 2 are separate: 0x05F9 masks 0x43
+/  with 0x06 and sets them from two down-counters (IRAM 0x29/0x2A, loaded
+/  by the 0xA4/0xA8 immediate commands) every 8 ticks, i.e. two pulsed
+/  outputs -- COUNTER 1 and COUNTER 2, or the two coin inhibits.
+/
+/  Sport 2000 has the same connectors but does not use them: it writes IOA
+/  exactly once, at 0x0485 from the boot path with IRAM 0x41 = 0x07, and
+/  never reads IOB at all (measured: 1 IOA write and 0 IOB reads in 60 s).
+/  Its coin door and switch matrix are on the CPU board instead.
+/
+/  What was here before -- IOA -> coreGlobals.tmpLampMatrix[0] and IOB <-
+/  coreGlobals.swMatrix[0]/[1] -- is a MAME placeholder and is wrong twice
+/  over.  tmpLampMatrix[0] IS lamp column 0 (ic20_pb_w fills it through
+/  core_setLamp), so on Mephisto the column strobe overwrote that column
+/  100 times a second with 08/10/20/40/80; and feeding the playfield
+/  switch matrix back in as the audio board's rows put phantom closures on
+/  its coin and keypad inputs.  Neither game's audio board drives a lamp.
+/
+/  IOB now reads 0xFF, i.e. no closure.  The rows sit on the 10K pull-up
+/  networks AR1-AR4 and the columns are driven through IC6, a ULN2064
+/  Darlington array, so a closure pulls a row LOW; MAME's own mephisto
+/  driver returns 0xFF here for the same reason.  [INFERRED] -- the row
+/  polarity is read off the part types, not off a traced net, and nothing
+/  in either firmware consumes XRAM 0x0074-0x0078, so no behaviour
+/  distinguishes 0x00 from 0xFF today.
+/----------------------------------------------------------------------*/
+static READ_HANDLER(ay8910_porta_r)   { return locals.ayPortA; }
+static READ_HANDLER(ay8910_portb_r)   { return 0xff; }
+static WRITE_HANDLER(ay8910_porta_w)  { locals.ayPortA = data; }
+static WRITE_HANDLER(ay8910_portb_w)  { }
 
 static void ym3812_irq(int irq) {
   cpu_set_irq_line(1, 0, irq ? ASSERT_LINE : CLEAR_LINE);
