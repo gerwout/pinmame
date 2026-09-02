@@ -535,9 +535,52 @@ static INTERRUPT_GEN(SLEIC_irq_i8039) {
 /-----------------------------------------------------------------------------------*/
 #define IOMOON_DMD_STAGE 0x70000 /* 7000:0000 = display plane 0 (MSB); plane 1 at +0x200 */
 
+/* debug: SLEIC_DMD_CAP=<dir> -- write every submitted frame to an EXISTING directory as
+ * a pair of files, so a headless run can be checked against the ROM and against the real
+ * machine without any tooling in the loop:
+ *
+ *   <dir>/NNNNN.bin   the raw 1 KB staging buffer exactly as the panel would scan it --
+ *                     512 bytes of plane 0 followed by 512 bytes of plane 1.  This is
+ *                     what a ROM comparison wants: an animation frame reaches segment
+ *                     7000 unaltered, so plane 0 can be searched for verbatim in the
+ *                     graphics ROM (F2/F13).
+ *   <dir>/NNNNN.pgm   the composited grid as binary P5 grey, levels 0..3 scaled to
+ *                     0/85/170/255, which any image viewer opens.
+ *
+ *   SLEIC_DMD_CAPFROM=n   skip the first n submitted frames (default 0)
+ *   SLEIC_DMD_CAPN=n      stop after n written frames (default 2000)
+ *
+ * Unset SLEIC_DMD_CAP = no-op, and the getenv is done once */
+static void iomoon_dmd_capture(const UINT8 *frame, const UINT8 *raw) {
+  static int probe = -1, from, limit, seq, written;
+  static const char *dir;
+  char fn[512];
+  FILE *fp;
+  int i;
+  if (probe < 0) {
+    const char *e;
+    dir   = getenv("SLEIC_DMD_CAP");
+    probe = dir ? 1 : 0;
+    e = getenv("SLEIC_DMD_CAPFROM"); from  = e ? (int)strtol(e, NULL, 10) : 0;
+    e = getenv("SLEIC_DMD_CAPN");    limit = e ? (int)strtol(e, NULL, 10) : 2000;
+  }
+  if (!probe) return;
+  if (seq++ < from || written >= limit) return;
+  written++;
+  snprintf(fn, sizeof fn, "%s/%05d.bin", dir, seq - 1);
+  if ((fp = fopen(fn, "wb"))) { fwrite(raw, 1, 0x400, fp); fclose(fp); }
+  snprintf(fn, sizeof fn, "%s/%05d.pgm", dir, seq - 1);
+  if ((fp = fopen(fn, "wb"))) {
+    fprintf(fp, "P5\n128 32\n255\n");
+    for (i = 0; i < 128 * 32; i++) fputc(frame[i] * 85, fp);
+    fclose(fp);
+  }
+}
+
 static void iomoon_submit_dmd_frame(void) {
   const UINT8 * const stage = memory_region(SLEIC_MEMREG_CPU) + IOMOON_DMD_STAGE;
   sleic_build_dmd_frame(locals.rawDMD, stage, stage + 0x200, 0x10);
+  iomoon_dmd_capture(locals.rawDMD, stage); /* debug: SLEIC_DMD_CAP */
   core_dmd_submit_frame(core_gameData->lcdLayout->importedLayout ? core_gameData->lcdLayout->importedLayout : core_gameData->lcdLayout, locals.rawDMD, 1);
 }
 
