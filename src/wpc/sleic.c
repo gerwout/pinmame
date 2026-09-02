@@ -560,13 +560,17 @@ static INTERRUPT_GEN(SLEIC_interface_update) {
     if (probe < 0) probe = getenv("SLEIC_PROBE_IRQ") ? 1 : 0;
     if (probe && (locals.vblankCount % 100) == 0) {
       const double secs = locals.vblankCount / (double)Machine->drv->frames_per_second;
+      /* debug: Task 11 soak -- taken and lost added alongside the existing sent (nmi)
+       * count, so a long unattended run's J1 health is visible from this one periodic
+       * line without needing the scenario-specific probes' end-of-run summaries */
       fprintf(stderr, "[irq] frame %4d  timer0 req=%5d ack=%5d (%5.1f/s)  "
-                      "INT0 req=%5d ack=%5d (%5.1f/s)  in-ISR=%4.1f%%  nmi=%d\n",
+                      "INT0 req=%5d ack=%5d (%5.1f/s)  in-ISR=%4.1f%%  "
+                      "J1 sent=%d taken=%d lost=%d\n",
               locals.vblankCount,
               iomoon_irq_req[0], iomoon_irq_ack[0], iomoon_irq_ack[0] / secs,
               iomoon_irq_req[1], iomoon_irq_ack[1], iomoon_irq_ack[1] / secs,
               iomoon_probe_ticks ? 100.0 * iomoon_probe_busy / iomoon_probe_ticks : 0.0,
-              iomoon_probe_nmis);
+              iomoon_probe_nmis, iomoon_j1_taken, iomoon_probe_nmis - iomoon_j1_taken);
     }
   }
 
@@ -1130,6 +1134,10 @@ static struct {
  * where = 0 the Z80 strobed it, where = 1 the 80188's NMI took it out of the latch */
 static void iomoon_swprobe_j1(UINT8 byte, int where);
 
+/* debug: SLEIC_PROBE_SWBURST -- Task 11 scenario 2, the same two hook points, defined with
+ * the probe further down */
+static void iomoon_swburst_j1(UINT8 byte, int where);
+
 /* debug: SLEIC_PROBE_J1 -- one line per byte in either direction, both ends named */
 static void iomoon_j1_trace(const char *dir, UINT8 byte) {
   static int probe = -1;
@@ -1193,6 +1201,7 @@ static READ_HANDLER(sleic2_periph_r) {
       if (iomoon_j1.latchFull) {
         iomoon_j1_taken++;                            /* debug: SLEIC_PROBE_IRQ */
         iomoon_swprobe_j1(iomoon_j1.latch, 1);        /* debug: SLEIC_PROBE_SW  */
+        iomoon_swburst_j1(iomoon_j1.latch, 1);        /* debug: SLEIC_PROBE_SWBURST */
       }
       iomoon_j1.latchFull = 0;
       return iomoon_j1.latch;
@@ -1617,6 +1626,17 @@ static READ_HANDLER(iomoon_z80_read) {
     case 0x03: /* cabinet inputs -> swMatrix[9], active low */
       return (UINT8)~coreGlobals.swMatrix[9];
     case 0x04: /* cabinet/config byte; swMatrix[10] pulls a bit low when closed */
+      /* debug: SLEIC_PROBE_PORT04B5 -- Task 11 scenario 4.  IOMOON_PORT04_IDLE bit 5 can
+       * only ever be LOWERED by swMatrix[10] (the read is an AND), never raised, so there
+       * is no way to reach command-0xED's other branch (2BEB's fall-through into the
+       * trough/eject loop, sub_2CFB, which F5's own comment says answers 0x46 once the
+       * trough closes) by pressing anything.  This is the one place that can force it, to
+       * see what that branch actually does under emulation with no trough model.  OFF by
+       * default: bit 5 = 0 is the only state IOMOON_PORT04_IDLE claims to model */
+      { static int probe = -1;
+        if (probe < 0) probe = getenv("SLEIC_PROBE_PORT04B5") ? 1 : 0;
+        if (probe) return (UINT8)((IOMOON_PORT04_IDLE | 0x20) & ~coreGlobals.swMatrix[10]);
+      }
       return (UINT8)(IOMOON_PORT04_IDLE & ~coreGlobals.swMatrix[10]);
     default:
       logerror("iomoon Z80 read port %02x\n", offset);
@@ -1648,6 +1668,7 @@ static WRITE_HANDLER(iomoon_z80_write) {
           iomoon_probe_nmis++; /* debug: SLEIC_PROBE_IRQ */
           iomoon_j1_trace("Z80->188", iomoon_j1.latch); /* debug: SLEIC_PROBE_J1 */
           iomoon_swprobe_j1(iomoon_j1.latch, 0);        /* debug: SLEIC_PROBE_SW */
+          iomoon_swburst_j1(iomoon_j1.latch, 0);        /* debug: SLEIC_PROBE_SWBURST */
           cpu_set_irq_line(SLEIC_MAIN_CPU, IRQ_LINE_NMI, PULSE_LINE); /* handler D000:016D */
         }
       }
@@ -1958,6 +1979,258 @@ static void iomoon_swprobe_frame(void) {
   }
 }
 
+/*-------------------------------------------------------------------------------------
+/  Io Moon (SLEIC2) J1-under-load stress probes -- Task 11.  SLEIC_PROBE_SW above answers
+/  "does a single contact's code arrive"; these two answer "does the arbitration-free J1
+/  channel (one latch, one flow-control bit -- F6) survive many things happening at once."
+/  Both hook the exact same two points as the tripwire in iomoon_z80_write case 0x01 and
+/  the taken-count in sleic2_periph_r case 0x100, so a lost byte here fires the identical
+/  log line a one-code sweep would.
+/-----------------------------------------------------------------------------------*/
+
+/* debug: SLEIC_PROBE_SWBURST -- overlapping multi-switch stress.  Several contacts across
+ * the whole F5 code map are pressed and released in overlapping, staggered windows (1-4 at
+ * once, out of IOMOON_SWB_SLOTS concurrent slots) while ordinary attract traffic keeps
+ * running in both J1 directions.  It does not arm-and-watch one code like SLEIC_PROBE_SW;
+ * it tallies sent/taken per code from every byte that passes either hook while it is on,
+ * so overlapping presses are scored correctly even though several are in flight together.
+ *
+ * SLEIC_PROBE_MENU (below) runs this concurrently to supply "other codes" while the menu
+ * is open; when that env var is present the walk is restricted to the 48 matrix entries
+ * (indices 0-47), skipping the two cabinet entries (0x3E/0x40, 48-49) so it cannot trample
+ * the menu's own 0x3F-open / flipper / START presses.
+ *
+ *   SLEIC_PROBE_SWBURST         run it
+ *   SLEIC_PROBE_SWBURSTAT=n     first press at frame n (default 900)
+ *   SLEIC_PROBE_SWBURSTROUNDS   full passes over the table (default 10, ~500 presses)
+ *   SLEIC_PROBE_SWBURSTHOLD     base hold in frames, +0-2 random (default 3) */
+#define IOMOON_SWB_SLOTS 4
+static struct {
+  int on, started, at, rounds, hold, matrixOnly, baselined;
+  int walk, events, doneAt;
+  int slotIdx[IOMOON_SWB_SLOTS], slotTimer[IOMOON_SWB_SLOTS];
+  int sent[IOMOON_SWP_ENTRIES], taken[IOMOON_SWP_ENTRIES];
+  int sentBase, takenBase;
+  unsigned rng;
+} iomoon_swb; //!!
+
+static unsigned iomoon_swb_rand(void) {
+  unsigned x = iomoon_swb.rng;
+  x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+  iomoon_swb.rng = x;
+  return x;
+}
+
+/* J1 code -> entry index, built once so the hooks can score an overlapping press without
+ * knowing which slot it came from */
+static signed char iomoon_swb_lut[256]; //!!
+static int iomoon_swb_lutReady; //!!
+static void iomoon_swb_buildLut(void) {
+  int i, r; UINT8 b, c;
+  for (i = 0; i < 256; i++) iomoon_swb_lut[i] = -1;
+  for (i = 0; i < IOMOON_SWP_ENTRIES; i++) {
+    iomoon_swprobe_entry(i, &r, &b, &c);
+    iomoon_swb_lut[c] = (signed char)i;
+  }
+  iomoon_swb_lutReady = 1;
+}
+
+static void iomoon_swburst_j1(UINT8 byte, int where) {
+  int idx;
+  if (!iomoon_swb.on) return;
+  idx = iomoon_swb_lut[byte];
+  if (idx < 0) return;
+  if (where) iomoon_swb.taken[idx]++; else iomoon_swb.sent[idx]++;
+}
+
+static void iomoon_swburst_release(int slot) {
+  int row; UINT8 bit, code;
+  iomoon_swprobe_entry(iomoon_swb.slotIdx[slot], &row, &bit, &code);
+  /* matrix rows self-clear every frame (the pf_keys loop in SWITCH_UPDATE, ahead of this
+   * probe in call order); the cabinet row (9) has nothing else touching it and needs an
+   * explicit release */
+  if (row == 9) coreGlobals.swMatrix[9] &= ~bit;
+}
+
+static void iomoon_swburst_frame(void) {
+  static int frame = 0;
+  int s, limit;
+  frame++;
+
+  if (!iomoon_swb.started) {
+    const char *e = getenv("SLEIC_PROBE_SWBURST");
+    const char *a = getenv("SLEIC_PROBE_SWBURSTAT");
+    const char *r = getenv("SLEIC_PROBE_SWBURSTROUNDS");
+    const char *h = getenv("SLEIC_PROBE_SWBURSTHOLD");
+    iomoon_swb.started = 1;
+    iomoon_swb.on     = e ? 1 : 0;
+    iomoon_swb.at     = a ? (int)strtol(a, NULL, 10) : 900;
+    iomoon_swb.rounds = r ? (int)strtol(r, NULL, 10) : 10;
+    iomoon_swb.hold   = h ? (int)strtol(h, NULL, 10) : 3;
+    if (iomoon_swb.hold < 1) iomoon_swb.hold = 1;
+    iomoon_swb.matrixOnly = getenv("SLEIC_PROBE_MENU") ? 1 : 0;
+    iomoon_swb.rng = 0xc0ffeeu;
+    for (s = 0; s < IOMOON_SWB_SLOTS; s++) iomoon_swb.slotIdx[s] = -1;
+  }
+  if (!iomoon_swb.on || iomoon_swb.doneAt) return;
+  if (frame < iomoon_swb.at) return;
+  if (!iomoon_swb_lutReady) iomoon_swb_buildLut();
+  if (!iomoon_swb.baselined) {
+    iomoon_swb.sentBase = iomoon_probe_nmis;
+    iomoon_swb.takenBase = iomoon_j1_taken;
+    iomoon_swb.baselined = 1;
+  }
+
+  limit = iomoon_swb.matrixOnly ? 48 : IOMOON_SWP_ENTRIES;
+
+  for (s = 0; s < IOMOON_SWB_SLOTS; s++) {
+    if (iomoon_swb.slotIdx[s] < 0) continue;
+    iomoon_swb.slotTimer[s]--;
+    if (iomoon_swb.slotTimer[s] <= 0) {
+      iomoon_swburst_release(s);
+      iomoon_swb.slotIdx[s] = -1;
+    }
+  }
+
+  if (iomoon_swb.events < iomoon_swb.rounds * limit) {
+    int free = 0, n;
+    for (s = 0; s < IOMOON_SWB_SLOTS; s++) if (iomoon_swb.slotIdx[s] < 0) free++;
+    /* fill 1..free new slots THIS frame -- sometimes several at once (the "2-4 switches in
+     * one frame" case), sometimes one (the "adjacent frame" case, since the other slots'
+     * timers keep counting down independently) */
+    n = free > 0 ? 1 + (int)(iomoon_swb_rand() % (unsigned)free) : 0;
+    for (s = 0; s < IOMOON_SWB_SLOTS && n > 0; s++) {
+      int row; UINT8 bit, code;
+      if (iomoon_swb.slotIdx[s] >= 0) continue;
+      iomoon_swb.walk = (iomoon_swb.walk + 1) % limit;
+      iomoon_swprobe_entry(iomoon_swb.walk, &row, &bit, &code);
+      coreGlobals.swMatrix[row] |= bit;
+      iomoon_swb.slotIdx[s] = iomoon_swb.walk;
+      iomoon_swb.slotTimer[s] = iomoon_swb.hold + (int)(iomoon_swb_rand() % 3);
+      iomoon_swb.events++;
+      n--;
+    }
+  }
+
+  if ((frame % 200) == 0)
+    fprintf(stderr, "[swburst] frame %d  events=%d  J1 sent(delta)=%d taken(delta)=%d\n",
+            frame, iomoon_swb.events, iomoon_probe_nmis - iomoon_swb.sentBase,
+            iomoon_j1_taken - iomoon_swb.takenBase);
+
+  if (iomoon_swb.events >= iomoon_swb.rounds * limit && !iomoon_swb.doneAt) {
+    int i, lost = 0, quiet = 0;
+    for (s = 0; s < IOMOON_SWB_SLOTS; s++) {
+      if (iomoon_swb.slotIdx[s] < 0) continue;
+      iomoon_swburst_release(s);
+      iomoon_swb.slotIdx[s] = -1;
+    }
+    iomoon_swb.doneAt = frame;
+    fprintf(stderr, "[swburst] done at frame %d: %d overlapping presses issued over %d "
+                    "codes; global J1 strobed(delta)=%d taken(delta)=%d\n",
+            frame, iomoon_swb.events, limit,
+            iomoon_probe_nmis - iomoon_swb.sentBase, iomoon_j1_taken - iomoon_swb.takenBase);
+    for (i = 0; i < limit; i++) {
+      int r2; UINT8 b2, c2;
+      iomoon_swprobe_entry(i, &r2, &b2, &c2);
+      if (c2 == 0x13 || (c2 >= 0x38 && c2 <= 0x3b)) continue; /* dead positions, F5 */
+      if (iomoon_swb.sent[i] == 0) quiet++;
+      else if (iomoon_swb.taken[i] != iomoon_swb.sent[i]) {
+        lost++;
+        fprintf(stderr, "[swburst] code %02X: LOST -- sent %d taken %d\n", c2,
+                iomoon_swb.sent[i], iomoon_swb.taken[i]);
+      }
+    }
+    fprintf(stderr, "[swburst] per-code: %d codes silent (firmware-gated, unchanged from "
+                    "SLEIC_PROBE_SW), %d LOST\n", quiet, lost);
+  }
+}
+
+/* debug: SLEIC_PROBE_MENU -- service menu under concurrent traffic.  Opens the menu with
+ * the F5/F14 code 0x3F (cabinet bit 1), then presses the three codes F5 marks "test mode
+ * only" -- 0x41/0x42 (the flipper inputs, cabinet bits 3/2) and 0x40 (START, cabinet bit
+ * 4) -- in rotation, while SLEIC_PROBE_SWBURST (if also set) keeps the 48 matrix codes
+ * cycling in the background. It watches the 80188's OWN menu-item index (413C:015A = flat
+ * 0x4151A, DD2F1/DD308's AX) and the Z80 test-mode flag C068, and prints every change.
+ *
+ * It does NOT assert what 0x41/0x42/0x40 mean navigationally -- F14's disposition rejects
+ * three earlier navigation guesses ("0x3F = select", Bike-Race-style scroll/select, "0x33
+ * opens the menu") without offering a replacement, and F14 only establishes that each menu
+ * item "waits for ANY inbound byte." This probe reports what the index does in response,
+ * not what it is supposed to mean.
+ *
+ *   SLEIC_PROBE_MENU        run it
+ *   SLEIC_PROBE_MENUAT=n    open the menu at frame n (default 900)
+ *   SLEIC_PROBE_MENUWIN=n   frames to hold the menu open and watch it (default 8000) */
+static struct {
+  int on, started, at, winFrames, windowEnd, openT, active, done;
+  int navTimer, changes;
+  UINT16 lastIndex;
+  UINT8 lastC068;
+} iomoon_menu; //!!
+
+static void iomoon_menu_frame(void) {
+  static int frame = 0;
+  frame++;
+
+  if (!iomoon_menu.started) {
+    const char *e = getenv("SLEIC_PROBE_MENU");
+    const char *a = getenv("SLEIC_PROBE_MENUAT");
+    const char *w = getenv("SLEIC_PROBE_MENUWIN");
+    iomoon_menu.started = 1;
+    iomoon_menu.on        = e ? 1 : 0;
+    iomoon_menu.at        = a ? (int)strtol(a, NULL, 10) : 900;
+    iomoon_menu.winFrames = w ? (int)strtol(w, NULL, 10) : 8000;
+  }
+  if (!iomoon_menu.on || iomoon_menu.done) return;
+
+  if (!iomoon_menu.active) {
+    if (frame < iomoon_menu.at) return;
+    if (iomoon_menu.openT < 6) {
+      coreGlobals.swMatrix[9] |= 0x02; /* cabinet bit 1 -> code 0x3F, opens the menu (F14) */
+      iomoon_menu.openT++;
+      return;
+    }
+    iomoon_menu.active = 1;
+    iomoon_menu.windowEnd = frame + iomoon_menu.winFrames;
+    iomoon_menu.lastIndex = (UINT16)(cpu_readmem20(0x4151a) | (cpu_readmem20(0x4151b) << 8));
+    iomoon_menu.lastC068  = cpunum_read_byte(SLEIC_IO_CPU, 0xc068);
+    fprintf(stderr, "[menu] opened at frame %d: C068=%02X index=%d\n",
+            frame, iomoon_menu.lastC068, iomoon_menu.lastIndex);
+    return;
+  }
+
+  /* Rotate the four codes DD501's own dispatch (one concrete item handler, sub_DD480)
+   * range-checks together -- 0x3F, 0x40 (START), 0x41 (L-flip), 0x42 (R-flip) -- so this
+   * covers the exact set at least one record type reads, not a guess at what they mean */
+  { static const UINT8 navBits[4] = {0x02, 0x10, 0x08, 0x04}; /* 0x3F, 0x40, 0x41, 0x42 */
+    const int phase = iomoon_menu.navTimer % 40;
+    const int which = (iomoon_menu.navTimer / 40) % 4;
+    if (phase < 6) coreGlobals.swMatrix[9] |= navBits[which];
+    iomoon_menu.navTimer++;
+  }
+
+  { const UINT16 idx = (UINT16)(cpu_readmem20(0x4151a) | (cpu_readmem20(0x4151b) << 8));
+    const UINT8 c68  = cpunum_read_byte(SLEIC_IO_CPU, 0xc068);
+    if (idx != iomoon_menu.lastIndex || c68 != iomoon_menu.lastC068) {
+      fprintf(stderr, "[menu] frame %d: index %d -> %d  C068 %02X -> %02X\n",
+              frame, iomoon_menu.lastIndex, idx, iomoon_menu.lastC068, c68);
+      iomoon_menu.changes++;
+      if (iomoon_menu.lastC068 && !c68)
+        fprintf(stderr, "[menu] exited at frame %d after %d observed changes\n",
+                frame, iomoon_menu.changes);
+      iomoon_menu.lastIndex = idx;
+      iomoon_menu.lastC068  = c68;
+    }
+  }
+
+  if (frame >= iomoon_menu.windowEnd) {
+    iomoon_menu.done = 1;
+    fprintf(stderr, "[menu] window closed at frame %d: %d observed index/flag changes, "
+                    "final C068=%02X index=%d\n",
+            frame, iomoon_menu.changes, iomoon_menu.lastC068, iomoon_menu.lastIndex);
+  }
+}
+
 static SWITCH_UPDATE(SLEIC2) {
   unsigned i;
   if (inports) {
@@ -1988,6 +2261,8 @@ static SWITCH_UPDATE(SLEIC2) {
       coreGlobals.swMatrix[iomoon_pf_keys[i].col] &= ~iomoon_pf_keys[i].bit;
   }
   iomoon_swprobe_frame(); /* debug: SLEIC_PROBE_SW */
+  iomoon_swburst_frame(); /* debug: SLEIC_PROBE_SWBURST -- Task 11 scenario 2 */
+  iomoon_menu_frame();    /* debug: SLEIC_PROBE_MENU -- Task 11 scenario 3 */
 }
 
 /* Bike Race (SLEIC3) playfield-matrix test keys. The 40 matrix positions (Z80 switch
