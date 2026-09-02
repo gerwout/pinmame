@@ -1758,6 +1758,7 @@ static struct {
   int   solEdges;    /* driver-latch writes that changed the latch                       */
   int   badStrobe;   /* 0x83 writes that were not a single bit in 0x01..0x80             */
   int   unpaired;    /* 0x83 strobes with no 0x84 since the previous strobe              */
+  int   boots;       /* 0x83 <- 0x00, i.e. boot_port_init: power-on + every Z80 reboot   */
   int   rowPending;  /* a 0x84 has been seen since the last 0x83                         */
   int   firstFrame, lastReport;
   UINT8 lamp[8];     /* last byte committed per column, for edge detection               */
@@ -1801,11 +1802,11 @@ static void iomoon_probe_lamp_report(void) {
    * "the decode is broken" */
   fprintf(stderr, "[lamp] frame %5d  tmp %s(%2d lit)  core %s(%2d lit)  sol=%04X core=%08X"
                   "  writes 83=%d 84=%d 85=%d 86=%d  col changes=%d  sol edges=%d"
-                  "  Z80 C068=%02X C06A=%02X\n",
+                  "  boots=%d  Z80 C068=%02X C06A=%02X\n",
           locals.vblankCount, tmp, litTmp, cor, litCor,
           (unsigned)(locals.solenoids & 0xffff), (unsigned)coreGlobals.solenoids,
           iomoon_lp.w[0], iomoon_lp.w[1], iomoon_lp.w[2], iomoon_lp.w[3],
-          iomoon_lp.changes, iomoon_lp.solEdges,
+          iomoon_lp.changes, iomoon_lp.solEdges, iomoon_lp.boots,
           cpunum_read_byte(SLEIC_IO_CPU, 0xc068), cpunum_read_byte(SLEIC_IO_CPU, 0xc06a));
 }
 
@@ -1851,6 +1852,21 @@ static void iomoon_probe_lamp_row(void) {
   if (!iomoon_lp.on) return;
   iomoon_lp.w[1]++;
   iomoon_lp.rowPending = 1;
+}
+
+/* Hook for a 0x83 write of ZERO, which the commit path skips.  The only site in the I/O
+ * ROM that writes 0x00 to the lamp column strobe is boot_port_init 0433 -- the eight
+ * lamp_colN_out routines write 0x01..0x80 -- so this counts exactly one event: the I/O
+ * board running its boot path.  That happens at power-on and again on every Z80 REBOOT,
+ * which is what command 0xF8 does (2DD9: clear C068, DI, JP boot).  Worth counting
+ * because a reboot silently re-initialises everything this task decodes: both driver
+ * latches back to 0xFF and every lamp column back to 0x00 */
+static void iomoon_probe_lamp_boot(void) {
+  iomoon_probe_lamp_init();
+  if (!iomoon_lp.on) return;
+  iomoon_lp.boots++;
+  fprintf(stderr, "[lamp] frame %5d  I/O board boot_port_init #%d (0x83 <- 00): lamp columns "
+                  "and both driver latches re-initialised\n", locals.vblankCount, iomoon_lp.boots);
 }
 
 /* Hook for the 0x85 / 0x86 driver latches, called with the RAW (active-low) byte, so
@@ -1913,6 +1929,7 @@ static WRITE_HANDLER(iomoon_z80_write) {
       if (data) { const unsigned col = core_BitColToNum(data & -data);
                   coreGlobals.tmpLampMatrix[col] = sleic_io.lampRow;
                   iomoon_probe_lamp_commit(data, col, sleic_io.lampRow); } /* debug: SLEIC_PROBE_LAMP */
+      else iomoon_probe_lamp_boot();                                       /* debug: SLEIC_PROBE_LAMP */
       break;
     case 0x04: /* port 0x84: lamp-matrix ROW data, ACTIVE HIGH -- no inversion.  The byte is
                 * one of C10F..C116, which sub_353A fills either verbatim from the "lit" bank
