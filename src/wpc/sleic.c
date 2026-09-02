@@ -2676,9 +2676,11 @@ static void iomoon_menu_frame(void) {
 /      Steps per second is the FM tick rate MEASURED rather than assumed, and F8 predicts
 /      it is INT0/2 = IOMOON_INT0_HZ/2 = 36.25 Hz here;
 /    * fm_song_select firing, taken from the firmware's own player state rather than
-/      inferred: [4000:12EA] is the stream pointer and it is written with a raw table entry
-/      only by fm_song_select, so sampling it at IOMOON_IRQ_TICK_HZ and matching against
-/      the CS:0DE5 table (read out of the emulated ROM, not hard-coded) names the song.
+/      inferred: the enable byte [4000:12EE] going 00 -> FF is the one thing only
+/      fm_song_select does, and the stream pointer [4000:12EA] read on that edge names the
+/      song against the CS:0DE5 table (read out of the emulated ROM, not hard-coded).  The
+/      pointer alone would NOT do -- the streams' 0xDD jumps land on each other's start
+/      offsets; see the sampler for why that matters and how the alias is still reported.
 /
 /  It also prints the two bytes that decide whether music can happen at all -- the mode
 /  byte 413C:014F (F11: 1 attract, 2 coined, 3 game started) and the credit counter
@@ -2705,6 +2707,7 @@ static struct {
   int    haveTbl;
   UINT16 lastPtr;
   UINT8  reg, haveReg, lastEnable, lastMode, lastCredits, sampled;
+  UINT8  lastSampleEnable; /* [12EE] as the 2 kHz sampler last saw it (song-start edge) */
 } iomoon_ymp; //!!
 
 static void iomoon_ym_probe_init(void) {
@@ -2756,33 +2759,58 @@ static void iomoon_ym_probe_w(int port, UINT8 data) {
 }
 
 /* Sampled from iomoon_irq_gen at IOMOON_IRQ_TICK_HZ, where the 80188 is the active CPU.
- * Fast enough to be exact: fm_song_select writes the raw table entry to [12EA] and the
- * sequencer cannot advance it until the next INT0 odd branch, tens of ticks later */
+ *
+ * A table-matching stream pointer is NOT on its own a song start, and assuming it was
+ * would have made this probe wrong in exactly the case it exists for.  The sequencer's
+ * jump opcode 0xDD (D0D92) writes an arbitrary offset into [12EA], and the streams
+ * genuinely loop back onto each other's start offsets -- song 1's jump targets include
+ * 0x1662, 0x29FA and 0x2C8E, which are songs 2, 8 and 9 in the CS:0DE5 table -- so a
+ * pointer match alone would report three phantom song changes per lap of one real song.
+ * And the pointer then SITS at that value for the whole tick (~27 ms, tens of samples),
+ * so the alias is not even transient.
+ *
+ * What only fm_song_select does (D0DB4) is bracket the pointer write with the enable
+ * byte: [12EE] = 0 first (D0DC5), the table entry into [12EA], then [12EE] = 0xFF last
+ * (D0DDC).  A 0xDD jump never touches [12EE].  So the trigger here is the enable byte's
+ * 00 -> FF edge, and the pointer is only used to NAME the song at that moment.
+ *
+ * Residual, stated rather than hidden: a song-to-song switch disables and re-enables
+ * inside about 4 us of one short routine, so a sample landing in that window (~1 in 125
+ * at 2 kHz) sees FF -> FF and the start goes unnamed.  That case still shows up, as the
+ * "loop or jump" line below, so nothing is silently lost */
 static void iomoon_ym_probe_sample(void) {
   UINT16 ptr;
+  UINT8  enable;
+  int    i, song = -1;
   iomoon_ym_probe_init();
   if (!iomoon_ymp.on) return;
   if (!iomoon_ymp.haveTbl) {
-    int i;
     for (i = 0; i < 10; i++)
       iomoon_ymp.songTbl[i] = (UINT16)(cpu_readmem20(IOMOON_FM_SONGTBL + 2*i) |
                                       (cpu_readmem20(IOMOON_FM_SONGTBL + 2*i + 1) << 8));
     iomoon_ymp.haveTbl = 1;
   }
-  ptr = (UINT16)(cpu_readmem20(IOMOON_FM_PTR) | (cpu_readmem20(IOMOON_FM_PTR + 1) << 8));
-  if (ptr != iomoon_ymp.lastPtr) {
-    int i;
-    for (i = 0; i < 10; i++) if (ptr == iomoon_ymp.songTbl[i]) {
-      iomoon_ymp.songStarts++;
-      iomoon_ymp.curSong = i;
-      fprintf(stderr, "[ym] t=%8.4f  fm_song_select(%d): stream CS:%04X, player enable=%02X"
-                      "  (mode=%d credits=%d)\n",
-              timer_get_time(), i, ptr, cpu_readmem20(IOMOON_FM_ENABLE),
-              cpu_readmem20(IOMOON_MODE_BYTE), cpu_readmem20(IOMOON_CREDIT_BYTE));
-      break;
-    }
-    iomoon_ymp.lastPtr = ptr;
+  ptr    = (UINT16)(cpu_readmem20(IOMOON_FM_PTR) | (cpu_readmem20(IOMOON_FM_PTR + 1) << 8));
+  enable = cpu_readmem20(IOMOON_FM_ENABLE);
+  for (i = 0; i < 10; i++) if (ptr == iomoon_ymp.songTbl[i]) { song = i; break; }
+
+  if (enable == 0xff && iomoon_ymp.lastSampleEnable != 0xff) {   /* fm_song_select fired */
+    iomoon_ymp.songStarts++;
+    iomoon_ymp.curSong = song;                                   /* -1 = no table match  */
+    fprintf(stderr, "[ym] t=%8.4f  fm_song_select(%d): stream CS:%04X, player enable=%02X"
+                    "  (mode=%d credits=%d)\n",
+            timer_get_time(), song, ptr, enable,
+            cpu_readmem20(IOMOON_MODE_BYTE), cpu_readmem20(IOMOON_CREDIT_BYTE));
   }
+  else if (song >= 0 && ptr != iomoon_ymp.lastPtr && enable == 0xff) {
+    /* the aliasing case, reported as what it is: the running song jumped to an offset
+     * that happens to be another song's start, almost certainly its own 0xDD loop */
+    fprintf(stderr, "[ym] t=%8.4f  stream pointer -> CS:%04X while song %d plays"
+                    " (0xDD loop or jump; CS:%04X is also song %d's start)\n",
+            timer_get_time(), ptr, iomoon_ymp.curSong, ptr, song);
+  }
+  iomoon_ymp.lastPtr = ptr;
+  iomoon_ymp.lastSampleEnable = enable;
 }
 
 /* Called once a frame from SWITCH_UPDATE(SLEIC2): the periodic summary, plus the two
