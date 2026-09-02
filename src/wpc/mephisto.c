@@ -13,6 +13,10 @@
 
 static struct {
   int   lampCol;        /* IC20 PA4-6 -> IC29 (7445) -> lamp columns LC0-LC7 */
+  int   lampSel;        /* a lamp column has just been selected and the row
+                           byte for it has not arrived yet -- see ic20_pb_w */
+  int   lampPrev;       /* last lamp column that actually received row data,
+                           so the sweep wrap can be spotted in ic20_pb_w */
   int   swCol;          /* IC20 PA0-3 -> IC30 (7445) -> switch columns CC0-CC9 */
   UINT8 shiftFrame[8];  /* one pass through the 4094 display chain, 6 or 8
                            bytes long -- see cirsa_frameLen() */
@@ -23,7 +27,7 @@ static struct {
   /*-- phase 0 instrumentation state --*/
   int   lastrep;
   char  lastline[192];
-  UINT8 qcState;        /* live quick-contact inputs, swMatrix[12] bits 0-4 */
+  UINT8 qcState;        /* live quick-contact inputs, swMatrix[12] bits 0-7 */
   UINT8 qcLatch;        /* IC11 (74LS373) held value, read back on IC9 PB */
   int   qcTransparent;  /* IC9 PC5 high -> latch follows input */
   UINT8 sndToSnd;       /* last byte the MUART sent, latched for the 8051 */
@@ -971,20 +975,79 @@ static const I8256interface cirsa_i8256 = {
 /----------------------------------------------------------------------*/
 static WRITE_HANDLER(ic20_pa_w) {
   int col = (data >> 4) & 0x07;
-  /* The lamp columns are strobed 0..7 in order and each one is blanked
-     again before the next is selected, so accumulate a whole sweep and
-     latch it when the sweep wraps.  Latching on the video frame instead
-     chops the sweep and drops whichever columns straddle the boundary. */
-  if (col == 0 && locals.lampCol != 0) {
-    memcpy((void *)coreGlobals.lampMatrix, (void *)coreGlobals.tmpLampMatrix,
-           sizeof(coreGlobals.tmpLampMatrix));
-    memset((void *)coreGlobals.tmpLampMatrix, 0, sizeof(coreGlobals.tmpLampMatrix));
-  }
+  /* A change in PA4-6 re-points IC29, so the next Port B write is the row
+     byte for the newly selected column.  ic20_pb_w consumes that flag; the
+     sweep-wrap latch lives there too, because Mephisto passes through
+     column 0 on its way to every column (see below) and latching here
+     would fire eight times a sweep instead of once. */
+  if (col != locals.lampCol) locals.lampSel = 1;
   locals.swCol   = data & 0x0f;
   locals.lampCol = col;
 }
 
+/*-- IC20 Port B: the lamp rows, and why only one write per column counts --
+/  Both ROMs write Port B more than once per lamp column, and only the
+/  write that follows the column select carries lamp data.  Traced live
+/  with a temporary logerror in this handler (Sport 2000, one lamp lit in
+/  LAMP TEST 3-PHASE, cycle counts from activecpu_gettotalcycles64):
+/
+/    PA 5a  select column 5, PA7 low        cyc T
+/    PB xx  the row data          (0xB062)  T +     50
+/    PA da  PA7 back high         (0xB065)  T +     56
+/    PB 00  rows off              (0xB07B)  T +  8,220   <- fault test
+/    PB ff  ~"failed lamp" mask   (0xB093)  T +  8,317   <- fault test
+/    PB xx  the row data again    (0xB13C)  T +  8,877
+/    PB 00  rows off              (0xB03D)  T + 16,389   <- next pass
+/    PA 6a  select column 6                 T + 16,492
+/
+/  0xB06B's fault test samples MUART P10 with the rows off and then drives
+/  every not-yet-failed row for ~560 cycles.  With no failed lamps that
+/  mask is 0xFF, so on a healthy machine every column is handed 0xFF once
+/  per pass -- and core_setLamp ORs into tmpLampMatrix, so the old handler
+/  reported all 64 lamps on, permanently, whatever the game was doing.
+/  That is exactly what /api/info showed: FFFFFFFFFFFFFFFF, unchanging,
+/  with a single lamp selected in the ROM's own LAMP TEST.
+/
+/  The transient is real on the board but it is not a lit lamp: 560 cycles
+/  against the 8,220 a genuinely-driven row gets in the same slot, i.e. a
+/  15:1 duty ratio (0.43 % vs 6.3 % of the whole eight-column sweep).  A
+/  matrix of on/off bits cannot express that, so this handler takes the row
+/  byte the ROM sets up for the column and ignores the fault test's
+/  re-writes.  It does NOT special-case 0xFF -- a column legitimately
+/  driving all eight rows still reports all eight.
+/
+/  Mephisto (0x0FDE) writes Port B twice per column, and again only the
+/  second one is data:
+/
+/    PA xor 0x80   PA7 toggles, column unchanged        (0x0FDE)
+/    PB 00         rows off                             (0x0FE8)
+/    PA and 0x8F   column momentarily 0                 (0x0FF3)
+/    PA or  al     the real column                      (0x0FF8)
+/    PB xx         the row data                         (0x1000)
+/
+/  Its read-modify-write of PA is what forces the sweep-wrap latch to live
+/  here rather than in ic20_pa_w: 0x0FF3 drops the column field to 0 on the
+/  way to every column, so a "col == 0" test in the PA handler fired once
+/  per column, latching and clearing tmpLampMatrix eight times a sweep and
+/  leaving coreGlobals.lampMatrix holding a single column.  That is why
+/  Mephisto's game-start lamp state read 0000009C00000000 -- one non-zero
+/  byte -- rather than a whole matrix.  lampPrev tracks the last column
+/  that actually received data, so the wrap is detected on real sweeps
+/  only.
+/----------------------------------------------------------------------*/
 static WRITE_HANDLER(ic20_pb_w) {
+  if (!locals.lampSel) return;   /* a fault-test re-write, not lamp data */
+  locals.lampSel = 0;
+  /* The lamp columns are strobed 0..7 in order, so accumulate a whole
+     sweep and latch it when the sweep wraps.  Latching on the video frame
+     instead chops the sweep and drops whichever columns straddle the
+     boundary. */
+  if (locals.lampCol == 0 && locals.lampPrev != 0) {
+    memcpy((void *)coreGlobals.lampMatrix, (void *)coreGlobals.tmpLampMatrix,
+           sizeof(coreGlobals.tmpLampMatrix));
+    memset((void *)coreGlobals.tmpLampMatrix, 0, sizeof(coreGlobals.tmpLampMatrix));
+  }
+  locals.lampPrev = locals.lampCol;
   core_setLamp(coreGlobals.tmpLampMatrix, 1 << locals.lampCol, data);
 }
 
@@ -1167,7 +1230,7 @@ static WRITE_HANDLER(ic9_pa_w) {
 /  the falling edge, so PC5 high makes qcLatch follow qcState and the high-to-
 /  low edge freezes it.
 /
-/  coreGlobals.swMatrix[12] bits 0-4 carry the live contact state.  This is
+/  coreGlobals.swMatrix[12] bits 0-7 carry the live contact state.  This is
 /  NOT the ROM's own column numbering -- that was this driver's original,
 /  wrong argument (contacts sit at the ROM's event-table column 10, so
 /  "naturally" swMatrix[11]).  Quick contacts arrive over IC9 Port B, never
@@ -1279,8 +1342,27 @@ static SWITCH_UPDATE(CIRSA) {
 
 static INTERRUPT_GEN(cirsa_vblank) {
   core_updateSw(TRUE);
-  if (!core_gameData->hw.gameSpecific1) {
-    const UINT8 qc = coreGlobals.swMatrix[12] & 0x1f;
+  {
+    /* All EIGHT bits, and for BOTH games.  Each ROM numbers eight quick
+       contacts as switch-test elements 60-67 and reads them off IC9 Port B:
+       Sport 2000 through the event table at 0xD11E (offset 0x0A, bits 0-7),
+       whose SWITCH TEST reference table at 0x4F23 names them by IC21's J7
+       pins 03, 04, 07, 05, 08, 09, 06, 10; Mephisto through [0xDA], filled
+       at 0x103D and tested for elements 60-67 at 0x31F4.  Both were
+       measured live through their own SWITCH TEST after this widening:
+       swMatrix[12] bit N reads back as element 60+N, 8 of 8, on sport2k and
+       on mephisto/mephist1.
+
+       Two things were wrong here before.  The mask was 0x1f, so bits 5-7
+       (elements 65, 66, 67) could not be stimulated at all -- Sport 2000's
+       manual lists only five populated quick contacts, but the ROM carries
+       eight, exactly as it carries switch columns 8 and 9 that the manual
+       does not populate either.  And the whole update was gated on
+       hw.gameSpecific1, which left all eight of Mephisto's unreachable.
+
+       Nothing downstream widens with them: ic9_pa_w still ORs only bits 1-3
+       back into the coil bus, and still only for Sport 2000. */
+    const UINT8 qc = coreGlobals.swMatrix[12];
     if (qc != locals.qcState) {
       locals.qcState = qc;
       if (locals.qcTransparent) locals.qcLatch = qc;   /* '373 is transparent */
@@ -1676,28 +1758,36 @@ static core_tLCDLayout mephisto_disp[] = {
    free (CUSTOM) column, and hw.swCol == 1 is exactly what makes core.c's
    two CORE_STDSWCOLS+hw.swCol loops (core.c:2000, :2460) include it without
    going past CORE_MAXSWCOL -- 12+1=13, still inside the 16-entry array.
-   mephistoGameData stays at 0: Mephisto has no quick-contact path (gated
-   off by hw.gameSpecific1 in cirsa_vblank), so it needs no custom column. */
+   mephistoGameData now sets it to 1 as well.  Mephisto has the same eight
+   quick contacts on the same wires: its switch scan reads IC9 Port B into
+   [0xDA] at 0x103D, its SWITCH TEST element routine tests that byte for
+   elements 60-67 (0x31F4: `sub bx,0x3c / mov al,1 / rol al,cl / test
+   al,[0xda]`), and its level-2 ISR loads the same byte straight into the
+   group-0 coil byte at 0x14D0.  cirsa_vblank used to gate the qcState
+   update on hw.gameSpecific1, so those eight positions could not be
+   stimulated at all; both games share the path now.  Nothing changes
+   unless something writes swMatrix[12], which nothing does by default --
+   ic9_pb_r returns 0 either way. */
 /* hw.gameSpecific1 (7th field of the hw sub-struct: flippers, swCol, lampCol,
    custSol, soundBoard, display, gameSpecific1) is the Sport-2000-vs-Mephisto
-   switch: 0 = Sport 2000 (default), 1 = Mephisto/mephist1. It has four
-   consumers:
+   switch: 0 = Sport 2000 (default), 1 = Mephisto/mephist1.  Every remaining
+   consumer is a selector between two implemented paths -- none of them is
+   still a "write nothing, unestablished" gate:
 
      - cirsa_frameLen()'s frame length (8 bytes vs 6).
-     - cirsa_shift_frame()'s per-game selector -- the column-mask table,
-       and, since the display round, which segment-group mapping to write.
-       Both games are characterised now, so this is a selector between two
-       implemented paths, not a gate on an unimplemented one.
-     - ic9_pa_w's coil-bus GATE (still a gate: Mephisto's coil numbering is
-       not established, so it still writes nothing for Mephisto -- see the
-       comment there).
-     - cirsa_vblank's quick-contact GATE (Mephisto has no quick-contact
-       path modelled, see the comment just above mephistoGameData).
+     - cirsa_shift_frame()'s per-game selector -- the column-mask table and
+       which segment-group mapping to write.
+     - ic9_pa_w's coil-bus POSITION order, pos vs 7-pos.  Both orders are
+       measured; a1707f52 replaced the old gate with the per-game decode.
+     - ic9_pa_w's quick-contact OR into coils 1-3, which is a real Sport
+       2000-only hardware path.
+     - cirsa_readsnd/cirsa_writesnd's sound-ROM banking.
 
-   Two of the four remain genuine "write nothing, unestablished" gates
-   (ic9_pa_w, cirsa_vblank); the display round closed the third. */
+   The last two gates went in the matrix round: cirsa_vblank's quick-contact
+   gate (Mephisto has the same eight contacts on the same wires -- see just
+   above mephistoGameData) and, before it, the display one. */
 static core_tGameData cirsaGameData    = {0,cirsa_disp,{FLIP_SW(FLIP_L),1,8}};
-static core_tGameData mephistoGameData = {0,mephisto_disp,{FLIP_SW(FLIP_L),0,8,0,0,0,1}};
+static core_tGameData mephistoGameData = {0,mephisto_disp,{FLIP_SW(FLIP_L),1,8,0,0,0,1}};
 static void init_cirsa(void) {
   core_gameData = &cirsaGameData;
 }
