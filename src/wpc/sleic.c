@@ -336,9 +336,11 @@ static double iomoon_probe_int0_hz(void) {
 }
 
 static void iomoon_swprobe_sample(void); /* debug: SLEIC_PROBE_SW, defined with the probe */
+static void iomoon_ym_probe_sample(void); /* debug: SLEIC_PROBE_YM, defined with the probe */
 
 static INTERRUPT_GEN(iomoon_irq_gen) {
   iomoon_swprobe_sample(); /* debug: SLEIC_PROBE_SW -- watch the F5 switch-code shadow */
+  iomoon_ym_probe_sample(); /* debug: SLEIC_PROBE_YM -- watch the F8 FM player state */
 
   /* The panel raster is not an interrupt source and is deliberately serviced ahead of the
    * probe early-outs below: IC23 scans segment 7000 whatever the 80188 is doing, so the
@@ -1257,6 +1259,10 @@ static void iomoon_swprobe_j1(UINT8 byte, int where);
  * the probe further down */
 static void iomoon_swburst_j1(UINT8 byte, int where);
 
+/* debug: SLEIC_PROBE_YM -- Task 14, the two YM3812 port writes, defined with the probe
+ * further down.  port 0 = the index write at 0xA0280, port 1 = the value at 0xA0281 */
+static void iomoon_ym_probe_w(int port, UINT8 data);
+
 /* debug: SLEIC_PROBE_J1 -- one line per byte in either direction, both ends named */
 static void iomoon_j1_trace(const char *dir, UINT8 byte) {
   static int probe = -1;
@@ -1311,12 +1317,14 @@ static WRITE_HANDLER(sleic2_periph_w) {
                  * this one is the only one the Io Moon ROM supports, and F8 confirms these
                  * are the only two accesses to either address in the whole ROM */
       YM3812_control_port_0_w(0, data);
+      iomoon_ym_probe_w(0, data);       /* debug: SLEIC_PROBE_YM */
       return;
     case 0x281: /* PCS5 with A0 = 1: the YM3812's data port (F8).  The firmware's settling
                  * delay between the two writes (ym3812_settle_delay D0DA9, 10 iterations)
                  * is a real-chip timing requirement with no emulated equivalent -- the core
                  * accepts the pair back to back -- so nothing here waits */
       YM3812_write_port_0_w(0, data);
+      iomoon_ym_probe_w(1, data);       /* debug: SLEIC_PROBE_YM */
       return;
     default:                          /* PCS2, PCS3, PCS6 OKI */
 #ifdef DEBUG_SLEIC
@@ -2638,6 +2646,186 @@ static void iomoon_menu_frame(void) {
   }
 }
 
+/*-------------------------------------------------------------------------------------
+/  debug: SLEIC_PROBE_YM -- Task 14.  What a headless run can say about the F8 FM path,
+/  hooked at the two addresses the feature commit decodes, so it is SLEIC2-only by
+/  construction and costs one predictable branch per YM write when it is off.
+/
+/  The register stream is the ONE part of this that can be checked exactly rather than
+/  judged, because the sequencer is a byte interpreter over ROM: F8's stream format plus
+/  the CS:0DE5 song table say, byte for byte, what the chip must receive.  Song 0's whole
+/  stream is 27 pairs -- 43/44/45/4B/4C/4D/53/54/55 <- 3F (every carrier and modulator to
+/  maximum attenuation) then A0..A8 <- 00 and B0..B8 <- 00 (every channel to frequency
+/  zero, key off) -- followed by FF, and it carries no duration byte at all, so the whole
+/  thing is emitted inside ONE sequencer step.  That makes it a perfect end-to-end probe
+/  even though it is musically silent: it is the firmware's all-notes-off preamble, which
+/  is exactly what main_entry selects at D2FFA just before entering main_loop.
+/
+/  So a plain attract run proves the wiring, and only a run that reaches a song > 0 proves
+/  music.  The probe therefore reports three things a log can be read for:
+/
+/    * every (register, value) pair with an emulated-time stamp, capped for printing;
+/    * SEQUENCER STEPS, counted by the gap between writes -- one step emits its pairs back
+/      to back (the firmware's settle delay is ten loop iterations, microseconds) and then
+/      returns until the next tick, so a gap of more than a millisecond is a step boundary.
+/      Steps per second is the FM tick rate MEASURED rather than assumed, and F8 predicts
+/      it is INT0/2 = IOMOON_INT0_HZ/2 = 36.25 Hz here;
+/    * fm_song_select firing, taken from the firmware's own player state rather than
+/      inferred: [4000:12EA] is the stream pointer and it is written with a raw table entry
+/      only by fm_song_select, so sampling it at IOMOON_IRQ_TICK_HZ and matching against
+/      the CS:0DE5 table (read out of the emulated ROM, not hard-coded) names the song.
+/
+/  It also prints the two bytes that decide whether music can happen at all -- the mode
+/  byte 413C:014F (F11: 1 attract, 2 coined, 3 game started) and the credit counter
+/  413C:00D4 -- because "no music" and "never left attract" are different failures.
+/
+/    SLEIC_PROBE_YM          turn it on
+/    SLEIC_PROBE_YMMAX=N     stop printing individual pairs after N (default 120)
+/    SLEIC_PROBE_YMEVERY=N   periodic summary line every N frames (default 200)
+/-----------------------------------------------------------------------------------*/
+#define IOMOON_FM_PTR      0x412ea /* 4000:12EA stream pointer  (F8)                  */
+#define IOMOON_FM_COUNT    0x412ec /* 4000:12EC duration countdown                    */
+#define IOMOON_FM_ENABLE   0x412ee /* 4000:12EE player enabled (0xFF while a song runs)*/
+#define IOMOON_FM_TEMPO    0x412ef /* 4000:12EF tempo multiplier                       */
+#define IOMOON_FM_SONGTBL  0xd0de5 /* CS:0DE5 ten word pointers, in ROM                */
+#define IOMOON_MODE_BYTE   0x4150f /* 413C:014F game mode  (F11)                       */
+#define IOMOON_CREDIT_BYTE 0x41494 /* 413C:00D4 credit counter (D3658 INC, DCD34 cap 99)*/
+
+static struct {
+  int    on, started, max, every, printed;
+  int    ctrlW, dataW, pairs, keyOn, keyOff, orphan, steps;
+  int    lastReport, songStarts, curSong;
+  double lastT, firstT;
+  UINT16 songTbl[10];
+  int    haveTbl;
+  UINT16 lastPtr;
+  UINT8  reg, haveReg, lastEnable, lastMode, lastCredits, sampled;
+} iomoon_ymp; //!!
+
+static void iomoon_ym_probe_init(void) {
+  const char *e, *m, *v;
+  if (iomoon_ymp.started) return;
+  iomoon_ymp.started = 1;
+  e = getenv("SLEIC_PROBE_YM");
+  m = getenv("SLEIC_PROBE_YMMAX");
+  v = getenv("SLEIC_PROBE_YMEVERY");
+  iomoon_ymp.on    = e ? 1 : 0;
+  iomoon_ymp.max   = m ? (int)strtol(m, NULL, 10) : 120;
+  iomoon_ymp.every = v ? (int)strtol(v, NULL, 10) : 200;
+  if (iomoon_ymp.every < 1) iomoon_ymp.every = 1;
+  iomoon_ymp.curSong = -1;
+}
+
+/* Hooked at both PCS5 addresses.  Pairing is checked rather than assumed: an index write
+ * with no value after it, or a value with no index before it, would mean the two ports
+ * are being decoded wrongly, and both are counted as orphans */
+static void iomoon_ym_probe_w(int port, UINT8 data) {
+  double t;
+  iomoon_ym_probe_init();
+  if (!iomoon_ymp.on) return;
+  t = timer_get_time();
+  if (iomoon_ymp.firstT == 0.0) iomoon_ymp.firstT = t;
+  if (t - iomoon_ymp.lastT > 0.001) iomoon_ymp.steps++;  /* a new sequencer step */
+  iomoon_ymp.lastT = t;
+
+  if (!port) {                                   /* 0xA0280: register index */
+    iomoon_ymp.ctrlW++;
+    if (iomoon_ymp.haveReg) iomoon_ymp.orphan++;  /* index with no value after the last */
+    iomoon_ymp.reg = data; iomoon_ymp.haveReg = 1;
+    return;
+  }
+  iomoon_ymp.dataW++;                            /* 0xA0281: value */
+  if (!iomoon_ymp.haveReg) { iomoon_ymp.orphan++; return; }
+  iomoon_ymp.haveReg = 0;
+  iomoon_ymp.pairs++;
+  if (iomoon_ymp.reg >= 0xb0 && iomoon_ymp.reg <= 0xb8) {
+    if (data & 0x20) iomoon_ymp.keyOn++; else iomoon_ymp.keyOff++;
+  }
+  if (iomoon_ymp.printed < iomoon_ymp.max) {
+    iomoon_ymp.printed++;
+    fprintf(stderr, "[ym] t=%8.4f step %4d  reg %02X <- %02X%s\n",
+            t, iomoon_ymp.steps, iomoon_ymp.reg, data,
+            (iomoon_ymp.reg >= 0xb0 && iomoon_ymp.reg <= 0xb8)
+              ? ((data & 0x20) ? "   KEY-ON  ch" : "   key-off ch") : "");
+  }
+}
+
+/* Sampled from iomoon_irq_gen at IOMOON_IRQ_TICK_HZ, where the 80188 is the active CPU.
+ * Fast enough to be exact: fm_song_select writes the raw table entry to [12EA] and the
+ * sequencer cannot advance it until the next INT0 odd branch, tens of ticks later */
+static void iomoon_ym_probe_sample(void) {
+  UINT16 ptr;
+  iomoon_ym_probe_init();
+  if (!iomoon_ymp.on) return;
+  if (!iomoon_ymp.haveTbl) {
+    int i;
+    for (i = 0; i < 10; i++)
+      iomoon_ymp.songTbl[i] = (UINT16)(cpu_readmem20(IOMOON_FM_SONGTBL + 2*i) |
+                                      (cpu_readmem20(IOMOON_FM_SONGTBL + 2*i + 1) << 8));
+    iomoon_ymp.haveTbl = 1;
+  }
+  ptr = (UINT16)(cpu_readmem20(IOMOON_FM_PTR) | (cpu_readmem20(IOMOON_FM_PTR + 1) << 8));
+  if (ptr != iomoon_ymp.lastPtr) {
+    int i;
+    for (i = 0; i < 10; i++) if (ptr == iomoon_ymp.songTbl[i]) {
+      iomoon_ymp.songStarts++;
+      iomoon_ymp.curSong = i;
+      fprintf(stderr, "[ym] t=%8.4f  fm_song_select(%d): stream CS:%04X, player enable=%02X"
+                      "  (mode=%d credits=%d)\n",
+              timer_get_time(), i, ptr, cpu_readmem20(IOMOON_FM_ENABLE),
+              cpu_readmem20(IOMOON_MODE_BYTE), cpu_readmem20(IOMOON_CREDIT_BYTE));
+      break;
+    }
+    iomoon_ymp.lastPtr = ptr;
+  }
+}
+
+/* Called once a frame from SWITCH_UPDATE(SLEIC2): the periodic summary, plus the two
+ * state bytes that say whether the firmware is anywhere near playing music */
+static void iomoon_ym_probe_frame(void) {
+  static int frame = 0;
+  UINT8 mode, credits, enable;
+  iomoon_ym_probe_init();
+  if (!iomoon_ymp.on) return;
+  frame++;
+  mode    = cpu_readmem20(IOMOON_MODE_BYTE);
+  credits = cpu_readmem20(IOMOON_CREDIT_BYTE);
+  enable  = cpu_readmem20(IOMOON_FM_ENABLE);
+  if (!iomoon_ymp.sampled) {
+    iomoon_ymp.sampled = 1;
+    iomoon_ymp.lastMode = mode; iomoon_ymp.lastCredits = credits;
+    iomoon_ymp.lastEnable = enable;
+  }
+  if (mode != iomoon_ymp.lastMode) {
+    fprintf(stderr, "[ym] frame %5d  game mode 413C:014F %d -> %d  (1 attract, 2 coined, "
+                    "3 game started -- F11)\n", frame, iomoon_ymp.lastMode, mode);
+    iomoon_ymp.lastMode = mode;
+  }
+  if (credits != iomoon_ymp.lastCredits) {
+    fprintf(stderr, "[ym] frame %5d  credits 413C:00D4 %d -> %d\n",
+            frame, iomoon_ymp.lastCredits, credits);
+    iomoon_ymp.lastCredits = credits;
+  }
+  if (enable != iomoon_ymp.lastEnable) {
+    fprintf(stderr, "[ym] frame %5d  FM player enable %02X -> %02X\n",
+            frame, iomoon_ymp.lastEnable, enable);
+    iomoon_ymp.lastEnable = enable;
+  }
+  if (frame - iomoon_ymp.lastReport >= iomoon_ymp.every) {
+    const double span = iomoon_ymp.lastT - iomoon_ymp.firstT;
+    iomoon_ymp.lastReport = frame;
+    fprintf(stderr, "[ym] frame %5d  writes idx=%d val=%d pairs=%d orphans=%d  key-on=%d "
+                    "key-off=%d  steps=%d (%.1f/s over %.2fs)  song=%d enable=%02X tempo=%d "
+                    "count=%d  mode=%d credits=%d\n",
+            frame, iomoon_ymp.ctrlW, iomoon_ymp.dataW, iomoon_ymp.pairs, iomoon_ymp.orphan,
+            iomoon_ymp.keyOn, iomoon_ymp.keyOff, iomoon_ymp.steps,
+            span > 0.0 ? iomoon_ymp.steps / span : 0.0, span,
+            iomoon_ymp.curSong, enable, cpu_readmem20(IOMOON_FM_TEMPO),
+            cpu_readmem20(IOMOON_FM_COUNT) | (cpu_readmem20(IOMOON_FM_COUNT + 1) << 8),
+            mode, credits);
+  }
+}
+
 static SWITCH_UPDATE(SLEIC2) {
   unsigned i;
   if (inports) {
@@ -2670,6 +2858,7 @@ static SWITCH_UPDATE(SLEIC2) {
   iomoon_swprobe_frame(); /* debug: SLEIC_PROBE_SW */
   iomoon_swburst_frame(); /* debug: SLEIC_PROBE_SWBURST -- Task 11 scenario 2 */
   iomoon_menu_frame();    /* debug: SLEIC_PROBE_MENU -- Task 11 scenario 3 */
+  iomoon_ym_probe_frame();/* debug: SLEIC_PROBE_YM -- Task 14 FM stream summary */
 }
 
 /* Bike Race (SLEIC3) playfield-matrix test keys. The 40 matrix positions (Z80 switch
