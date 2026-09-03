@@ -3829,10 +3829,68 @@ static void iomoon_probe_pf(void) {
   }
 }
 
+/*-------------------------------------------------------------------------------------
+/  debug: SLEIC_PROBE_WATCH="a-b,a,..." -- report every byte change in the given flat
+/  20-bit ranges, one line per change, with the frame.  Written for the game-over trace,
+/  where the question is which hop of drain -> ball-over flag -> end-of-ball -> the
+/  balls-played store never fires: watching the CELLS each hop writes answers that without
+/  a PC hook, because every hop on that path has a store of its own.
+/
+/    SLEIC_PROBE_WATCH="413e9-41400,414ab,414b4,414be,414bf"   (flat addresses, hex)
+/    SLEIC_PROBE_WATCHMAX=N   stop after N reported changes (default 400)
+/-----------------------------------------------------------------------------------*/
+#define IOMOON_WATCH_MAX_SPANS 8
+#define IOMOON_WATCH_MAX_BYTES 256
+
+static struct {
+  int started, on, printed, max, seeded, n;
+  struct { unsigned lo, hi; } span[IOMOON_WATCH_MAX_SPANS];
+  unsigned addr[IOMOON_WATCH_MAX_BYTES];
+  UINT8    last[IOMOON_WATCH_MAX_BYTES];
+} iomoon_wp; //!!
+
+static void iomoon_watch_frame(void) {
+  int i;
+  if (!iomoon_wp.started) {
+    const char *e = getenv("SLEIC_PROBE_WATCH"), *m = getenv("SLEIC_PROBE_WATCHMAX");
+    const char *p;
+    iomoon_wp.started = 1;
+    iomoon_wp.max = m ? (int)strtol(m, NULL, 10) : 400;
+    if (!e) return;
+    iomoon_wp.on = 1;
+    for (p = e; *p && iomoon_wp.n < IOMOON_WATCH_MAX_BYTES; ) {
+      char *q;
+      unsigned lo = (unsigned)strtoul(p, &q, 16), hi;
+      p = q;
+      if (*p == '-') { p++; hi = (unsigned)strtoul(p, &q, 16); p = q; } else hi = lo;
+      for (; lo <= hi && iomoon_wp.n < IOMOON_WATCH_MAX_BYTES; lo++)
+        iomoon_wp.addr[iomoon_wp.n++] = lo;
+      while (*p && *p != ',') p++;
+      if (*p == ',') p++;
+    }
+    fprintf(stderr, "[watch] watching %d bytes\n", iomoon_wp.n);
+  }
+  if (!iomoon_wp.on) return;
+  for (i = 0; i < iomoon_wp.n; i++) {
+    const UINT8 v = cpu_readmem20(iomoon_wp.addr[i]);
+    if (!iomoon_wp.seeded) { iomoon_wp.last[i] = v; continue; }
+    if (v != iomoon_wp.last[i]) {
+      if (iomoon_wp.printed < iomoon_wp.max) {
+        iomoon_wp.printed++;
+        fprintf(stderr, "[watch] frame %5d  %05X  %02X -> %02X\n",
+                locals.vblankCount, iomoon_wp.addr[i], iomoon_wp.last[i], v);
+      }
+      iomoon_wp.last[i] = v;
+    }
+  }
+  iomoon_wp.seeded = 1;
+}
+
 static void iomoon_ball_probe_frame(void) {
   int i, j;
   iomoon_ball_probe_init();
   iomoon_probe_pf();          /* debug: SLEIC_PROBE_PF, independent of SLEIC_PROBE_BALL */
+  iomoon_watch_frame();       /* debug: SLEIC_PROBE_WATCH, likewise independent */
   if (!iomoon_bp.on) return;
   /* Score, ball number and mode as EVENTS, not samples: a periodic line can miss a whole
    * ball, and what a lifecycle run has to show is the sequence */
