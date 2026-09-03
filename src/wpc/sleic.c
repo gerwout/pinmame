@@ -1339,6 +1339,10 @@ static void iomoon_ball_reset(void);
  * Z80's port reads by the PC that made them.  Both defined with the probe further down */
 static void iomoon_ball_probe_j1(UINT8 byte, int toZ80);
 static void iomoon_ball_probe_io(unsigned pc);
+/* Mirror of the probe's own flag so the hot Z80 read path costs one test when it is
+ * off.  Starts non-zero = "not yet asked", so the first read calls through and the
+ * probe's init resolves it to 0 or 1 */
+static int  iomoon_bp_on = -1; //!!
 
 /* debug: SLEIC_PROBE_J1 -- one line per byte in either direction, both ends named */
 static void iomoon_j1_trace(const char *dir, UINT8 byte) {
@@ -2002,7 +2006,9 @@ static UINT8 iomoon_port04(void) {
 }
 
 static READ_HANDLER(iomoon_z80_read) {
-  iomoon_ball_probe_io(activecpu_get_pc()); /* debug: SLEIC_PROBE_BALL */
+  /* debug: SLEIC_PROBE_BALL -- guarded here as well as inside, so the unset case costs a
+   * test on a path the Z80 takes tens of thousands of times a second */
+  if (iomoon_bp_on) iomoon_ball_probe_io(activecpu_get_pc());
   switch (offset) {
     case 0x00: /* J1 inbound data.  Reading is what frees the outbound latch, which is
                 * what PCS3 0xA0180 bit 0 reports back to qout_service_pcs1 */
@@ -3701,12 +3707,18 @@ static void iomoon_credit_probe_frame(void) {
 #define IOMOON_SCORE_LO    0x414b0 /* 413C:00F0                                            */
 #define IOMOON_BALL_NO     0x41366 /* 4134:0026, incremented at DC72A when a ball ends      */
 #define IOMOON_BALLS_LEFT  0x41370 /* 4134:0030, decremented there at the same time         */
+#define IOMOON_BALLS_PLAYED 0x413f6 /* 413C:0036 balls played, tested at D3C4E              */
+#define IOMOON_BALL_CUR     0x414bf /* 413C:00FF the ball number, written at D3C78          */
+#define IOMOON_EXTRA_BALLS  0x414ae /* 413C:00EE extra balls pending (D3526/D8251 INC)      */
+#define IOMOON_PLAYER_IDX   0x414be /* 413C:00FE the player whose record is live            */
+#define IOMOON_BALLS_PER_GAME 0x4133d /* 4130:003D, from NVRAM 5040:003C at D671F           */
 
 static struct {
   int on, started, every, lastReport, cmdFrame;
   UINT8 lastCmd;
   unsigned lastScore;
   int   lastBallNo, lastMode, seeded;
+  int   lastPlayed, lastCur, lastExtra;
   int   pcN;
   struct { unsigned pc; int n; } pc[24];
 } iomoon_bp; //!!
@@ -3722,7 +3734,7 @@ static void iomoon_ball_probe_init(void) {
   const char *e;
   if (iomoon_bp.started) return;
   iomoon_bp.started = 1;
-  iomoon_bp.on = getenv("SLEIC_PROBE_BALL") ? 1 : 0;
+  iomoon_bp.on = iomoon_bp_on = getenv("SLEIC_PROBE_BALL") ? 1 : 0;
   e = getenv("SLEIC_PROBE_BALLEVERY");
   iomoon_bp.every = e ? (int)strtol(e, NULL, 10) : 300;
   if (iomoon_bp.every < 1) iomoon_bp.every = 1;
@@ -3824,34 +3836,70 @@ static void iomoon_ball_probe_frame(void) {
   if (!iomoon_bp.on) return;
   /* Score, ball number and mode as EVENTS, not samples: a periodic line can miss a whole
    * ball, and what a lifecycle run has to show is the sequence */
-  /* SLEIC_PROBE_BALLDUMP=<frame> -- one hex dump of the game's work page 413C:0000-01FF at
-   * that frame.  The score is displayed by sub_DC9C0 from a pair the end-of-ball copy
-   * sub_D3920 reads, and a dump taken while the DMD shows a known score is how to find
-   * which cells actually hold it rather than assuming */
+  /* SLEIC_PROBE_BALLDUMP=<frame> -- one dump at that frame of the three places the game
+   * keeps the numbers this task needed: the work page 413C:0000-01FF (where the score
+   * cells were located rather than assumed), the adjustment page 4130:0030-003F that
+   * boot_init fills from NVRAM (D66D2-D671F: the extra-ball score threshold at
+   * 0039/003B from NVRAM 5040:0085, its once-per-game latch at 003E, and BALLS PER GAME
+   * at 003D from NVRAM 5040:003C), and those NVRAM bytes themselves, so a degenerate
+   * factory seed is separable from a firmware rule */
   { static int at = -2;
     if (at == -2) { const char *e = getenv("SLEIC_PROBE_BALLDUMP");
                     at = e ? (int)strtol(e, NULL, 10) : -1; }
     if (at >= 0 && locals.vblankCount == at) {
-      unsigned a;
+      unsigned a, k;
       for (a = 0; a < 0x200; a += 16) {
-        unsigned k;
         fprintf(stderr, "[ball] 413C:%04X ", a);
         for (k = 0; k < 16; k++) fprintf(stderr, " %02X", cpu_readmem20(0x413c0 + a + k));
         fprintf(stderr, "\n");
       }
+      fprintf(stderr, "[ball] 4130:0030 ");
+      for (k = 0; k < 16; k++) fprintf(stderr, " %02X", cpu_readmem20(0x41330 + k));
+      fprintf(stderr, "\n[ball]   balls/game 4130:003D=%d (NVRAM 5040:003C=%d)  "
+                      "extra-ball threshold 4130:0039/003B=%u (NVRAM 5040:0085..88 "
+                      "%02X %02X %02X %02X)  awarded-latch 003E=%d\n",
+              cpu_readmem20(0x4133d), iomoon_nvram[0x3c],
+              (unsigned)(cpu_readmem20(0x41339) | (cpu_readmem20(0x4133a) << 8)
+                       | (cpu_readmem20(0x4133b) << 16) | (cpu_readmem20(0x4133c) << 24)),
+              iomoon_nvram[0x85], iomoon_nvram[0x86], iomoon_nvram[0x87], iomoon_nvram[0x88],
+              cpu_readmem20(0x4133e));
     }
   }
   { const unsigned score = iomoon_ball_score();
     const int ballNo = cpu_readmem20(IOMOON_BALL_NO), mode = cpu_readmem20(IOMOON_MODE_BYTE);
     if (!iomoon_bp.seeded) { iomoon_bp.seeded = 1; }
     else {
-      if (score != iomoon_bp.lastScore)
-        fprintf(stderr, "[ball] frame %5d  SCORE 413C:00F0 %u -> %u\n",
-                locals.vblankCount, iomoon_bp.lastScore, score);
+      if (score != iomoon_bp.lastScore) {
+        /* and the string the firmware itself formats from that very pair: sub_D3145
+         * pushes [413C:00F2] and [413C:00F0] into sub_DC9C0 with the buffer 413C:00E1
+         * (D316B-D317B) and then draws it (sub_F0907).  Printing the buffer beside the
+         * cell is what ties the number to what the DMD shows */
+        char disp[3 * 12 + 1]; unsigned k;
+        for (k = 0; k < 12; k++)
+          sprintf(disp + 3 * k, "%02X ", cpu_readmem20(0x414a1 + k));
+        fprintf(stderr, "[ball] frame %5d  SCORE 413C:00F0 %u -> %u   display buffer "
+                        "413C:00E1 %s(glyph bytes, not ASCII)\n",
+                locals.vblankCount, iomoon_bp.lastScore, score, disp);
+      }
       if (ballNo != iomoon_bp.lastBallNo)
         fprintf(stderr, "[ball] frame %5d  ball 4134:0026 %d -> %d   (balls left 0030=%d)\n",
                 locals.vblankCount, iomoon_bp.lastBallNo, ballNo,
                 cpu_readmem20(IOMOON_BALLS_LEFT));
+      /* The single-player ball accounting, which is what decides whether a game ends:
+       * D3C4E compares the balls-played field 413C:0036 against balls-per-game
+       * 4130:003D and only then advances 413C:00FF, and D3A9C spends an extra ball out
+       * of 413C:00EE first (D3AB7 DEC) so the same ball is replayed instead */
+      { const int played = cpu_readmem20(IOMOON_BALLS_PLAYED);
+        const int cur    = cpu_readmem20(IOMOON_BALL_CUR);
+        const int extra  = cpu_readmem20(IOMOON_EXTRA_BALLS);
+        if (played != iomoon_bp.lastPlayed || cur != iomoon_bp.lastCur
+            || extra != iomoon_bp.lastExtra)
+          fprintf(stderr, "[ball] frame %5d  played 413C:0036=%d  ball 413C:00FF=%d  "
+                          "extra 413C:00EE=%d  player 413C:00FE=%d  balls/game "
+                          "4130:003D=%d\n", locals.vblankCount, played, cur, extra,
+                  cpu_readmem20(IOMOON_PLAYER_IDX), cpu_readmem20(IOMOON_BALLS_PER_GAME));
+        iomoon_bp.lastPlayed = played; iomoon_bp.lastCur = cur; iomoon_bp.lastExtra = extra;
+      }
       if (mode != iomoon_bp.lastMode)
         fprintf(stderr, "[ball] frame %5d  mode 413C:014F %d -> %d  (3 = game start, "
                         "4 = ball in play)\n", locals.vblankCount, iomoon_bp.lastMode, mode);
