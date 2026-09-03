@@ -1869,23 +1869,36 @@ MACHINE_DRIVER_END
 
    Start is deliberately left momentary -- it has no jam timeout, and holding
    it is what the real button does. */
-#define CIRSA_COIN(mask, name, key) \
-  PORT_BITX(mask, IP_ACTIVE_HIGH, IPT_BUTTON1 | IPF_IMPULSE | (8<<8), \
-            name, key, IP_JOY_NONE)
+#define CIRSA_COIN(mask, type) \
+  PORT_BITX(mask, IP_ACTIVE_HIGH, (type) | IPF_IMPULSE | (8<<8), \
+            IP_NAME_DEFAULT, IP_KEY_DEFAULT, IP_JOY_DEFAULT)
 
 INPUT_PORTS_START(cirsa)
   CORE_PORTS
   SIM_PORTS(1)
   PORT_START /* CORE_COREINPORT */
-    CIRSA_COIN(       0x0001, "Coin 1",      KEYCODE_5)
-    CIRSA_COIN(       0x0002, "Coin 2",      KEYCODE_6)
-    CIRSA_COIN(       0x0004, "Coin 3",      KEYCODE_4)
-    COREPORT_BIT(     0x0008, "Start",       KEYCODE_1)
+    /* Coins and start take MAME's own input types, so they inherit its default
+       keys and joystick codes, appear under their standard names in the Tab
+       menu, and are remappable the way a player expects: 5/6/7 for the three
+       coin chutes and 1 for start.  Coins are additionally IPF_IMPULSE-limited
+       to 8 frames -- see the block comment above for why a held coin is refused
+       by the ROM. */
+    CIRSA_COIN(       0x0001, IPT_COIN1)
+    CIRSA_COIN(       0x0002, IPT_COIN2)
+    CIRSA_COIN(       0x0004, IPT_COIN3)
+    COREPORT_BITDEF(  0x0008, IPT_START1, IP_KEY_DEFAULT)
+    /* The trough has no MAME equivalent -- it is a level held by the balls, not
+       a control -- so it keeps an explicit key and a descriptive name. */
     COREPORT_BITTOG(  0x0010, "Ball Trough", KEYCODE_B)
-    COREPORT_BIT(     0x0100, "Test",    KEYCODE_7)
-    COREPORT_BIT(     0x0200, "Advance", KEYCODE_8)
-    COREPORT_BIT(     0x0400, "EG1",     KEYCODE_9)
-    COREPORT_BIT(     0x0800, "EG2",     KEYCODE_0)
+    /* The four buttons on the service bracket.  IPT_SERVICE1..4 give MAME's
+       service defaults (9, 0, minus, equals) and keep these clear of the coin
+       keys, which they previously collided with: Test was on 7 (IPT_COIN3's
+       default) and Advance on 8 (IPT_COIN4's).  The names stay descriptive
+       because "Service 1" says nothing about what the button does. */
+    PORT_BITX(0x0100, IP_ACTIVE_HIGH, IPT_SERVICE1, "Test",    IP_KEY_DEFAULT, IP_JOY_DEFAULT)
+    PORT_BITX(0x0200, IP_ACTIVE_HIGH, IPT_SERVICE2, "Advance", IP_KEY_DEFAULT, IP_JOY_DEFAULT)
+    PORT_BITX(0x0400, IP_ACTIVE_HIGH, IPT_SERVICE3, "EG1",     IP_KEY_DEFAULT, IP_JOY_DEFAULT)
+    PORT_BITX(0x0800, IP_ACTIVE_HIGH, IPT_SERVICE4, "EG2",     IP_KEY_DEFAULT, IP_JOY_DEFAULT)
 INPUT_PORTS_END
 
 /* Positions 0..6 and 7..13 are the two 7-character LA8041R-11B alphanumeric
