@@ -1334,11 +1334,17 @@ static void iomoon_ym_probe_w(int port, UINT8 data);
 static void iomoon_ball_command(UINT8 cmd);
 static void iomoon_ball_reset(void);
 
+/* debug: SLEIC_PROBE_BALL -- Task 16b, the ball-handling conversation.  toZ80 = 1 for a
+ * command the 80188 pushed, 0 for a byte the Z80 strobed back; the io hook buckets the
+ * Z80's port reads by the PC that made them.  Both defined with the probe further down */
+static void iomoon_ball_probe_j1(UINT8 byte, int toZ80);
+static void iomoon_ball_probe_io(unsigned pc);
+
 /* debug: SLEIC_PROBE_J1 -- one line per byte in either direction, both ends named */
 static void iomoon_j1_trace(const char *dir, UINT8 byte) {
   static int probe = -1;
   if (probe < 0) probe = getenv("SLEIC_PROBE_J1") ? 1 : 0;
-  if (probe) fprintf(stderr, "[j1] %s %02X\n", dir, byte);
+  if (probe) fprintf(stderr, "[j1] frame %5d %s %02X\n", locals.vblankCount, dir, byte);
 }
 
 /*-------------------------------------------------------------------------------------
@@ -1475,6 +1481,7 @@ static WRITE_HANDLER(sleic2_periph_w) {
       if ((data & 0x20) && !(iomoon_j1.pcs4 & 0x20)) {
         iomoon_j1.toZ80Full = 1;
         iomoon_j1_trace("188->Z80", iomoon_j1.toZ80); /* debug: SLEIC_PROBE_J1 */
+        iomoon_ball_probe_j1(iomoon_j1.toZ80, 1);     /* debug: SLEIC_PROBE_BALL */
         iomoon_ball_command(iomoon_j1.toZ80);         /* the ball trough, 0xE9 = serve */
         cpu_set_irq_line(SLEIC_IO_CPU, IRQ_LINE_NMI, PULSE_LINE); /* Z80 handler 0x0066 */
       }
@@ -1999,6 +2006,7 @@ static UINT8 iomoon_port04(void) {
 }
 
 static READ_HANDLER(iomoon_z80_read) {
+  iomoon_ball_probe_io(activecpu_get_pc()); /* debug: SLEIC_PROBE_BALL */
   switch (offset) {
     case 0x00: /* J1 inbound data.  Reading is what frees the outbound latch, which is
                 * what PCS3 0xA0180 bit 0 reports back to qout_service_pcs1 */
@@ -2219,6 +2227,7 @@ static WRITE_HANDLER(iomoon_z80_write) {
           iomoon_j1_trace("Z80->188", iomoon_j1.latch); /* debug: SLEIC_PROBE_J1 */
           iomoon_swprobe_j1(iomoon_j1.latch, 0);        /* debug: SLEIC_PROBE_SW */
           iomoon_swburst_j1(iomoon_j1.latch, 0);        /* debug: SLEIC_PROBE_SWBURST */
+          iomoon_ball_probe_j1(iomoon_j1.latch, 0);     /* debug: SLEIC_PROBE_BALL */
           cpu_set_irq_line(SLEIC_MAIN_CPU, IRQ_LINE_NMI, PULSE_LINE); /* handler D000:016D */
         }
       }
@@ -3659,6 +3668,222 @@ static void iomoon_credit_probe_frame(void) {
 }
 
 /*-------------------------------------------------------------------------------------
+/  debug: SLEIC_PROBE_BALL -- Task 16b.  The ball-handling conversation, both ends.
+/
+/  Input dies the moment a game starts, and the question the probe has to answer is not
+/  "which byte went missing" but "what is the Z80 DOING instead of its main loop".  Three
+/  things together answer it:
+/
+/    * the ball-protocol traffic on J1, named.  The 80188 owns the ball count and asks for
+/      it: commands 0xE9 (serve one ball) 0xEA (count the trough) 0xEB (count the second
+/      device) 0xEC/0xED/0xEF (ball search / bring the balls home), and the Z80 answers
+/      0x38/0x39/0x3A (1/2/3 balls in the trough), 0x3B/0x3C (the other device), 0x48/0x49
+/      (that device is EMPTY), 0x45 (done), 0x4A (gave up).  Printing command and reply on
+/      one line shows which command is outstanding;
+/    * a PC histogram of the Z80's I/O sites.  Every one of these handlers is a loop built
+/      out of port reads, so where the Z80 is reading tells which loop it is in -- 2E62 and
+/      0D76 are main_loop, 32F3/3323 are the column snapshots the ball loops spin on, 0116
+/      is the J1 send spin;
+/    * the two ball counters the 80188 keeps, [413C:00F9] (trough) and [413C:00F8] (the
+/      second device), plus the mode, so a stall is visible as a count that never moves.
+/
+/    SLEIC_PROBE_BALL        turn it on
+/    SLEIC_PROBE_BALLEVERY=N periodic state line every N frames (default 300)
+/-----------------------------------------------------------------------------------*/
+#define IOMOON_BALL_TROUGH 0x414b9 /* 413C:00F9 balls the 80188 believes are in the trough */
+#define IOMOON_BALL_OTHER  0x414b8 /* 413C:00F8 balls in the second device (cmd 0xEB)      */
+/* The score.  D3208/D320D push [413C:00F2] then [413C:00F0] and the buffer 413C:00E1 into
+ * sub_DC9C0, i.e. one 32-bit value formatted for the display, and the same pair is pushed
+ * at D316B and D31?? on every redraw.  Printing it is how a headless run shows that a
+ * playfield contact actually SCORED rather than merely arriving */
+#define IOMOON_SCORE_LO    0x414b0 /* 413C:00F0                                            */
+#define IOMOON_BALL_NO     0x41366 /* 4134:0026, incremented at DC72A when a ball ends      */
+#define IOMOON_BALLS_LEFT  0x41370 /* 4134:0030, decremented there at the same time         */
+
+static struct {
+  int on, started, every, lastReport, cmdFrame;
+  UINT8 lastCmd;
+  unsigned lastScore;
+  int   lastBallNo, lastMode, seeded;
+  int   pcN;
+  struct { unsigned pc; int n; } pc[24];
+} iomoon_bp; //!!
+
+static unsigned iomoon_ball_score(void) {
+  return (unsigned)cpu_readmem20(IOMOON_SCORE_LO)
+       | ((unsigned)cpu_readmem20(IOMOON_SCORE_LO + 1) << 8)
+       | ((unsigned)cpu_readmem20(IOMOON_SCORE_LO + 2) << 16)
+       | ((unsigned)cpu_readmem20(IOMOON_SCORE_LO + 3) << 24);
+}
+
+static void iomoon_ball_probe_init(void) {
+  const char *e;
+  if (iomoon_bp.started) return;
+  iomoon_bp.started = 1;
+  iomoon_bp.on = getenv("SLEIC_PROBE_BALL") ? 1 : 0;
+  e = getenv("SLEIC_PROBE_BALLEVERY");
+  iomoon_bp.every = e ? (int)strtol(e, NULL, 10) : 300;
+  if (iomoon_bp.every < 1) iomoon_bp.every = 1;
+  iomoon_bp.cmdFrame = -1;
+}
+
+/* Every Z80 port read, bucketed by the PC that made it.  Cheap enough to leave in the read
+ * path: the array is 24 entries and the common case is the first two */
+static void iomoon_ball_probe_io(unsigned pc) {
+  int i;
+  iomoon_ball_probe_init();
+  if (!iomoon_bp.on) return;
+  for (i = 0; i < iomoon_bp.pcN; i++)
+    if (iomoon_bp.pc[i].pc == pc) { iomoon_bp.pc[i].n++; return; }
+  if (iomoon_bp.pcN < (int)(sizeof(iomoon_bp.pc)/sizeof(iomoon_bp.pc[0]))) {
+    iomoon_bp.pc[iomoon_bp.pcN].pc = pc;
+    iomoon_bp.pc[iomoon_bp.pcN].n  = 1;
+    iomoon_bp.pcN++;
+  }
+}
+
+static const char *iomoon_ball_cmd_name(UINT8 b) {
+  switch (b) {
+    case 0xe9: return "E9 serve one ball  (Z80 2B03: pulse until col0 bit 3 closes)";
+    case 0xea: return "EA count the trough(Z80 2A45: col0 bits 0-3)";
+    case 0xeb: return "EB count device 2  (Z80 2AB0: col4 bits 0-2)";
+    case 0xec: return "EC ball search     (Z80 2C87, flipper-abortable)";
+    case 0xed: return "ED trough check    (Z80 2BEB, gated on port-04 bit 5)";
+    case 0xee: return "EE kick device 2   (Z80 2B86)";
+    case 0xef: return "EF balls home      (Z80 2BC7: LOOPS until the trough is full)";
+    default:   return NULL;
+  }
+}
+
+static const char *iomoon_ball_reply_name(UINT8 b) {
+  switch (b) {
+    case 0x38: return "38 trough = 1 ball";
+    case 0x39: return "39 trough = 2 balls";
+    case 0x3a: return "3A trough = 3 balls";
+    case 0x3b: return "3B device 2 = 1";
+    case 0x3c: return "3C device 2 = 2";
+    case 0x45: return "45 done";
+    case 0x48: return "48 trough EMPTY";
+    case 0x49: return "49 device 2 empty";
+    case 0x4a: return "4A gave up";
+    default:   return NULL;
+  }
+}
+
+/* toZ80 = 1 for a command the 80188 pushed, 0 for a byte the Z80 strobed back */
+static void iomoon_ball_probe_j1(UINT8 byte, int toZ80) {
+  const char *name;
+  iomoon_ball_probe_init();
+  if (!iomoon_bp.on) return;
+  if (toZ80) {
+    if ((name = iomoon_ball_cmd_name(byte)) == NULL) return;
+    iomoon_bp.lastCmd = byte; iomoon_bp.cmdFrame = locals.vblankCount;
+    fprintf(stderr, "[ball] frame %5d  188->Z80  %s\n", locals.vblankCount, name);
+  } else {
+    if ((name = iomoon_ball_reply_name(byte)) == NULL) return;
+    fprintf(stderr, "[ball] frame %5d  Z80->188  %s   (%d frames after cmd %02X)\n",
+            locals.vblankCount, name,
+            iomoon_bp.cmdFrame < 0 ? -1 : locals.vblankCount - iomoon_bp.cmdFrame,
+            iomoon_bp.lastCmd);
+    iomoon_bp.cmdFrame = -1;
+  }
+}
+
+/* debug: SLEIC_PROBE_PF="frame:col.bits,..." -- hold matrix bits (bits in hex, column
+ * 1-6 = swMatrix index, i.e. Z80 column col-1) for SLEIC_PROBE_PFHOLD frames from each
+ * frame given.  Playfield contacts, which no cabinet button can reach: it is what shows
+ * whether a running game SCORES.  Runs from SWITCH_UPDATE after the key loop, so it is
+ * not cleared by it */
+static void iomoon_probe_pf(void) {
+  static const char *list = NULL; static int started = 0, hold = 10;
+  const char *p;
+  if (!started) { const char *h = getenv("SLEIC_PROBE_PFHOLD");
+                  started = 1; list = getenv("SLEIC_PROBE_PF");
+                  if (h) hold = (int)strtol(h, NULL, 10); }
+  if (!list) return;
+  for (p = list; *p; ) {
+    char *end;
+    const long at = strtol(p, &end, 10);
+    long col, bits;
+    p = end; if (*p == ':') p++;
+    col = strtol(p, &end, 10); p = end; if (*p == '.') p++;
+    bits = strtol(p, &end, 16); p = end;
+    if (locals.vblankCount >= at && locals.vblankCount < at + hold && col >= 1 && col <= 6)
+      coreGlobals.swMatrix[col] |= (UINT8)bits;
+    while (*p && *p != ',') p++;
+    if (*p == ',') p++;
+  }
+}
+
+static void iomoon_ball_probe_frame(void) {
+  int i, j;
+  iomoon_ball_probe_init();
+  iomoon_probe_pf();          /* debug: SLEIC_PROBE_PF, independent of SLEIC_PROBE_BALL */
+  if (!iomoon_bp.on) return;
+  /* Score, ball number and mode as EVENTS, not samples: a periodic line can miss a whole
+   * ball, and what a lifecycle run has to show is the sequence */
+  /* SLEIC_PROBE_BALLDUMP=<frame> -- one hex dump of the game's work page 413C:0000-01FF at
+   * that frame.  The score is displayed by sub_DC9C0 from a pair the end-of-ball copy
+   * sub_D3920 reads, and a dump taken while the DMD shows a known score is how to find
+   * which cells actually hold it rather than assuming */
+  { static int at = -2;
+    if (at == -2) { const char *e = getenv("SLEIC_PROBE_BALLDUMP");
+                    at = e ? (int)strtol(e, NULL, 10) : -1; }
+    if (at >= 0 && locals.vblankCount == at) {
+      unsigned a;
+      for (a = 0; a < 0x200; a += 16) {
+        unsigned k;
+        fprintf(stderr, "[ball] 413C:%04X ", a);
+        for (k = 0; k < 16; k++) fprintf(stderr, " %02X", cpu_readmem20(0x413c0 + a + k));
+        fprintf(stderr, "\n");
+      }
+    }
+  }
+  { const unsigned score = iomoon_ball_score();
+    const int ballNo = cpu_readmem20(IOMOON_BALL_NO), mode = cpu_readmem20(IOMOON_MODE_BYTE);
+    if (!iomoon_bp.seeded) { iomoon_bp.seeded = 1; }
+    else {
+      if (score != iomoon_bp.lastScore)
+        fprintf(stderr, "[ball] frame %5d  SCORE 413C:00F0 %u -> %u\n",
+                locals.vblankCount, iomoon_bp.lastScore, score);
+      if (ballNo != iomoon_bp.lastBallNo)
+        fprintf(stderr, "[ball] frame %5d  ball 4134:0026 %d -> %d   (balls left 0030=%d)\n",
+                locals.vblankCount, iomoon_bp.lastBallNo, ballNo,
+                cpu_readmem20(IOMOON_BALLS_LEFT));
+      if (mode != iomoon_bp.lastMode)
+        fprintf(stderr, "[ball] frame %5d  mode 413C:014F %d -> %d  (3 = game start, "
+                        "4 = ball in play)\n", locals.vblankCount, iomoon_bp.lastMode, mode);
+    }
+    iomoon_bp.lastScore = score; iomoon_bp.lastBallNo = ballNo; iomoon_bp.lastMode = mode;
+  }
+  if (locals.vblankCount - iomoon_bp.lastReport < iomoon_bp.every) return;
+  iomoon_bp.lastReport = locals.vblankCount;
+  fprintf(stderr, "[ball] frame %5d  mode=%d  188 counts trough=%d other=%d   outstanding "
+                  "cmd=%02X   Z80 col0=%02X col4=%02X C0E3=%02X C0F8=%02X C068=%02X "
+                  "C069=%02X C06A=%02X\n",
+          locals.vblankCount, cpu_readmem20(IOMOON_MODE_BYTE),
+          cpu_readmem20(IOMOON_BALL_TROUGH), cpu_readmem20(IOMOON_BALL_OTHER),
+          iomoon_bp.cmdFrame < 0 ? 0 : iomoon_bp.lastCmd,
+          cpunum_read_byte(SLEIC_IO_CPU, 0xc0db), cpunum_read_byte(SLEIC_IO_CPU, 0xc0df),
+          cpunum_read_byte(SLEIC_IO_CPU, 0xc0e3), cpunum_read_byte(SLEIC_IO_CPU, 0xc0f8),
+          cpunum_read_byte(SLEIC_IO_CPU, 0xc068), cpunum_read_byte(SLEIC_IO_CPU, 0xc069),
+          cpunum_read_byte(SLEIC_IO_CPU, 0xc06a));
+  /* the histogram, busiest first, reset each report so it describes THIS window */
+  fprintf(stderr, "[ball]   Z80 I/O sites:");
+  for (j = 0; j < 6 && j < iomoon_bp.pcN; j++) {
+    int best = -1;
+    for (i = 0; i < iomoon_bp.pcN; i++)
+      if (iomoon_bp.pc[i].n > 0 && (best < 0 || iomoon_bp.pc[i].n > iomoon_bp.pc[best].n))
+        best = i;
+    if (best < 0) break;
+    fprintf(stderr, " %04X=%d", iomoon_bp.pc[best].pc, iomoon_bp.pc[best].n);
+    iomoon_bp.pc[best].n = -1;
+  }
+  fprintf(stderr, "\n");
+  iomoon_bp.pcN = 0;
+}
+
+/*-------------------------------------------------------------------------------------
 /  debug: SLEIC_PROBE_MENUWALK -- Task 16.  Walk the service menu with the codes its own
 /  dispatcher accepts, and watch the state it actually navigates with.
 /
@@ -3849,6 +4074,7 @@ static SWITCH_UPDATE(SLEIC2) {
   iomoon_swburst_frame(); /* debug: SLEIC_PROBE_SWBURST -- Task 11 scenario 2 */
   iomoon_menu_frame();    /* debug: SLEIC_PROBE_MENU -- Task 11 scenario 3 */
   iomoon_credit_probe_frame(); /* debug: SLEIC_PROBE_CREDIT -- Task 16 coin/credit chain */
+  iomoon_ball_probe_frame();   /* debug: SLEIC_PROBE_BALL -- Task 16b ball handling */
   iomoon_menuwalk_frame();/* debug: SLEIC_PROBE_MENUWALK -- Task 16 menu navigation */
   iomoon_ym_probe_frame();/* debug: SLEIC_PROBE_YM -- Task 14 FM stream summary */
   iomoon_oki_probe_frame();/* debug: SLEIC_PROBE_OKI -- Task 15 speech/FX summary */
