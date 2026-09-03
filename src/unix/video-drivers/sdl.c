@@ -696,6 +696,8 @@ void sysdep_set_leds(int leds)
 {
 }
 
+extern UINT8 trying_to_quit; /* keyboard.c: the graceful-quit request; see SDL_QUIT below */
+
 void sysdep_update_keyboard() 
 {
    struct xmame_keyboard_event kevent;
@@ -731,8 +733,11 @@ void sysdep_update_keyboard()
 #endif
                break;
             case SDL_QUIT:
-               /* Shoult leave this to application */
-               exit(OSD_OK);
+               /* Not exit(): that leaves run_machine_core() before its shutdown, which
+                * is the only place MAME calls the driver's NVRAM_HANDLER with write=1
+                * and saves the .cfg input settings, so a closed window lost both.
+                * Ask for a graceful quit the way -frames_to_run and SIGQUIT do. */
+               trying_to_quit = 1;
                break;
 
     	    case SDL_JOYAXISMOTION:   
