@@ -2216,14 +2216,32 @@ static READ_HANDLER(cirsa_sndp3_r) {
   return (UINT8)((locals.muartP1Out & 0x40) ? 0x04 : 0x00);
 }
 
-static MEMORY_READ_START(cirsa_readsnd)
+/*-- 8051 sound-board memory maps ---------------------------------------
+/  The two audio boards are identical but for the OPL2: Sport 2000's carries a
+/  YM3812 with its own 14.318 MHz crystal, Mephisto's carries only the 8051, an
+/  AY-3-8910 and a DAC-08.  MACHINE_DRIVER_START(mephisto) therefore adds no
+/  YM3812, and its map must not name the chip's handlers.  With no chip created
+/  chip_3812[0] stays NULL and both handlers dereference it: on the tree's
+/  default backend (HAS_YM3812_YMFM, src/pinmame.h) YM3812_status_port_0_r
+/  reaches ymfm_opl_read(NULL, 0), which is
+/  ((ymfm_opl_base*)obj)->read(offset) in ext/ymfm/ymfm_opl_pinmame_specific.h
+/  -- a virtual call through a null pointer -- and on the fmopl backend
+/  (HAS_YM3812, used for LISY and old MinGW) it reaches OPLRead(NULL,..).
+/
+/  Mephisto's firmware has not been observed to touch 0x11800/0x11801: a 35 s
+/  run logs no unmapped access by cpu 1 at all.  But an empirical negative over
+/  one run of one game state is not a guarantee over all of them, and the cost
+/  of splitting the map is five repeated lines, so the maps are split.
+/  MACHINE_DRIVER_START(cirsa) swaps the OPL2 map in through
+/  MDRV_CPU_MODIFY("scpu"), the same idiom it already uses for "mcpu".        */
+
+static MEMORY_READ_START(mephisto_readsnd)
   { 0x00000, 0x07fff, MRA_ROM },
   { 0x08000, 0x0ffff, MRA_BANKNO(1) },
   { 0x10000, 0x107ff, MRA_RAM },
-  { 0x11800, 0x11800, YM3812_status_port_0_r },   /* OPL2 status; see the write map */
 MEMORY_END
 
-static MEMORY_WRITE_START(cirsa_writesnd)
+static MEMORY_WRITE_START(mephisto_writesnd)
   { 0x00000, 0x07fff, MWA_ROM },
   { 0x10000, 0x107ff, MWA_RAM },
   { 0x10800, 0x10800, bank_w },
@@ -2260,44 +2278,44 @@ static MEMORY_WRITE_START(cirsa_writesnd)
      subset, drawn from the same descriptor field.  (On a6a8274a both
      addresses took 40,704 writes and every one was 0x00, which is why
      section 5 could not test anything: the board was rebooting before it
-     ever played a sample.)
-
-     A bug this exposes, deliberately not fixed here.  bank_w computes
-     data * 0x8000, and banks 0x0B and 0x0C now really occur, which points
-     it at 0x58000 and 0x60000 inside a REGION_SOUND1 that is 0x50000 long
-     -- an out-of-bounds base for cpu_setbank.  The decode is wrong for
-     sport2k: the descriptor table at 0x5624+3n uses exactly ten values
-     over its 63 sounds, 0x00-0x04 and 0x08-0x0C, with 5, 6 and 7 never
-     appearing, which is five 27512s selected by bits 0-2 (CST0..CST7, only
-     five fitted) and bit 3 choosing which 32K half of the selected chip --
-     not a linear bank index.  Mephisto is the other case and is fine as
-     is: eight 27256s, one 32K bank each, bank number = chip number.  A fix
-     therefore has to be per-game and needs the polarity of bit 3 settled,
-     which nothing here does. */
+     ever played a sample.) */
   { 0x10f00, 0x10f00, bank_w },
   { 0x11000, 0x11000, DAC_0_data_w },
-  /* The YM3812 (OPL2) the manual puts on this board with its own 14.318 MHz
-     crystal.  MACHINE_DRIVER_START(cirsa) has always added the chip, but
-     nothing was ever mapped for the 8051 to reach it, so every register write
-     the sound ROM made was silently discarded and the OPL2 never produced a
-     note.  Address/data pair, A0 selecting between them.
+MEMORY_END
 
-     Identified from the ROM's own behaviour rather than guessed: a 40 s
-     headless run logs unmapped writes to 0x11800 carrying exactly the OPL2
-     register map, gaps included -- 0x01-0x08 (test/timers/CSM), 0x20-0x25,
-     0x28-0x2D, 0x30-0x35 (the 18 operators), the matching 0x40/0x60/0x80
-     blocks, 0xA0-0xA8 and 0xB0-0xB8 plus 0xBD (9 channels), 0xC0-0xC8, and
-     0xE0-0xF5 (waveform select) -- each followed by a write to 0x11801.
-     No other chip has that register layout. */
+/* Sport 2000 only: the two maps above plus the OPL2.  The bank-latch aliasing
+   of 0x10800/0x10f00 is explained above mephisto_writesnd.
+
+   The YM3812 (OPL2) is the chip the manual puts on this board with its own
+   14.318 MHz crystal.  MACHINE_DRIVER_START(cirsa) has always added it, but
+   until this branch nothing was mapped for the 8051 to reach it, so every
+   register write the sound ROM made was silently discarded and the OPL2 never
+   produced a note.  Address/data pair, A0 selecting between them.
+
+   Identified from the ROM's own behaviour rather than guessed: a 40 s headless
+   run logs unmapped writes to 0x11800 carrying exactly the OPL2 register map,
+   gaps included -- 0x01-0x08 (test/timers/CSM), 0x20-0x25, 0x28-0x2D,
+   0x30-0x35 (the 18 operators), the matching 0x40/0x60/0x80 blocks, 0xA0-0xA8
+   and 0xB0-0xB8 plus 0xBD (9 channels), 0xC0-0xC8, and 0xE0-0xF5 (waveform
+   select) -- each followed by a write to 0x11801.  No other chip has that
+   register layout. */
+
+static MEMORY_READ_START(cirsa_readsnd)
+  { 0x00000, 0x07fff, MRA_ROM },
+  { 0x08000, 0x0ffff, MRA_BANKNO(1) },
+  { 0x10000, 0x107ff, MRA_RAM },
+  { 0x11800, 0x11800, YM3812_status_port_0_r },   /* OPL2 status */
+MEMORY_END
+
+static MEMORY_WRITE_START(cirsa_writesnd)
+  { 0x00000, 0x07fff, MWA_ROM },
+  { 0x10000, 0x107ff, MWA_RAM },
+  { 0x10800, 0x10800, bank_w },
+  { 0x10f00, 0x10f00, bank_w },
+  { 0x11000, 0x11000, DAC_0_data_w },
   { 0x11800, 0x11800, YM3812_control_port_0_w },
   { 0x11801, 0x11801, YM3812_write_port_0_w },
 MEMORY_END
-
-/* Mephisto shares the map above and has no OPL2, but its sound ROM never
-   touches 0x11800/0x11801 -- a 35 s run logs no unmapped access by cpu 1 at
-   all, before this change -- so the two handlers are unreachable there and a
-   separate map would buy nothing.  Measured: with and without this mapping,
-   all three games' audio hashes and every interrupt counter are identical. */
 
 static PORT_READ_START(cirsa_readsndport)
   { 1, 1, cirsa_sndp1_r },
@@ -2322,7 +2340,7 @@ MACHINE_DRIVER_START(mephisto)
   MDRV_SWITCH_UPDATE(CIRSA)
 
   MDRV_CPU_ADD_TAG("scpu", I8051, 12000000)
-  MDRV_CPU_MEMORY(cirsa_readsnd, cirsa_writesnd)
+  MDRV_CPU_MEMORY(mephisto_readsnd, mephisto_writesnd)
   MDRV_CPU_PORTS(cirsa_readsndport, cirsa_writesndport)
   MDRV_CPU_FLAGS(CPU_AUDIO_CPU)
   MDRV_SOUND_ADD(AY8910, cirsa_ay8910Int)
@@ -2335,7 +2353,12 @@ MACHINE_DRIVER_START(cirsa)
   MDRV_CPU_MEMORY(cirsa_readmem, cirsa_writemem)
   /* Sport 2000's audio board has a YM3812 (OPL2) with its own 14.318 MHz
      crystal; Mephisto's has neither -- just the 8051, an AY-3-8910 and a
-     DAC-08.  MAME agrees: only its sport2k() config adds one. */
+     DAC-08.  MAME agrees: only its sport2k() config adds one.  The chip and
+     the map that reaches it must be added together: mephisto_writesnd names
+     neither handler, so Mephisto's 8051 cannot reach a chip that was never
+     created.  See the comment above cirsa_readsnd. */
+  MDRV_CPU_MODIFY("scpu")
+  MDRV_CPU_MEMORY(cirsa_readsnd, cirsa_writesnd)
   MDRV_SOUND_ADD(YM3812, cirsa_ym3812Int)
 MACHINE_DRIVER_END
 
