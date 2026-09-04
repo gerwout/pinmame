@@ -1277,6 +1277,217 @@ static READ32_HANDLER(cirsa_eram_addr);   /* defined with the sound ports below 
 static const UINT8 cirsaTrough[2] = {6, 0x3c};   /* BALL TROUGH 1-4  */
 static const UINT8 mephTrough[2]  = {7, 0x0e};   /* elements 38,39,40 */
 
+/*=========================================================================
+/  CIRSA_SNDSWEEP -- the switch -> sound sweep harness.
+/
+/  Compiled out entirely unless -DCIRSA_SNDSWEEP.  Built on top of the
+/  I8051_SWEEP build (no REMOTE_DEBUG, no DEBUG) so a run is reproducible;
+/  see scripts/i8051_sweep.sh for why the debugger build must not be used
+/  to measure anything.
+/
+/  It reconstructs the sweep behind docs/findings/2026-09-04-switch-sounds.md
+/  so that document's Mephisto rows can be re-measured at a coin closure that
+/  is off the stuck-coin knee (docs/findings/2026-09-04-mephisto-coin-window.md
+/  puts that knee at ~0.27 s on either Mephisto).
+/
+/  What it does, once per frame from cirsa_vblank:
+/    * walks switch elements 0..67 in fixed-length slots, PASSES times over;
+/      pass 1 closes nothing and is the control;
+/    * inserts a keep-alive slot every 8 element slots -- fill the trough,
+/      drop a coin if the ROM's own credit counter is low, press START -- so a
+/      game is live for the eight element slots that follow.  It never drains:
+/      with the trough left full the ball stays in play, and every element is
+/      therefore stimulated in the same machine state.  The elements that ARE
+/      the trough still get pulsed in their own slots, which is what serves and
+/      drains a ball;
+/    * an element is TOGGLED for CLOSE_MS and put back, so a switch the ROM
+/      holds closed at rest (the trough) is pulsed open, exactly as the
+/      original sweep did.
+/
+/  What it records:
+/    * every byte the ROM pushes into its own sound-command queue, caught by
+/      a one-byte write handler on the queue COUNTER, so nothing can be
+/      enqueued and drained between two samples.  Addresses differ per ROM
+/      revision and were read out of each image, not assumed:
+/         sport2k  counter 0x206FD  queue 0x206FE  depth  9
+/         mephisto counter 0x10359  queue 0x1035A  depth 20  credits 0x10356
+/         mephist1 counter 0x10352  queue 0x10353  depth 20  credits 0x10350
+/      (rev 1.1 is NOT rev 1.2 shifted by a constant: the queue moves by 7
+/       bytes and the credit counter by 6.)
+/    * the ROM's own switch level array for the element under test, so "the
+/      closure arrived" is measured rather than assumed.
+/
+/  Coins are gated on the ROM's own credit counter (< 8) because Mephisto
+/  discards a coin outright above 200 credits -- 0x1BDA is
+/  cmp byte [0x356],0xC8 / jae -- and the original 950 s run pinned itself
+/  at the ceiling with its own keep-alive coins long before the chute slots
+/  came round.  That is the one deliberate difference from the original
+/  harness, and without it the chute rows cannot be measured at all.
+/
+/  Environment (all optional):
+/    CIRSA_SWEEP=1        arm it; without this the binary behaves normally
+/    SWEEP_CLOSE_MS=300   how long an element is held
+/    SWEEP_COIN_MS=300    how long a coin chute is held in a KEEP-ALIVE slot
+/    SWEEP_SLOT_MS=1700   slot length
+/    SWEEP_PASSES=5       passes over the element list
+/    SWEEP_BOOT_MS=40000  quiet time before pass 1
+/=========================================================================*/
+#ifdef CIRSA_SNDSWEEP
+#include <stdlib.h>
+
+#define SWEEP_ELEMS   68
+#define SWEEP_KAEVERY 8                    /* keep-alive slot every N elements */
+#define SWEEP_SLOTS   (SWEEP_ELEMS + (SWEEP_ELEMS + SWEEP_KAEVERY - 1)/SWEEP_KAEVERY)
+
+static struct {
+  int   on;
+  int   meph;
+  int   ramBase;               /* linear address the main CPU's RAM starts at */
+  int   bootFr, slotFr, closeFr, coinFr, passes;
+  int   frame;
+  int   curEl;                 /* element held in this slot, -1 = keep-alive */
+  UINT8 curIdx, curMask;
+  int   curWasSet;             /* level before we touched it: trough rests closed */
+  int   qCount, qBase, qDepth; /* linear addresses of the ROM's sound queue */
+  int   credAddr, levelBase;   /* -1 when not established for this revision */
+  UINT8 *ram;                  /* generic_nvram, i.e. the main CPU's RAM */
+  UINT8 coinIdx, coinMask, startIdx, startMask, trIdx, trMask, trServed;
+} swp;
+
+static int sweep_env(const char *k, int dflt) {
+  const char *v = getenv(k);
+  return v ? atoi(v) : dflt;
+}
+
+/* element -> {swMatrix index, bit}.  Sport 2000 numbers col*6+row, Mephisto
+   col*6+(5-row); both read ROM column N out of swMatrix[N+1], and elements
+   60-67 are the quick contacts in swMatrix[12].  Both orders are the ROMs'
+   own arithmetic -- docs/reference/switch-matrices.md. */
+static void sweep_elem(int el, UINT8 *idx, UINT8 *mask) {
+  if (el >= 60) { *idx = 12; *mask = (UINT8)(1 << (el - 60)); return; }
+  { int col = el / 6, row = el % 6;
+    if (swp.meph) row = 5 - row;
+    *idx = (UINT8)(col + 1); *mask = (UINT8)(1 << row); }
+}
+
+/* The queue counter's own write handler.  The ROM writes queue[count] and
+   only then increments count, so every byte is already in RAM when the
+   counter moves -- nothing can be enqueued and drained between samples. */
+static WRITE_HANDLER(sweep_qcount_w) {
+  int cOff = swp.qCount - swp.ramBase;
+  int prev = swp.ram ? swp.ram[cOff] : 0;
+  if (swp.ram) swp.ram[cOff] = data;
+  /* SoundCmd increments the counter by exactly one per call, so accept only
+     that.  The ROM's power-on RAM test walks patterns through this byte too,
+     and a jump of 0 -> 0xFF would otherwise read as 255 queued commands. */
+  if (swp.on && swp.ram && data == prev + 1 && prev < swp.qDepth)
+    printf("SW cmd f=%d el=%d cmd=%02X\n", swp.frame, swp.curEl,
+           swp.ram[swp.qBase - swp.ramBase + prev]);
+}
+
+static void sweep_init(void) {
+  const char *g = Machine->gamedrv->name;
+  swp.meph    = core_gameData->hw.gameSpecific1 ? 1 : 0;
+  swp.on      = sweep_env("CIRSA_SWEEP", 0);
+  swp.ramBase = swp.meph ? 0x10000 : 0x20000;
+  if (!strcmp(g, "mephisto")) {
+    swp.qCount = 0x10359; swp.qBase = 0x1035A; swp.qDepth = 20;
+    swp.credAddr = 0x10356; swp.levelBase = 0x1009E;
+  } else if (!strcmp(g, "mephist1")) {
+    swp.qCount = 0x10352; swp.qBase = 0x10353; swp.qDepth = 20;
+    swp.credAddr = 0x10350; swp.levelBase = -1;
+  } else {                                        /* sport2k */
+    swp.qCount = 0x206FD; swp.qBase = 0x206FE; swp.qDepth = 9;
+    swp.credAddr = -1;    swp.levelBase = 0x2072B;
+  }
+  if (swp.meph) {
+    /* The same cells mephCoinSw/cirsaCoinSw below carry; spelled out here
+       because those tables are declared after this block. */
+    swp.coinIdx = 6; swp.coinMask = 0x10;      /* chute 0, +1 credit */
+    swp.startIdx= 4; swp.startMask= 0x04;      /* START, element 21  */
+    swp.trIdx   = mephTrough[0];    swp.trMask   = mephTrough[1];
+    swp.trServed= (UINT8)(mephTrough[1] & ~0x02);  /* one ball out of the trough */
+  } else {
+    swp.coinIdx = 7; swp.coinMask = 0x10;      /* centre chute, +1 credit */
+    swp.startIdx= 7; swp.startMask= 0x04;      /* START, element 38       */
+    swp.trIdx   = cirsaTrough[0];    swp.trMask   = cirsaTrough[1];
+    swp.trServed= cirsaTrough[1];    /* sport2k drains on BALL OUT, not the trough */
+  }
+  swp.bootFr  = sweep_env("SWEEP_BOOT_MS", 40000) * 60 / 1000;
+  swp.slotFr  = sweep_env("SWEEP_SLOT_MS", 1700)  * 60 / 1000;
+  swp.closeFr = sweep_env("SWEEP_CLOSE_MS", 300)  * 60 / 1000;
+  swp.coinFr  = sweep_env("SWEEP_COIN_MS", 300)   * 60 / 1000;
+  swp.passes  = sweep_env("SWEEP_PASSES", 5);
+  if (swp.closeFr < 1) swp.closeFr = 1;
+  if (swp.coinFr  < 1) swp.coinFr  = 1;
+  if (swp.closeFr > swp.slotFr - 6) swp.closeFr = swp.slotFr - 6;
+  swp.frame = 0; swp.curEl = -1; swp.ram = NULL;
+  if (swp.on) {
+    install_mem_write_handler(0, swp.qCount, swp.qCount, sweep_qcount_w);
+    printf("SW cfg game=%s meph=%d boot=%d slot=%d close=%d coin=%d passes=%d "
+           "slots=%d qcount=%05X\n", g, swp.meph, swp.bootFr, swp.slotFr,
+           swp.closeFr, swp.coinFr, swp.passes, SWEEP_SLOTS, swp.qCount);
+  }
+}
+
+static void sweep_frame(void) {
+  int t, pass, sp, fr, el;
+  if (!swp.on) return;
+  if (!swp.ram) swp.ram = generic_nvram;
+  t = swp.frame++;
+  if (t < swp.bootFr) {
+    if (t == swp.bootFr - 1) printf("SW boot done f=%d\n", t);
+    return;
+  }
+  t -= swp.bootFr;
+  pass = t / (SWEEP_SLOTS * swp.slotFr);
+  if (pass >= swp.passes) { printf("SW done f=%d\n", swp.frame); swp.on = 0; return; }
+  sp = (t / swp.slotFr) % SWEEP_SLOTS;
+  fr = t % swp.slotFr;
+  el = (sp % (SWEEP_KAEVERY + 1) == 0) ? -1 : sp - sp/(SWEEP_KAEVERY+1) - 1;
+  if (el >= SWEEP_ELEMS) el = -1;
+
+  if (fr == 0) {                                   /* slot opens */
+    int cred = (swp.credAddr >= 0 && swp.ram) ? swp.ram[swp.credAddr - swp.ramBase]
+                                              : -1;
+    swp.curEl = el;
+    if (el < 0) {                                  /* keep-alive */
+      /* Fill the trough first.  Mephisto will not take START with a ball
+         missing, and the serve it does take is the trough going FULL ->
+         SERVED afterwards -- the same cycle scripts/playtest-deep.sh uses. */
+      coreGlobals.swMatrix[swp.trIdx] |= swp.trMask;
+      if (cred < 0 || cred < 8)
+        coreGlobals.swMatrix[swp.coinIdx] |= swp.coinMask;
+    } else if (pass > 0) {                         /* pass 1 closes nothing */
+      sweep_elem(el, &swp.curIdx, &swp.curMask);
+      swp.curWasSet = (coreGlobals.swMatrix[swp.curIdx] & swp.curMask) ? 1 : 0;
+      if (swp.curWasSet) coreGlobals.swMatrix[swp.curIdx] &= ~swp.curMask;
+      else               coreGlobals.swMatrix[swp.curIdx] |=  swp.curMask;
+    }
+    printf("SW slot p=%d s=%d el=%d f=%d cred=%d\n", pass, sp, el, swp.frame, cred);
+  }
+  if (el < 0) {                                    /* keep-alive timing */
+    if (fr == swp.coinFr) coreGlobals.swMatrix[swp.coinIdx]  &= ~swp.coinMask;
+    if (fr == 20)         coreGlobals.swMatrix[swp.startIdx] |=  swp.startMask;
+    if (fr == 38)         coreGlobals.swMatrix[swp.startIdx] &= ~swp.startMask;
+    return;
+  }
+  if (pass == 0) return;
+  if (fr == swp.closeFr - 1 && swp.levelBase >= 0 && swp.ram && el < 60) {
+    /* Did the ROM's own switch level array see it?  Sport 2000 [0x72B],
+       Mephisto rev 1.2 [0x9E]; one byte per column, bit = the row the
+       element's own numbering gives.  Not established for rev 1.1. */
+    int col = el / 6, row = swp.meph ? 5 - (el % 6) : (el % 6);
+    UINT8 lv = swp.ram[swp.levelBase - swp.ramBase + col];
+    printf("SW lvl el=%d seen=%d raw=%02X\n", el, (lv >> row) & 1, lv);
+  }
+  if (fr == swp.closeFr) {                         /* put it back */
+    if (swp.curWasSet) coreGlobals.swMatrix[swp.curIdx] |=  swp.curMask;
+    else               coreGlobals.swMatrix[swp.curIdx] &= ~swp.curMask;
+  }
+}
+#endif /* CIRSA_SNDSWEEP */
+
 static MACHINE_INIT(CIRSA) {
   memset(&locals, 0, sizeof(locals));
 
@@ -1349,6 +1560,9 @@ static MACHINE_INIT(CIRSA) {
   i8051_set_serial_tx_callback(cirsa_snd_tx);
   i8051_set_serial_rx_callback(cirsa_snd_rx);
   i8051_set_eram_iaddr_callback(cirsa_eram_addr);
+#ifdef CIRSA_SNDSWEEP
+  sweep_init();
+#endif
 }
 
 /* Coin 1/2/3 and Start, as {swMatrix index, bit mask}, measured through each
@@ -1415,6 +1629,9 @@ static SWITCH_UPDATE(CIRSA) {
 }
 
 static INTERRUPT_GEN(cirsa_vblank) {
+#ifdef CIRSA_SNDSWEEP
+  sweep_frame();
+#endif
   core_updateSw(TRUE);
   {
     /* All EIGHT bits, and for BOTH games.  Each ROM numbers eight quick
