@@ -1272,6 +1272,11 @@ extern int g_fHandleKeyboard;
 
 static READ32_HANDLER(cirsa_eram_addr);   /* defined with the sound ports below */
 
+/* The ball trough: a whole column's worth of switches held closed by the balls.
+   Used both by MACHINE_INIT, which seeds them, and by SWITCH_UPDATE's toggle. */
+static const UINT8 cirsaTrough[2] = {6, 0x3c};   /* BALL TROUGH 1-4  */
+static const UINT8 mephTrough[2]  = {7, 0x0e};   /* elements 38,39,40 */
+
 static MACHINE_INIT(CIRSA) {
   memset(&locals, 0, sizeof(locals));
 
@@ -1309,6 +1314,24 @@ static MACHINE_INIT(CIRSA) {
      established too (see ic9_pa_w's block comment), it has the same 24
      coils on the same three connectors, and ic9_pa_w feeds the integrator
      for it on exactly the same schedule. */
+  /* Put the balls in the trough, which is where they are on a machine someone
+     just switched on.  These switches are a level held closed by the balls, not
+     an event, and with them open both ROMs park in BALL WAITING (sport2k) or
+     no bola (mephisto) -- a state that is not attract, does not poll the
+     service check, and cannot be left by any cabinet button.  Seeding here is
+     what lets either game be started straight from the command line instead of
+     needing a wrapper to close them first.
+
+     The "Ball Trough" toggle in SWITCH_UPDATE still works: locals.lastTrough is
+     0 after the memset above and the port bit reads 0, so the two agree, and
+     the first press of the key sets what is already set.  A second press
+     removes the balls, which is the useful direction for testing an empty
+     trough. */
+  {
+    const UINT8 *t = core_gameData->hw.gameSpecific1 ? mephTrough : cirsaTrough;
+    coreGlobals.swMatrix[t[0]] |= t[1];
+  }
+
   coreGlobals.nSolenoids = 24;
   core_set_pwm_output_type(CORE_MODOUT_SOL0, 24, CORE_MODOUT_SOL_2_STATE);
 
@@ -1349,9 +1372,6 @@ static const UINT8 mephCoinSw[4][2] = {
   {7, 0x10},  /* Coin 3 -> chute 2, 5 credits */
   {4, 0x04}   /* Start                        */
 };
-/* The ball trough: a whole column's worth of switches held closed by the balls. */
-static const UINT8 cirsaTrough[2] = {6, 0x3c};   /* BALL TROUGH 1-4  */
-static const UINT8 mephTrough[2]  = {7, 0x0e};   /* elements 38,39,40 */
 
 static SWITCH_UPDATE(CIRSA) {
   /* Write a bit only when the key behind it has actually changed.
