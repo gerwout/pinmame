@@ -1644,8 +1644,29 @@ static MACHINE_INIT(CIRSA) {
      removes the balls, which is the useful direction for testing an empty
      trough. */
   {
+    /* How many balls to put there comes from the "Balls" dip, which SIM_PORTS
+       already declares and which was previously inert: it belongs to the
+       simulator framework, and this driver supplies no simData, so the setting
+       showed in the Tab menu and did nothing.  Honouring it here costs four
+       lines and makes an existing control tell the truth.
+
+       The trough switches are ordered so that bit 0 of the mask is the first
+       ball, so filling n of them is the low n set bits.  Sport 2000 holds four
+       (elements 32-35), Mephisto three (38/39/40); the dip offers up to seven,
+       so clamp.  Zero balls is a legitimate setting -- it is how you reach
+       BALL WAITING / no bola deliberately, which the "Ball Trough" key also
+       does by toggling. */
     const UINT8 *t = core_gameData->hw.gameSpecific1 ? mephTrough : cirsaTrough;
-    coreGlobals.swMatrix[t[0]] |= t[1];
+    UINT8 mask = t[1], seeded = 0;
+    int want = 4, i;
+
+    if (g_fHandleKeyboard)
+      want = (readinputport(CORE_SIMINPORT) & 0x7000) >> 12;
+
+    for (i = 0; i < 8 && want > 0; i++)
+      if (mask & (1 << i)) { seeded |= (UINT8)(1 << i); want--; }
+
+    coreGlobals.swMatrix[t[0]] |= seeded;
   }
 
   coreGlobals.nSolenoids = 24;
@@ -2360,7 +2381,7 @@ MACHINE_DRIVER_END
 
 INPUT_PORTS_START(cirsa)
   CORE_PORTS
-  SIM_PORTS(1)
+  SIM_PORTS(4)
   PORT_START /* CORE_COREINPORT */
     /* Coins and start take MAME's own input types, so they inherit its default
        keys and joystick codes, appear under their standard names in the Tab
