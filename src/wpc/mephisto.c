@@ -24,6 +24,8 @@ static struct {
   UINT8 lastKeys;       /* previous cabinet key state, for edge-only updates */
   UINT8 lastPlayKeys;   /* coin 1/2/3 + start, previous state */
   UINT8 lastTrough;     /* ball trough toggle, previous state */
+  UINT8 lastFlipBut;    /* flipper buttons, previous state, as the two
+                           CORE_SW*FLIPBUTBIT bits of swMatrix[11] */
   int   ppcero;         /* PPCERO, the mains zero-cross pulse: MUART P11,
                            and (through IC26/IC24) the MUART's EXTINT pin */
   /*-- phase 0 instrumentation state --*/
@@ -1704,13 +1706,53 @@ static const UINT8 mephCoinSw[4][2] = {
   {4, 0x04}   /* Start                        */
 };
 
+/* The flipper BUTTONS, as {swMatrix index, bit mask} -- Sport 2000 only.
+   Left = element 16, right = element 17, i.e. swMatrix[3] bits 4 and 5.
+
+   Sport 2000 reports its flipper buttons through the ordinary switch matrix.
+   The manual's own SWITCH MATRIX page (cirsa_sport_2000_manual_en.md section
+   "SWITCH MATRIX", PDF p. 13) names column 2 row 4 "LEFT FLIPPER 16" and row 5
+   "RIGHT FLIPPER 17", the ROM's SWITCH TEST reference table at 0x4F23 gives
+   both the same connector pins the plate does (IC30 J41-08 / IC31 J42-02 and
+   J42-01), and both were measured live through that test --
+   docs/reference/switch-matrices.md.  The path on the real board is the fork
+   described in cirsa_vblank's comment: CONT. MAND. on P36/6 goes to the coil
+   driver AND, through D6/R11/Q7/Q4, out to FILA and COL. on P38, which is the
+   matrix report.  Its 12 V comes from P38/5-6, not from V FLIP, which is why
+   the ROM keeps seeing the button while INH. FLIPPER is asserted.
+
+   MEPHISTO HAS NO SUCH CELLS and deliberately gets no entry here.  Its switch
+   layout list (mephisto_manual_en.md section 6, PDF p. 13) puts entry 43,
+   "Switches NOT read by the matrix", immediately before 44/45 "Left/Right
+   flipper button switch" and 46/47 "Left/Right flipper EOS switch"; its
+   buttons never reach the CPU at all.  Its elements 16 and 17 are two
+   different scoring targets -- separate scheduler handlers 0x4418 and 0x42D1
+   with separate emitter sites, both sounding 0x64, where Sport 2000's two
+   flipper elements share one handler at 0x9CDE and score nothing
+   (docs/findings/2026-09-04-switch-sounds.md) -- so mirroring the keys onto
+   them would make a flipper press score points.
+
+   NEITHER game's ROM reads the end-of-stroke switches.  On Sport 2000 the EOS
+   is an OPB804 opto on the "CARTA FIN. C. FLIPPER" board (plate 21) feeding
+   P37 EMIFC on the flipper power board (plate 20), where it does the local
+   power-winding-to-hold-winding changeover; it goes nowhere near J4.1/J4.2 or
+   J7.  On Mephisto it is in the same "NOT read by the matrix" group as the
+   buttons.  So there is nothing to model, and core.c's FLIP_EOS machinery
+   (core.c:1756-1774, driven by core_getSol on the flipper solenoids) stays
+   switched off -- neither game declares FLIP_EOS. */
+static const UINT8 cirsaFlipSw[2][2] = {
+  {3, 0x10},  /* left  flipper button -> element 16 */
+  {3, 0x20}   /* right flipper button -> element 17 */
+};
+
 static SWITCH_UPDATE(CIRSA) {
+  const int meph = core_gameData->hw.gameSpecific1;
+
   /* Write a bit only when the key behind it has actually changed.
      Rewriting the whole row every frame stamps out anything else that set
      one of these switches -- a front end, or the remote debugger -- before
      the ROM has had a chance to poll it.  Same reasoning as rfranco.c. */
   if (inports) {
-    const int meph = core_gameData->hw.gameSpecific1;
     const UINT8 (*coin)[2] = meph ? mephCoinSw : cirsaCoinSw;
     const UINT8 *trough    = meph ? mephTrough : cirsaTrough;
     UINT8 keys    = (UINT8)((inports[CORE_COREINPORT] >> 8) & 0x0f);
@@ -1741,6 +1783,70 @@ static SWITCH_UPDATE(CIRSA) {
       if (now) coreGlobals.swMatrix[trough[0]] |=  trough[1];
       else     coreGlobals.swMatrix[trough[0]] &= ~trough[1];
       locals.lastTrough = now;
+    }
+  }
+
+  /* The flipper buttons, into the matrix cells the real ones sit on.
+     Sport 2000 only -- see cirsaFlipSw above for why Mephisto gets nothing.
+
+     Read from swMatrix[CORE_FLIPPERSWCOL] rather than from the input ports,
+     because that is the one place both front ends agree on.  core_updateSw
+     writes those two bits from the L/R Shift keys when the driver owns the
+     keyboard and leaves them as the front end set them when it does not
+     (core.c:1707-1732 and 1776-1777), and both happen a few lines before it
+     calls us (core.c:1780), so the byte is current either way.  Taking
+     inports[CORE_FLIPINPORT] instead would work for the keyboard and do
+     nothing under VPinMAME or libpinmame, which pass us a NULL inports.
+
+     Change-only, exactly like the coin and trough bits above, and that is
+     the whole reason FLIP_SWNO on cirsaGameData is NOT used instead -- which
+     would otherwise be the tree's idiomatic way to say this.  Two things came
+     out of trying it:
+
+       * the switch numbers are NOT the ones the default sw2m implies.
+         core.c:2137 only falls back on (no/10)*8+(no%10-1) when the machine
+         driver installs no converter, and MDRV_IMPORT_FROM(PinMAME) installs
+         one for everybody: core_swSeq2m, no+7 (core.c:2108, core.c:4005).  So
+         elements 16/17 -- swMatrix[3] bits 4 and 5, internal 28 and 29 -- are
+         FLIP_SWNO(21,22), not FLIP_SWNO(35,36).  Verified from the other end
+         too: /api/input?sw=21 sets swMatrix[3] bit 4.
+       * even with the right numbers it takes those two cells away from
+         everything else.  core.c:1740-1741 calls core_setSw for both flipper
+         switches on EVERY frame whatever the keys are doing, and core_setSw
+         clears the bit before it writes it (core.c:2139).  Measured on a
+         FLIP_SWNO(21,22) build: the key does reach element 16 (swMatrix[3] =
+         0x10, ROM debounce [0x72B+2] = 0x10), but a
+         /api/input/matrix?col=3&val=10 write is gone before the first
+         readback ~50 ms later and the ROM's debouncer -- which wants ~1.2 s
+         of closure -- never sees it at all.  That silently breaks the service
+         menu's own documented navigation (CLAUDE.md, "LEFT FLIPPER
+         col=3 val=10 (next)") and any switch sweep over elements 16/17,
+         which is how docs/reference/switch-matrices.md was measured.
+
+     Mirroring here costs one compare per frame and leaves both cells
+     writable.
+
+     Deliberately NOT gated on locals.inhFlip.  INH. FLIPPER takes the 50 V
+     away from the coil, not the 12 V away from the button's matrix report
+     (cirsa_vblank's comment traces both), so a tilted machine still sees the
+     button.  core_updateSw models the coil half on its own: it is passed
+     !locals.inhFlip and clears the synthesised solenoids2 bits with it. */
+  if (!meph) {
+    const UINT8 butMask = (UINT8)(CORE_SWLLFLIPBUTBIT | CORE_SWLRFLIPBUTBIT);
+    const UINT8 but     = (UINT8)((coreGlobals.swMatrix[CORE_FLIPPERSWCOL] ^
+                                   coreGlobals.invSw[CORE_FLIPPERSWCOL]) & butMask);
+    const UINT8 moved   = (UINT8)(but ^ locals.lastFlipBut);
+    if (moved) {
+      int i;
+      for (i = 0; i < 2; i++) {
+        const UINT8 bit = (UINT8)(i ? CORE_SWLRFLIPBUTBIT : CORE_SWLLFLIPBUTBIT);
+        if (moved & bit) {
+          const UINT8 idx = cirsaFlipSw[i][0], msk = cirsaFlipSw[i][1];
+          if (but & bit) coreGlobals.swMatrix[idx] |=  msk;
+          else           coreGlobals.swMatrix[idx] &= ~msk;
+        }
+      }
+      locals.lastFlipBut = but;
     }
   }
 }
