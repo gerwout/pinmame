@@ -1661,7 +1661,7 @@ static MACHINE_INIT(CIRSA) {
     int want = 4, i;
 
     if (g_fHandleKeyboard)
-      want = (readinputport(CORE_SIMINPORT) & 0x7000) >> 12;
+      want = SIM_BALLS(readinputport(CORE_SIMINPORT));
 
     for (i = 0; i < 8 && want > 0; i++)
       if (mask & (1 << i)) { seeded |= (UINT8)(1 << i); want--; }
@@ -2103,16 +2103,25 @@ static WRITE_HANDLER(bank_w) {
     off = cirsa_cst[data & 0x07] * 0x10000 + (((data >> 3) & 1) * 0x8000);
 
   cpu_setbank(1, memory_region(REGION_SOUND1) + off);
+#if CIRSA_VERBOSE
+  /* Very hot: ~384k bank writes in 40 emulated seconds, i.e. ~9,600 log lines
+     a second with -log on, which buries every other trace.  Same class as the
+     "op-code execute on mapped I/O" flood already cleaned up in this tree. */
   logerror("SND BANK %x:%02x -> %05x\n", offset, data, off);
+#endif
 }
 
 static READ_HANDLER(port_r) {
+#if CIRSA_VERBOSE
   logerror("SND PORT %x READ\n", offset);
+#endif
   return 0;
 }
 
 static WRITE_HANDLER(port_w) {
+#if CIRSA_VERBOSE
   logerror("SND PORT %x:%02x\n", offset, data);
+#endif
 }
 
 /*-- The sound CPU's ports 1 and 3 (plate 11 / Mephisto plate 9) ----------
