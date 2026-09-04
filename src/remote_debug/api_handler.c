@@ -327,7 +327,17 @@ static void handle_api_info(const http_request_t *req, http_response_t *resp)
 		char sw_hex[CORE_MAXSWCOL * 2 + 1];
 		char seg_hex[CORE_SEGCOUNT * 4 + 1];
 		char desc_esc[256];
+		/* room for CORE_MAXGI ints ("-2147483648," is 12) plus the brackets */
+		char gi_str[CORE_MAXGI * 12 + 4];
+		char *gi_p = gi_str;
 		int i, ded, len;
+		/* GI strings, 0..8 per string, as a JSON array.  Only the drivers
+		   that set coreGlobals.nGI have any; the rest report []. */
+		*gi_p++ = '[';
+		for (i = 0; i < coreGlobals.nGI && i < CORE_MAXGI; i++)
+			gi_p += sprintf(gi_p, i ? ",%d" : "%d", coreGlobals.gi[i]);
+		*gi_p++ = ']';
+		*gi_p = '\0';
 		for (i = 0; i < CORE_MAXLAMPCOL; i++)
 			sprintf(lamp_hex + i * 2, "%02X", coreGlobals.lampMatrix[i]);
 		for (i = 0; i < CORE_MAXSWCOL; i++)
@@ -339,12 +349,12 @@ static void handle_api_info(const http_request_t *req, http_response_t *resp)
 			"{\"game\": \"%s\", \"description\": \"%s\", \"manufacturer\": \"%s\", "
 			"\"year\": \"%s\", \"paused\": %d, \"wpc_bank\": %d, \"lamps\": \"%s\", "
 			"\"switches\": \"%s\", \"segments\": \"%s\", \"dedicated\": %d, "
-			"\"solenoids\": %u, \"solenoids2\": %u}",
+			"\"solenoids\": %u, \"solenoids2\": %u, \"gi\": %s}",
 			Machine->gamedrv->name,
 			remote_debug_json_escape(desc_esc, (int)sizeof(desc_esc), Machine->gamedrv->description),
 			Machine->gamedrv->manufacturer, Machine->gamedrv->year,
 			remote_debug_is_paused(), bank, lamp_hex, sw_hex, seg_hex, ded,
-			coreGlobals.solenoids, coreGlobals.solenoids2);
+			coreGlobals.solenoids, coreGlobals.solenoids2, gi_str);
 		remote_debug_unlock();
 		resp->body = buffer;
 		resp->len = (len > 0 && len < 8192) ? len : (int)strlen(buffer);

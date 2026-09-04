@@ -34,6 +34,9 @@ static struct {
   int   qcTransparent;  /* IC9 PC5 high -> latch follows input */
   UINT8 sndToSnd;       /* last byte the MUART sent, latched for the 8051 */
   UINT8 p2Out;          /* last value written to MUART port 2, for edge detect */
+  UINT8 inhLF;          /* P25 INH. LUCES FIJAS      -- 1 = fixed lights off  */
+  UINT8 inhFlip;        /* P26 INH. FLIPPER          -- 1 = flipper power off */
+  UINT8 inhLC;          /* P27 INH. LUCES CONTROLADAS-- 1 = lamp matrix off   */
   UINT8 muartP1Out;     /* MUART port 1 output latch; bit 6 is the 8051's P3.2 */
   UINT8 sndP1;          /* 8051 port 1 output latch = the AY-3-8910 data bus */
   UINT8 sndP3;          /* 8051 port 3 output latch; bits 4/5 = BDIR/BC1 */
@@ -853,6 +856,75 @@ static void cirsa_p1_out(UINT8 data) {
 /  as 1.  P24 RST ASIN (sound board reset), P25 INH LF, P26 INH FLIP and
 /  P27 INH L.C. are outputs -- these are the bits the ROM sets and clears
 /  around 0x0A29, not display strobes as first assumed.
+/
+/  THE THREE INHIBIT LINES: WHAT THEY SWITCH, AND WHICH LEVEL INHIBITS.
+/  Settled 2026-09-04 from the schematics and the Mephisto manual's own
+/  text; docs/findings/2026-09-04-inhibit-lines.md carries the full trace.
+/
+/  Sport 2000 plate 5 (PDF p.28) at 600 dpi: the three lines leave the
+/  MUART at pins P25/P26/P27, cross ONE buffer each -- a 7407, drawn as a
+/  plain triangle with the open-collector diamond inside and NO output
+/  bubble, i.e. NON-INVERTING -- and go out on J13.  RST ASIN on P24 uses
+/  the fourth gate of the same package.  So the pin level IS the line
+/  level; a 7407 is used because the far end sits at 12-17 V.
+/
+/  At the power supply (plate 3, PDF p.26) they arrive on J33 and each one
+/  feeds an opto-coupled triac that switches one transformer secondary:
+/
+/    J33-1 INH FLIP -> DL6 -> R13 2K2 -> T2 BC327 (emitter +12V, base pulled
+/                      up by R14 560R) -> FT3 3020 -> TR3 BTB24-600 triac
+/                      -> 50 VCA -> PR4 -> V FLIP        (J30-3/4)
+/    J33-3 INH LF   -> DL7 -> R15 2K2 -> T3 BC327 (emitter +17V, R16 560R)
+/                      -> RL2 / FT4 3020 -> TR4 triac -> 7 VCA -> VCA LF
+/                                                        (J29-1..4)
+/    J33-5 INH LC   -> DL5 -> FT1 3020 LED, whose anode goes through R24
+/                      470R to +12V -> TR1 triac -> 16 VCA -> PR2 -> V LC
+/                                                        (J31-9/10)
+/    (J33-4 INH BOB is the same circuit again, but driven by the power
+/     board's own 74HC259 IC4, not by port 2.  Sport 2000's ROM puts it in
+/     the coil frame instead: 0x0A53/0x0A5A set/clear bit 6 of [0x673].)
+/
+/  Every one of those is a PNP emitter follower or an LED whose anode is
+/  pulled up on the far side, so current flows -- and the supply comes ON
+/  -- only while the CPU pulls the line LOW.  A high or floating line
+/  starves the opto and the triac stops firing.  Hence:
+/
+/      P25/P26/P27 LOW  = supply present  (NOT inhibited)
+/      P25/P26/P27 HIGH = supply removed  (inhibited)
+/
+/  Three independent corroborations, none of them "what makes the emulator
+/  behave":
+/
+/  1. The Mephisto manual, p.9, describing the power supply's own LEDs --
+/     which sit in series with these very lines (DL5/DL6/DL7/DL8): "once
+/     the self-test has finished the machine goes to GAME OVER and the
+/     green LEDs on the left (DL12-DL14) light.  LED DL15 stays off, since
+/     it corresponds to the flipper inhibit and therefore lights only when
+/     the machine enters Game."  DL12 = INH. LUCES CONTROLADAS, DL13 = INH.
+/     BOBINAS, DL14 = INH. LUCES FIJAS, DL15 = INH. FLIPPER.  A lit LED is
+/     a line being pulled low, i.e. that supply enabled -- lights and coils
+/     on at GAME OVER, flippers only during a game.  Exactly the mapping
+/     above.
+/  2. Sport 2000's ROM.  0x0A22 is UpdateInhibits and its four flags are
+/     "enabled" booleans: [0x58D] -> P25, [0x58E] -> P27, [0x6B4] -> P26,
+/     [0x6B5] -> the coil-frame INH BOB bit.  Flag non-zero -> AND the port
+/     bit away; flag zero -> OR it in.  Boot (0x06E2-0x06F6) clears all four
+/     and calls it immediately, so a freshly reset machine drives all three
+/     lines HIGH -- everything off while it is still testing itself, which
+/     only makes sense if HIGH is the inhibited state.
+/  3. Measured live on this driver before the change: attract p2 = 0x40
+/     (flippers inhibited, both light rails on), ball in play p2 = 0x00
+/     (all three released), tilt p2 = 0x40/0xC0 alternating while the ROM
+/     flashes the whole lamp matrix.
+/
+/  The names are the Mephisto manual's, spelled out on its connector list:
+/  J1.1-2 "INH. LUC. FIJAS", J1.1-3 "INH. FLIPPER", J1.1-4 "INH. LUC.
+/  CONTR.".  So LF = luces fijas, the 6.3/7 VAC general illumination, and
+/  L.C. = luces controladas, the rail called V LUCES on the control board
+/  -- plate 6 shows it feeding the eight BDX34C lamp-column drivers behind
+/  IC29, i.e. it IS the lamp matrix supply.  (Do not confuse either with
+/  the control board's LC0-LC7 / LF0-LF7, which are the matrix column and
+/  row lines -- an unlucky collision of abbreviations.)
 /----------------------------------------------------------------------*/
 static void cirsa_p2_out(UINT8 data) {
   /* P24 = RST ASIN, the sound board's reset line.  Both manuals draw the same
@@ -872,11 +944,38 @@ static void cirsa_p2_out(UINT8 data) {
      Edge triggered on purpose.  The ROM writes port 2 for the three inhibit
      lines as well, and cpu_set_reset_line() schedules its work through
      timer_set(), so re-asserting on every write would keep re-suspending the
-     8051.  scpu is CPU 1: mcpu is added first in MACHINE_DRIVER_START(mephisto).
-
-     P25 INH LF, P26 INH FLIP and P27 INH L.C. still have no consumer. */
+     8051.  scpu is CPU 1: mcpu is added first in MACHINE_DRIVER_START(mephisto). */
   if ((data ^ locals.p2Out) & 0x10)
     cpu_set_reset_line(1, (data & 0x10) ? ASSERT_LINE : CLEAR_LINE);
+
+  /* P25/P26/P27, decoded per the block comment above: 1 = that supply has
+     been switched off at the power board. */
+  locals.inhLF   = (data & 0x20) ? 1 : 0;
+  locals.inhFlip = (data & 0x40) ? 1 : 0;
+
+  /* INH LUCES FIJAS -> the general illumination string.  This is the one
+     output on the machine that is neither a matrix lamp nor a coil, and
+     coreGlobals.gi[] is where PinMAME keeps exactly that; gts80.c:406 does
+     the same thing for its tilt relay's GI.  gi[] is the 0..8 "brightness"
+     the non-modsol renderer reads, the PWM write is what a modsol front end
+     reads, and MACHINE_INIT declares nGI so neither is left unfed. */
+  coreGlobals.gi[0] = locals.inhLF ? 0 : 8;
+  core_write_masked_pwm_output_8b(CORE_MODOUT_GI0, locals.inhLF ? 0 : 1, 0x01);
+
+  /* INH LUCES CONTROLADAS -> V LUCES, the rail the whole lamp matrix hangs
+     off.  With it gone no column can be lit however the ROM strobes IC20,
+     so blank the matrix the instant the line goes high rather than waiting
+     for the current sweep to finish; ic20_pb_w keeps it blank for as long
+     as the line stays high.  Both games' tilt handlers exercise this
+     (Sport 2000 flashes the matrix through it), which is why it has to
+     follow the line rather than the sweep. */
+  if (locals.inhLC != ((data & 0x80) ? 1 : 0)) {
+    locals.inhLC = (data & 0x80) ? 1 : 0;
+    if (locals.inhLC) {
+      memset((void *)coreGlobals.lampMatrix,    0, sizeof(coreGlobals.lampMatrix));
+      memset((void *)coreGlobals.tmpLampMatrix, 0, sizeof(coreGlobals.tmpLampMatrix));
+    }
+  }
   locals.p2Out = data;
 }
 
@@ -1052,7 +1151,11 @@ static WRITE_HANDLER(ic20_pb_w) {
     memset((void *)coreGlobals.tmpLampMatrix, 0, sizeof(coreGlobals.tmpLampMatrix));
   }
   locals.lampPrev = locals.lampCol;
-  core_setLamp(coreGlobals.tmpLampMatrix, 1 << locals.lampCol, data);
+  /* MUART P27 (INH. LUCES CONTROLADAS) cuts V LUCES, the matrix's own
+     supply -- see cirsa_p2_out.  The ROM goes on strobing IC20 while the
+     rail is gone, so the gate belongs here, not in the ROM's data. */
+  core_setLamp(coreGlobals.tmpLampMatrix, 1 << locals.lampCol,
+               locals.inhLC ? 0 : data);
 }
 
 static READ_HANDLER(ic20_pc_r) {
@@ -1546,6 +1649,20 @@ static MACHINE_INIT(CIRSA) {
   coreGlobals.nSolenoids = 24;
   core_set_pwm_output_type(CORE_MODOUT_SOL0, 24, CORE_MODOUT_SOL_2_STATE);
 
+  /* One GI string: the "luces fijas" (fixed lights / general illumination)
+     that MUART P25 switches through the power supply's TR4 triac -- 7 VAC
+     on Sport 2000, 6.3 VAC on Mephisto, ordinary #44-class bulbs either
+     way, so CORE_MODOUT_BULB_44_6_3V_AC.  Declared here and written from
+     cirsa_p2_out, which is the same "count plus integrator, never one
+     without the other" rule the nSolenoids comment above spells out.
+     It starts ON because MUART port 2 resets to 0x00 and 0 = not
+     inhibited; both ROMs then drive all three lines high a few hundred
+     instructions later (sport2k 0x06F6). */
+  coreGlobals.nGI = 1;
+  core_set_pwm_output_type(CORE_MODOUT_GI0, 1, CORE_MODOUT_BULB_44_6_3V_AC);
+  coreGlobals.gi[0] = 8;
+  core_write_masked_pwm_output_8b(CORE_MODOUT_GI0, 1, 0x01);
+
   i8256_init(&cirsa_i8256);
   /* PPCERO: a narrow 100 Hz pulse on MUART P11 and, through IC26/IC24,
      on the MUART's EXTINT pin.  One timer per crossing; the falling edge
@@ -1632,7 +1749,32 @@ static INTERRUPT_GEN(cirsa_vblank) {
 #ifdef CIRSA_SNDSWEEP
   sweep_frame();
 #endif
-  core_updateSw(TRUE);
+  /* MUART P26, INH. FLIPPER: the ROM's only control over the flippers.  On
+     this hardware the flipper board fires its own coil straight from the
+     button, and the button contact forks (plate 20, PDF p.43, at 400 dpi):
+     CONT. MAND. on P36/6 -> D5 -> Q5 BC337 -> Q3 TIP112 -> the dual-wound
+     coil between +50 and GNDFLIP (P36/2,3), and separately CONT. MAND. ->
+     D6 -> R11 4K7 -> Q7 BC327 -> Q4 BC337 -> FILA (P38/1,2) and COL.
+     (P38/3,4), the matrix report, which runs off +12 (P38/5,6) and GND12
+     (P38/7,8) and touches neither the 50 V nor GNDFLIP.  So the CPU can
+     neither pulse a flipper nor stop seeing the button; all it can do is
+     take away the 50 V, and that is what P26 does.
+
+     core_updateSw's flipEn argument models exactly that.  core.c:1746-1753
+     is its only use in the whole tree: for a game without FLIP_SOL -- which
+     is this one, cirsaGameData/mephistoGameData declare a bare
+     FLIP_SW(FLIP_L) -- it clears the four synthesised flipper-coil bits in
+     coreGlobals.solenoids2 and only sets them from the flipper keys when
+     flipEn is true.  A front end reads those bits to move the flipper, so
+     gating them here is the emulated equivalent of the triac dropping out.
+     Note what it deliberately does NOT touch: the flipper button switches
+     themselves, which the real machine still reads while tilted.
+
+     Precedent for the shape, not invented here: gts1.c:112
+     core_updateSw(core_getSol(17)) with sol 17 = "game not over AND NOT
+     tilt", gts80.c:91-108 which ANDs the tilt relay into GameOn the same
+     way, s11.c:358 core_updateSw(locals.ssEn), alvg.c:558 and zac.c:78. */
+  core_updateSw(!locals.inhFlip);
   {
     /* All EIGHT bits, and for BOTH games.  Each ROM numbers eight quick
        contacts as switch-test elements 60-67 and reads them off IC9 Port B:
