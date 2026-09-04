@@ -2044,7 +2044,7 @@ ROM_END
 /* init_mephisto is a real function (above) that selects mephistoGameData,
    not init_cirsa -- Mephisto uses its own column-mask table. */
 #define input_ports_mephisto input_ports_cirsa
-CORE_GAMEDEFNV(mephisto,"Mephisto (rev. 1.2)",1986,"Stargame",mephisto,GAME_NOT_WORKING)
+CORE_GAMEDEFNV(mephisto,"Mephisto (rev. 1.2)",1986,"Stargame",mephisto,GAME_IMPERFECT_SOUND)
 
 ROM_START(mephist1)
   NORMALREGION(0x1000000, REGION_CPU1)
@@ -2069,7 +2069,7 @@ ROM_END
    than init_cirsa. */
 #define init_mephist1 init_mephisto
 #define input_ports_mephist1 input_ports_cirsa
-CORE_CLONEDEFNV(mephist1,mephisto,"Mephisto (rev. 1.1)",1986,"Stargame",mephisto,GAME_NOT_WORKING)
+CORE_CLONEDEFNV(mephist1,mephisto,"Mephisto (rev. 1.1)",1986,"Stargame",mephisto,GAME_IMPERFECT_SOUND)
 
 ROM_START(sport2k)
   NORMALREGION(0x1000000, REGION_CPU1)
@@ -2087,4 +2087,4 @@ ROM_START(sport2k)
 ROM_END
 #define init_sport2k init_cirsa
 #define input_ports_sport2k input_ports_cirsa
-CORE_GAMEDEFNV(sport2k,"Sport 2000",1988,"Cirsa",cirsa,GAME_NOT_WORKING)
+CORE_GAMEDEFNV(sport2k,"Sport 2000",1988,"Cirsa",cirsa,GAME_IMPERFECT_SOUND)
