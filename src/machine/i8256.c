@@ -84,7 +84,27 @@ static struct {
   int   intline;        /* current state of the INT pin */
   int   prescale;       /* 16 kHz -> 1 kHz divider when CMD1.FRQ is set */
   int   initialised;
+  mame_timer *tick;     /* the common time base */
+  int   tickdiv;        /* CMD2 prescaler selection the tick is armed for */
 } i8256;
+
+/*-- CMD2 bits 5,4 = C1,C0, the system clock prescaler.  The divider ratio
+/  and the CLK frequency the datasheet expects with it (all four make an
+/  internal 1.024 MHz, which /64 is the quoted 16 kHz).  --*/
+static const int i8256_sysdiv[4] = { 5, 3, 2, 1 };
+#define I8256_NOMINAL_CLK 5120000   /* the divide-by-5 setting's nominal CLK */
+
+/* Arm (or re-arm) the common time base for the current CLK and prescaler. */
+static void i8256_tick(int dummy);
+static void i8256_arm_base(void) {
+  UINT32 clk = (i8256.intf && i8256.intf->clock) ? i8256.intf->clock
+                                                 : I8256_NOMINAL_CLK;
+  int div = i8256_sysdiv[(i8256.reg[R_CMD2] >> 4) & 3];
+  double hz = (double)clk / (div * 64.0);
+  i8256.tickdiv = div;
+  if (!i8256.tick) i8256.tick = timer_alloc(i8256_tick);
+  timer_adjust(i8256.tick, TIME_IN_HZ(hz), 0, TIME_IN_HZ(hz));
+}
 
 /*-------------------------------------------------------------------------
 /  Interrupt controller
@@ -361,6 +381,12 @@ WRITE_HANDLER(i8256_w) {
       i8256_port1_write(i8256.p1_latch);   /* direction change re-drives the pins */
       return;
 
+    case R_CMD2:
+      i8256.reg[R_CMD2] = data;
+      /* bits 5,4 pick the system clock prescaler, which sets the timer base */
+      if (i8256_sysdiv[(data >> 4) & 3] != i8256.tickdiv) i8256_arm_base();
+      return;
+
     default:
       i8256.reg[reg] = data;
       return;
@@ -414,9 +440,11 @@ int i8256_is_8086_mode(void) { return CMD1_8086(i8256.reg[R_CMD1]); }
 void i8256_reset(void) {
   const I8256interface *intf = i8256.intf;
   int init = i8256.initialised;
+  mame_timer *tick = i8256.tick;
   memset(&i8256, 0, sizeof(i8256));
   i8256.intf = intf;
   i8256.initialised = init;
+  i8256.tick = tick;
   i8256.curlevel = -1;
   i8256.status = ST_TBE | ST_TRE;      /* transmitter idle */
   i8256.p1_pins = 0x00;   /* P17 (power fail) rests low -- see the driver */
@@ -427,6 +455,12 @@ void i8256_init(const I8256interface *intf) {
   i8256_reset();
   i8256.intf = intf;
   i8256.initialised = 1;
-  /* Common 16 kHz time base; CMD1.FRQ divides it down to 1 kHz in software. */
-  timer_pulse(TIME_IN_HZ(16000), 0, i8256_tick);
+  /* Timers are resource-tracked and freed on every machine reset (cpu_pre_run
+     -> begin_resource_tracking, end_resource_tracking -> timer_free), so the
+     handle i8256_reset carried over from the previous run is stale.  Drop it
+     and let i8256_arm_base allocate a fresh one per run. */
+  i8256.tick = NULL;
+  /* Common time base = CLK / prescaler / 64; CMD1.FRQ divides it down by a
+     further 16 in software.  Re-armed whenever CMD2's prescaler changes. */
+  i8256_arm_base();
 }

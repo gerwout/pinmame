@@ -1036,11 +1036,13 @@ static void cirsa_snd_tx(int data) {
   i8256_receive((UINT8)data);
 }
 
-static const I8256interface cirsa_i8256 = {
+/* .clock is filled in per game by MACHINE_INIT(CIRSA) -- see there. */
+static I8256interface cirsa_i8256 = {
   cirsa_muart_int,
   cirsa_p1_in, cirsa_p1_out,
   cirsa_p2_in, cirsa_p2_out,
-  cirsa_txd_out
+  cirsa_txd_out,
+  0
 };
 
 /*-- IC20: the lamp and switch matrices (plate 6) ------------------------
@@ -1686,6 +1688,57 @@ static MACHINE_INIT(CIRSA) {
   coreGlobals.gi[0] = 8;
   core_write_masked_pwm_output_8b(CORE_MODOUT_GI0, 1, 0x01);
 
+  /* IC4's CLK pin (17) is wired straight to the 8284-A's CLK output -- the
+     same net that clocks the 8088, with no divider between them.  Read off
+     the schematics: Sport 2000's plate 5 (PDF p. 28) prints "6MHz" on that
+     wire beside IC16 pin 8, and the crystal beside IC16 is marked 18MHz on
+     both plate 5 and the plate 7 silkscreen; Mephisto's plate 4 (PDF p. 24)
+     shows the identical connection and its crystal is marked 15MHZ on the
+     plate 6 silkscreen, so 8284-A CLK = XTAL/3 = 5 MHz there.  IC17 (PAT
+     036 / PAT 032) *receives* CLK on its pin 1, it does not generate it,
+     and IC22 (4060) + IC15 (74LS393) are the reset watchdog divider, not a
+     clock source -- the 4060 has no crystal or RC of its own on either
+     board.
+
+     Both ROMs leave CMD2's prescaler on divide-by-5 and CMD1.FRQ on the
+     /64 tap, so the timer base is CLK/320: 18 750 Hz on Sport 2000 and
+     15 625 Hz on Mephisto.  Mephisto's board was built to land on the
+     8256's nominal 16 kHz (5 MHz is 2.3% under the 5.12 MHz the /5 setting
+     expects); Sport 2000 kept the same circuit with a faster crystal and
+     runs its MUART 17% quicker, which is why the two ROMs reload timer 1
+     with different counts -- 19 on Mephisto, 22 on Sport 2000 -- for
+     nearly the same 1.2 ms period.
+
+     Sport 2000's figure has a second, independent derivation, from the
+     serial link.  Both main ROMs put the MUART on CMD2 = 0x02, the TxC/32
+     external-serial-clock setting, so pin 22 needs 32x the bit rate; both
+     sound boards run an 8051 on a 12 MHz crystal with TL1 = TH1 = 0xFE,
+     TMOD 0x22, SCON 0x50 and no PCON write anywhere in either image, i.e.
+     exactly 15 625 baud.  The drawings show where pin 22 gets its clock,
+     identically on both boards: PCLK -> 8155 IC20 pin 3 (TIMER IN), pin 6
+     (TIMER OUT) -> net CLKUS -> 8256 pin 22, with pin 18 RxC strappable to
+     it by a solder link.  Both ROMs load IC20's timer with 6 in mode 01.
+     On Sport 2000 that closes exactly: 18 MHz -> PCLK 3.000 MHz -> /6 =
+     500.000 kHz -> /32 = 15 625 baud, which forces PCLK = 3 MHz, hence
+     CLK = 6 MHz -- the same figure the drawing prints on pin 17's net.
+
+     Taken literally it does NOT close on Mephisto -- 15 MHz would make the
+     8284-A's own PCLK 2.500 MHz, /6 = 416.667 kHz, /32 = 13 021 baud
+     against its sound board's 15 625, a 16.7% error no UART survives --
+     and the three inputs to that sum have each been read at native
+     resolution and none of them moves: 15MHZ on the control board's plate
+     6 silkscreen (against the 8 of the same sheet's own "8088 (8MHZ)"),
+     12 MHZ on the audio board's plate 10, and 0x06 in both ROM writes to
+     IC20's timer.  The likely reconciliation is that Mephisto's net
+     *labelled* PCLK is not the 8284-A's pin 2 but the PAT's own CLK
+     output -- 15/5 = 3 MHz, where Sport 2000 gets 3 MHz for free as
+     18/6 -- which is what a differently numbered PAT on an otherwise
+     identical board is for.  That was not traced back to a driver pin and
+     is left as an open question.  It does not touch the timer base
+     either way: pin 17 is on the 8284-A's CLK output, junction dot
+     visible, on both boards. */
+  cirsa_i8256.clock = core_gameData->hw.gameSpecific1 ? 5000000  /* mephisto */
+                                                      : 6000000; /* sport2k  */
   i8256_init(&cirsa_i8256);
   /* PPCERO: a narrow 100 Hz pulse on MUART P11 and, through IC26/IC24,
      on the MUART's EXTINT pin.  One timer per crossing; the falling edge

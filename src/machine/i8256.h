@@ -44,6 +44,17 @@ typedef struct {
   void  (*p2_out)(UINT8 data);
   /* A byte written to the transmit buffer.  May be NULL. */
   void  (*txd_out)(UINT8 data);
+  /* Frequency at the CLK pin, in Hz.  The chip divides it by the CMD2
+     system-clock prescaler (C1,C0 = bits 5,4: 5 / 3 / 2 / 1) to make its
+     internal system clock, and that by 64 (CMD1.FRQ = 0) or 1024 (FRQ = 1)
+     to make the common time base for all five counter/timers.  The
+     datasheet's quoted 16 kHz / 1 kHz are what you get when the board feeds
+     the prescaler its nominal input -- 5.12 MHz on the divide-by-5 setting
+     -- and a board that feeds it anything else gets a proportionally
+     different base.  Leave this 0 to keep the datasheet-nominal 16 kHz
+     regardless of the prescaler, which is what MAME's own i8256_device
+     does. */
+  UINT32 clock;
 } I8256interface;
 
 void i8256_init(const I8256interface *intf);
