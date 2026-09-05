@@ -24,6 +24,7 @@ static struct {
   UINT8 lastKeys;       /* previous cabinet key state, for edge-only updates */
   UINT8 lastPlayKeys;   /* coin 1/2/3 + start, previous state */
   UINT8 lastTrough;     /* ball trough toggle, previous state */
+  UINT8 troughPending;  /* seed the trough on the first frame -- see MACHINE_INIT */
   UINT8 lastFlipBut;    /* flipper buttons, previous state, as the two
                            CORE_SW*FLIPBUTBIT bits of swMatrix[11] */
   int   ppcero;         /* PPCERO, the mains zero-cross pulse: MUART P11,
@@ -1662,8 +1663,20 @@ static MACHINE_INIT(CIRSA) {
     UINT8 mask = t[1], seeded = 0;
     int want = 4, i;
 
-    if (g_fHandleKeyboard)
-      want = SIM_BALLS(readinputport(CORE_SIMINPORT));
+    /* The dip cannot be read here.  MACHINE_INIT runs from cpu_run()
+       (src/cpuexec.c:364) BEFORE the first frame, and input_port_value[] is
+       only filled by update_input_ports() (src/inptport.c:2397) once a frame
+       from the OSD loop -- so readinputport() returns 0 at this point,
+       SIM_BALLS(0) is 0, and nothing gets seeded at all.  That is exactly what
+       happened between e0318f80 and this comment: a bare `xpinmame sport2k`
+       parked in BALL WAITING instead of reaching attract, and every harness
+       hid it by loading the trough by hand.  It only bit the standalone
+       binary, because g_fHandleKeyboard is clear under VPinMAME/libpinmame
+       and those took the want = 4 default.
+
+       So seed the default here and let the first SWITCH_UPDATE, which does get
+       a populated inports[], apply the dip. */
+    if (g_fHandleKeyboard) locals.troughPending = 1;
 
     for (i = 0; i < 8 && want > 0; i++)
       if (mask & (1 << i)) { seeded |= (UINT8)(1 << i); want--; }
@@ -1838,6 +1851,28 @@ static SWITCH_UPDATE(CIRSA) {
       coreGlobals.swMatrix[0] = (UINT8)((coreGlobals.swMatrix[0] & ~changed) |
                                         (keys & changed));
       locals.lastKeys = keys;
+    }
+
+    /* Apply the "Balls" dip on the first frame.  MACHINE_INIT could not read it
+       -- see the block comment there -- so it seeded the default and left this
+       flag set.  inports[] is populated by the time SWITCH_UPDATE runs. */
+    if (locals.troughPending) {
+      UINT8 mask = trough[1], seeded = 0;
+      int want = SIM_BALLS(inports[CORE_SIMINPORT]), i;
+      locals.troughPending = 0;
+      /* Only ever ADD to what MACHINE_INIT seeded.  The dip's own DIPSET
+         default does not reach this port on every front end -- measured
+         headless, inports[CORE_SIMINPORT] reads 0x0010, so the 0x7000 Balls
+         field is 0 and SIM_BALLS() is 0.  Letting that overwrite the default
+         is what emptied the trough and parked the machine in BALL WAITING.
+         An operator who wants an empty trough has the "Ball Trough" key,
+         which the block comment in MACHINE_INIT already points at. */
+      if (want > 0) {
+        for (i = 0; i < 8 && want > 0; i++)
+          if (mask & (1 << i)) { seeded |= (UINT8)(1 << i); want--; }
+        coreGlobals.swMatrix[trough[0]] =
+          (UINT8)((coreGlobals.swMatrix[trough[0]] & ~mask) | seeded);
+      }
     }
 
     /* Coin 1/2/3 and Start, same change-only discipline, one bit each. */
