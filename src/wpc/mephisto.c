@@ -2621,6 +2621,60 @@ static core_tLCDLayout mephisto_disp[] = {
    The last two gates went in the matrix round: cirsa_vblank's quick-contact
    gate (Mephisto has the same eight contacts on the same wires -- see just
    above mephistoGameData) and, before it, the display one. */
+/*-- Ball simulator: not supplied, and what it would take -------------------
+/
+/  Both games pass NULL for core_tGameData.simData (the field after .hw), so
+/  there is no ball simulator and the player closes playfield switches by hand
+/  with the generic column/row keys (Q..I x A..K, core.c:1880).  That is the
+/  normal arrangement in this tree -- only 32 of the games here ship a
+/  simulator -- and nothing below is a defect.  But it does cost one audible
+/  feature, and this is the note for whoever writes the table.
+/
+/  WHAT IS MISSING.  Sport 2000 has a full in-game music engine on the OPL2 and
+/  it never runs in ordinary play, because its rulebook waits for the served
+/  ball to roll over BALL OUT and nothing in the emulation ever closes that
+/  switch.  Verified live on a stock build, reading feature 28's state word and
+/  rule-table pointer straight out of RAM:
+/
+/     after START                             [0x868] = 0xD8DE
+/     serve the documented way (trough 3C->1C) [0x868] = 0xD8DE  (frozen, 12 s)
+/     one 0.5 s closure of element 31          [0x868] = 0xD8E8 -> 0xD8F2
+/
+/  So the music FSM is parked in its start table for the whole of a "served"
+/  game and releases within ~1.5 s of a single BALL OUT closure.  The player can
+/  reach it today by hand -- element 31 is swMatrix[6] bit 1, i.e. the Y + S key
+/  pair -- which is exactly the situation of every other unsimulated game.
+/
+/  ROM EVIDENCE, so none of this needs re-deriving.  Feature 28's record sits at
+/  0x782F + 28*8: poll 0xD93A, state word [0x866], enable = disable = 0xD91E.
+/  0xD91E zeroes [0x866], points [0x868] at the start table 0xD8DE and emits
+/  sound command 0x1F (silence) -- so every ball start re-parks it.  0xD8DE has
+/  a single entry, mask 0x0001, and the ONLY instruction in the whole 64 KB image
+/  that sets that bit is `or word [0x866],1` at 0xD438, reached from rule table
+/  0xD46D.  Feature 25's poll 0xD398 reads element 0x1F = 31, and its other
+/  action 0xD3F6 is SolenoidOn(coil 15), the trough kicker.  0xD438 also sets
+/  [0x845], ball-in-play, whose only setter in the image it is -- so on real
+/  hardware the served ball must close element 31, or the machine could never
+/  register a ball in play at all.
+/
+/  HOW TO FIX IT, THE PINMAME WAY.  Do NOT synthesise the rollover in this file
+/  off the back of a coil write; sim.c already owns that job and doing it here
+/  would be a private mechanism duplicating the framework.  sim_tState's
+/  solSwNo field is precisely this case -- "solenoid used to get out of state" --
+/  and taf.c:213 is the pattern to copy:
+/
+/     {"Right Trough", 1, swRTrough, sBallRel, stShooter, 5},
+/
+/  For Sport 2000 that is a trough state holding elements 32-35, released by
+/  coil 15, whose next state closes element 31 (BALL OUT) before the ball
+/  reaches the shooter lane.  A sim_tSimData also needs inports, an inportData
+/  keypress table, ballStart[] and optionally initSim/handleBallState; existing
+/  tables run 40-60 state rows (taf 40, dd 60, milln 44).  Partial simulators
+/  are acceptable -- the README says so -- so a table covering only trough,
+/  shooter, the two ejectors and the drain would already make the music reachable
+/  in normal play.  docs/reference/switch-matrices.md and coil-map.md carry every
+/  element and coil number, with playfield positions, ready to build it from.
+/-------------------------------------------------------------------------*/
 static core_tGameData cirsaGameData    = {0,cirsa_disp,{FLIP_SW(FLIP_L),1,8}};
 static core_tGameData mephistoGameData = {0,mephisto_disp,{FLIP_SW(FLIP_L),1,8,0,0,0,1}};
 static void init_cirsa(void) {
