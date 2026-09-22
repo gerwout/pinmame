@@ -129,7 +129,7 @@ CORE_CLONEDEFNV(bikerc3f,bikerace,"Bike Race (V4.1, free play + press start)",19
 /*-------------------------------------------------------------------
 / Sleic Pin-Ball (1993)
 /-------------------------------------------------------------------*/
-INITGAME(sleicpin, sleic_dispDMD, 1)
+INITGAME(sleicpin, sleic_dispDMD, 0)
 SLEIC_ROMSTART4(sleicpin,"sp01-1_1.rom", CRC(240015bb) SHA1(0e647718173ad59dafbf3b5bc84bef3c33886e23),
 						 "sp02-1_1.rom", CRC(0e4851a0) SHA1(0692ee2df0b560e2013db9c03fd27c6eb12e618d),
 						 "sp03-1_1.rom", CRC(261b0ae4) SHA1(e7d9d1c2cab7776afb732701b0b8697b62a8d990),

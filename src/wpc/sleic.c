@@ -64,10 +64,12 @@ static struct {
    * from PCS0 bit 1, Bike Race toggles it per write (these use different peripheral write handlers, so serves both) */
   UINT8  ymA0;
 
-  /* ---- Io Moon (SLEIC2) only, from here down ---------------------------------------
+  /* ---- Io Moon (SLEIC2) only, from here down, except spBall -------------------------
    * Io Moon runs its own interrupt generator, peripheral handlers and Z80 port map, so
-   * none of the members above serve it; these are its equivalents. MACHINE_INIT's memset zeroes
-   * them at every machine start, and MACHINE_INIT(SLEIC2) then fills only the non-zero values
+   * none of the members above serve it; these are its equivalents (spBall is Sleic
+   * Pin-Ball's, kept next to iomBalls for comparison rather than moved out of order).
+   * MACHINE_INIT's memset zeroes them at every machine start, and MACHINE_INIT(SLEIC2)
+   * then fills only the non-zero values
    * (see it for the 0x28 PCS0 shadow and the trough/coin resets) */
 
   /* Interrupt-rate accumulators and the one-deep pending latch per source, see iomoon_irq_gen */
@@ -100,6 +102,9 @@ static struct {
     int drainHeld;   /* previous state of the drain input, so one press = one ball       */
     int seeded;      /* the model is ON and the complement has been taken from the port  */
   } iomBalls;
+
+  /* Sleic Pin-Ball ball-exit model, see the block comment above sleic1_ball_update */
+  struct { int atExit, kick, drainHeld, seeded; } spBall;
 
   /* Coin mechanism pulse train, see the block comment above iomoon_coin_reset */
   struct { int pending, phase; UINT16 lastKeys; } iomCoin;
@@ -1930,6 +1935,9 @@ static MACHINE_INIT(SLEIC) {
    * and the keys above are only for standalone testing */
 }
 
+/* The ball-exit model (defined further down, with the block comment above sleic1_ball_update) */
+static void sleic1_ball_reset(void);
+
 /* Sleic Pin-Ball: two equal raster fields integrated by the core instead of a
  * pre-integrated level frame -- see sleic1_irq_i8039 and the field-weighting note above
  * sleic_build_dmd_frame.  core_dmd_pwm_init allocates the state it is handed, so it is
@@ -1937,6 +1945,10 @@ static MACHINE_INIT(SLEIC) {
 static MACHINE_INIT(SLEIC1) {
   sleic_init_locals();
   core_dmd_pwm_init(core_gameData->lcdLayout, CORE_DMD_PWM_FILTER_WPC_PH, CORE_DMD_PWM_COMBINER_SUM_2_1, 0);
+  /* Belt-and-braces: sleic_init_locals already memset locals (spBall included), so this
+   * matters for a "Balls" change at runtime rather than for machine init.  Same symmetry
+   * as Io Moon's MACHINE_INIT(SLEIC2), which calls iomoon_ball_reset() alongside its own memset */
+  sleic1_ball_reset();
 }
 
 /* Io Moon: point the segment-6000 graphics bank somewhere valid before the first
@@ -2557,9 +2569,87 @@ static const struct { int key; UINT8 col; UINT8 bit; } sleic1_pf_keys[] = {
                      {KEYCODE_4_PAD,8,0x02},{KEYCODE_5_PAD,8,0x04},{KEYCODE_6_PAD,8,0x08}, /* comun7: C26,C22,C5 */
 };
 
+/*-------------------------------------------------------------------------------------
+/  Sleic Pin-Ball (SLEIC1) ball-exit model -- OPT-IN, AND OFF BY DEFAULT.
+/
+/  Same bargain as the other two: under a frontend a table script owns the contacts, so
+/  with "Balls" at its default 0 the driver presents nothing and C29 is driven only by
+/  its matrix test key.  Setting "Balls" to any non-zero value hands the job to the
+/  driver, which is what a headless run or desktop play needs.
+/
+/  This model tracks a ball where Bike Race's does not, because Pin-Ball's firmware
+/  SHOWS the serve and Bike Race's does not.  The trough here is a single contact --
+/  C29 Salida Bolas, comun 0 retorno 2, swMatrix[1] bit 2 -- and a single coil, bobina
+/  11 Bobina Salida Bolas on port 0x86 bit 6, fire routine sp04:0x032a, which
+/  sleic1_z80_write maps to locals.solenoids bit 10.  So the sequence the firmware runs
+/  can be followed exactly:
+/
+/    ball at the exit  ->  C29 closed
+/    coil 11 energised ->  kick countdown starts
+/    countdown expires ->  C29 opens, the ball is in play
+/    the drain key     ->  C29 closes again, ball back at the exit
+/
+/  There is no ball count because the machine is single-ball: the ball is at the exit or
+/  it is in play.  The drain is the cabinet port's "Ball out of trough" key, which on
+/  this machine RETURNS the ball rather than taking one away -- the opposite polarity to
+/  Bike Race, where the same key lifts a ball off the ball-present optos.  The shared
+/  SLEIC_CABPORT label is worded for that machine; this comment is the one that applies
+/  here.
+/
+/  The model can't tell a real coil fire from a test one: with "Balls" > 0, pulsing
+/  bobina 11 from the service menu's BOBINAS coil test serves the ball exactly as a real
+/  coil test would -- atExit clears, and nothing but a BACKSPACE press returns it, so a
+/  CONTACTOS run afterward shows C29 open for the rest of the session.  Faithful to a
+/  real machine, not a bug.
+/-----------------------------------------------------------------------------------*/
+#define SLEIC1_TROUGH_COL  1     /* swMatrix index of Z80 comun 0                       */
+#define SLEIC1_TROUGH_BIT  0x04  /* retorno 2 = C29 Salida Bolas                        */
+#define SLEIC1_SERVE_SOL   0x400 /* locals.solenoids bit 10 = bobina 11, port 0x86 bit 6 */
+#define SLEIC1_KICK_FRAMES 8     /* coil fires -> the ball has left the contact (~0.13 s);
+                                   * decremented on the arming frame too, so 8 means seven frames */
+
+/* Called from MACHINE_INIT.  Also the whole of the model-off path, same as Io Moon's */
+static void sleic1_ball_reset(void) {
+  memset(&locals.spBall, 0, sizeof locals.spBall);
+}
+
+/* Called from SWITCH_UPDATE(SLEIC1) AFTER the playfield key loop, and it ORs its bit in
+ * rather than assigning it: a matrix test key held on C29 is a contact stuck closed,
+ * which is what the CONTACTOS self-test wants to see.
+ *
+ * balls = the simulator port's "Balls" setting, 0 (the default) meaning model off.
+ * out   = the cabinet port's "Ball out of trough", which here RETURNS the ball. */
+static void sleic1_ball_update(int balls, int out) {
+  if (balls <= 0) { sleic1_ball_reset(); return; }
+  if (coreGlobals.simAvail) { sleic1_ball_reset(); return; }
+
+  if (!locals.spBall.seeded) {   /* the model comes up with the ball at the exit */
+    locals.spBall.seeded = 1;
+    locals.spBall.atExit = 1;
+  }
+
+  /* The firmware energised the serve coil while a ball was waiting: it is on its way */
+  if (locals.spBall.atExit && (locals.solenoids & SLEIC1_SERVE_SOL)
+      && !locals.spBall.kick)
+    locals.spBall.kick = SLEIC1_KICK_FRAMES;
+
+  if (locals.spBall.kick && --locals.spBall.kick == 0)
+    locals.spBall.atExit = 0;    /* clear of the contact, in play */
+
+  /* One press of the drain key returns one ball, so edge-detect it */
+  if (out && !locals.spBall.drainHeld) locals.spBall.atExit = 1;
+  locals.spBall.drainHeld = out ? 1 : 0;
+
+  if (locals.spBall.atExit)
+    coreGlobals.swMatrix[SLEIC1_TROUGH_COL] |= SLEIC1_TROUGH_BIT;
+}
+
 static SWITCH_UPDATE(SLEIC1) {
   unsigned i;
+  int balls = 0, out = 0;
   if (inports) {
+    balls = SIM_BALLS(inports[CORE_SIMINPORT]);
+    out   = (inports[CORE_COREINPORT] & 0x1000) ? 1 : 0;
     /* Cabinet/direct buttons on Z80 port 0x03 (swMatrix[9]).  port-0x03 bit -> code ->
      * contact CONFIRMED against the sp04 cabinet dispatcher (sub_0978/sub_09fe..0a70)
      * and the sp03 code handlers:
@@ -2586,6 +2676,7 @@ static SWITCH_UPDATE(SLEIC1) {
     else
       coreGlobals.swMatrix[sleic1_pf_keys[i].col] &= ~sleic1_pf_keys[i].bit;
   }
+  sleic1_ball_update(balls, out);   /* after the key loop: it ORs its bit in on top */
 #ifdef DEBUG_SLEIC
   sleic_debug_switches(1, 0x04); /* comun0 bit2 = C29 Salida Bolas (ball trough) */
 #endif
