@@ -1,4 +1,5 @@
 #include "driver.h"
+#include <ctype.h>
 #include "core.h"
 #include "cpu/pic32mx/pic32mxcpu.h"
 #include "pinheck/prop.h"
@@ -106,6 +107,33 @@ static uint64_t pinheck_hold(void *ctx, uint64_t cycle)
 	return boot_hold(&boot, cycle);
 }
 
+static void pinheck_warn(const char *msg)
+{
+	fprintf(stderr, "%s\n", msg);
+	logerror("%s\n", msg);
+}
+
+static int pinheck_starts(const char *n, const char *p)
+{
+	while (*p) if (toupper((unsigned char)*n++) != *p++) return 0;
+	return 1;
+}
+
+static void pinheck_check_card(const vfat_source *s)
+{
+	char msg[160];
+	int i, dmd = 0, sfx = 0;
+	for (i = 0; i < s->count; i++) {
+		const char *n = s->name(s->ctx, i);
+		if (pinheck_starts(n, "DMD/")) dmd = 1;
+		if (pinheck_starts(n, "SFX/")) sfx = 1;
+	}
+	if (dmd && sfx) return;
+	sprintf(msg, "pinheck: the SD card from %.16s.zip has no %s%s%s; display and sound stay blank", Machine->gamedrv->name,
+	        dmd ? "" : "DMD/", !dmd && !sfx ? " and no " : "", sfx ? "" : "SFX/");
+	pinheck_warn(msg);
+}
+
 static void pinheck_open_card(void)
 {
 	char path[1024];
@@ -116,8 +144,13 @@ static void pinheck_open_card(void)
 		sprintf(path, "%.1000s/%.16s.zip", osd_get_path(FILETYPE_ROM, i), Machine->gamedrv->name);
 		if (zipsrc_open(&zip, path, PINHECK_ZIP_CACHE) == 0) locals.have_zip = 1;
 	}
-	if (!locals.have_zip) { logerror("pinheck: no %s.zip on the ROM path, no SD card\n", Machine->gamedrv->name); return; }
-	if (vfat_init(&vol, zipsrc_source(&zip)) != 0) { logerror("pinheck: cannot build the SD volume\n"); return; }
+	if (!locals.have_zip) {
+		sprintf(path, "pinheck: no %.16s.zip on the ROM path, the SD card is empty", Machine->gamedrv->name);
+		pinheck_warn(path);
+		return;
+	}
+	pinheck_check_card(zipsrc_source(&zip));
+	if (vfat_init(&vol, zipsrc_source(&zip)) != 0) { pinheck_warn("pinheck: cannot build the SD volume"); return; }
 	locals.have_vol = 1;
 	dev.ctx = NULL;
 	dev.sectors = vfat_sectors(&vol);
