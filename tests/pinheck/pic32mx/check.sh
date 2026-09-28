@@ -20,5 +20,6 @@ if [ -f boot.c ]; then
 		fail=$((fail + 1))
 	fi
 fi
+./makefile_link_check.sh || fail=$((fail + 1))
 echo "pic32mx: $fail failed"
 [ $fail -eq 0 ]
