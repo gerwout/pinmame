@@ -25,6 +25,7 @@ typedef struct pic32mx_board {
 	int (*i2c_pins)(void *ctx, int module, int scl, int sda, uint64_t cycle);
 	void (*unmapped)(void *ctx, uint32_t pa, int write);
 	void (*exception)(void *ctx, int code, uint32_t pc);
+	uint64_t (*hold)(void *ctx, uint64_t cycle); /* cycles the core must stay held, 0 = run */
 } pic32mx_board;
 
 typedef struct pic32mx_timer {

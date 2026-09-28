@@ -507,6 +507,11 @@ int pic32mx_run(pic32mx *p, int cycles)
 
 	while (p->cpu.cycles < end) {
 		uint64_t slice = end - p->cpu.cycles, ev = next_timer_event(p), e2 = next_i2c_event(p);
+		uint64_t h = p->board.hold ? p->board.hold(p->board.ctx, p->cpu.cycles) : 0;
+		if (h) {
+			p->cpu.cycles += h < slice ? h : slice;
+			continue;
+		}
 		if (e2 < ev) ev = e2;
 		if (ev < slice) slice = ev ? ev : 1;
 		mips32_run(&p->cpu, (int)slice);

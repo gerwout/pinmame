@@ -50,7 +50,7 @@ static void exception(void *ctx, int code, uint32_t pc)
 
 int main(int argc, char **argv)
 {
-	pic32mx_board board = { NULL, port_write, port_read, uart_tx, i2c_pins, unmapped, exception };
+	pic32mx_board board = { NULL, port_write, port_read, uart_tx, i2c_pins, unmapped, exception, NULL };
 	unsigned long long cycles = 800000000ull;
 	int boots = 1, b, i;
 	const char *path = NULL;
