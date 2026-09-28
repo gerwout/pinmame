@@ -2179,7 +2179,7 @@ For each mutation, apply it to `src/cpu/mips32/mips32.c`, run `tests/pinheck/mip
 | Mutation (replace → with) | Must fail |
 |---|---|
 | `s->epc = s->cur_delay ? s->cur_pc - 4 : s->cur_pc;` → `s->epc = s->cur_pc;` | `UNIT FAIL ... s.pc == 0x80001000u` |
-| `if (s->compare - old - 1 < inc && ` → `if (s->count == s->compare && ` | `UNIT FAIL ... mips32_timer_irq(&s)` |
+| `if (s->compare - old - 1 < inc && ` → `(void)old; if (s->count == s->compare && ` (the `(void)old;` keeps `-Werror` from rejecting the mutant as an unused variable) | `UNIT FAIL ... mips32_timer_irq(&s)` |
 | `if (!(s->status & ST_EXL)) {` → `if (1) {` | `UNIT FAIL ... s.epc == 0x11111111u` |
 | `s->srsctl = (s->srsctl & ~15u) \| pss;` and the next line → `(void)pss;` | `GOLDEN FAIL golden/eic.S` |
 
