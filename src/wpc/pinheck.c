@@ -34,7 +34,7 @@ static struct {
 	const char *send;
 	uint64_t send_at, rtc_at;
 	double reset_at;
-	int have_zip, have_vol;
+	int have_zip, have_vol, idle;
 	uint32_t logged[PINHECK_LOG_MAX];
 	int nlogged;
 } locals;
@@ -148,6 +148,7 @@ static void pinheck_tick(int param)
 {
 	pic32mx *soc = pic32cpu_soc();
 	(void)param;
+	if (locals.idle) return;
 	prop_catch_up(&prop, soc->cpu.cycles);
 	if (locals.reset_at > 0.0 && timer_get_time() >= locals.reset_at) {
 		locals.reset_at = 0.0;
@@ -173,6 +174,11 @@ static INTERRUPT_GEN(pinheck_vblank)
 	core_updateSw(0);
 }
 
+static int pinheck_system_only(void)
+{
+	return !memory_region(PINHECK_CPUREGION) || !memory_region(PINHECK_PROPREGION);
+}
+
 static MACHINE_INIT(pinheck)
 {
 	pic32mx_board board = { NULL, pinheck_port_write, pinheck_port_read, pinheck_uart_tx, pinheck_i2c_pins, pinheck_unmapped, pinheck_exception, pinheck_hold };
@@ -185,6 +191,12 @@ static MACHINE_INIT(pinheck)
 	if (plog && (locals.proplog = fopen(plog, opened ? "a" : "w")) != NULL) setvbuf(locals.proplog, NULL, _IONBF, 0);
 	opened = 1;
 	locals.reset_at = !reset_done && getenv("PINHECK_RESET_AT") ? atof(getenv("PINHECK_RESET_AT")) : 0.0;
+	if (pinheck_system_only()) {
+		locals.idle = 1;
+		fprintf(stderr, "pinheck: '%s' is the pinHeck system set, not a game; run a game such as dominos\n", Machine->gamedrv->name);
+		logerror("pinheck: '%s' is the pinHeck system set, not a game\n", Machine->gamedrv->name);
+		return;
+	}
 	memcpy(propmem, memory_region(PINHECK_PROPREGION), 0x8000);
 	prop_init(&prop, memory_region(PINHECK_BIOSREGION), propmem);
 	prop_set_log(&prop, pinheck_prop_log, NULL);
@@ -198,6 +210,7 @@ static MACHINE_INIT(pinheck)
 static MACHINE_RESET(pinheck)
 {
 	const char *at = getenv("PINHECK_UART1_SEND_AT");
+	if (locals.idle) return;
 	prop_reset(&prop, 0);
 	boot_reset(&boot, 0);
 	cat24m01_init(&u13, u13mem, 0);
@@ -210,6 +223,7 @@ static MACHINE_RESET(pinheck)
 static NVRAM_HANDLER(pinheck)
 {
 	const int first = !read_or_write && !file;
+	if (locals.idle) return;
 	core_nvram(file, read_or_write, u13mem, sizeof(u13mem), 0xFF);
 	core_nvram(file, read_or_write, propmem + 0x8000, sizeof(propmem) - 0x8000, 0xFF);
 	if (first && getenv("PINHECK_INSERVICE")) pinheck_in_service(propmem, core_gameData->hw.gameSpecific1);
