@@ -19,7 +19,8 @@ make -C "$TOOLS/spinsim" > "$TOOLS/spinsim.log" 2>&1 || { echo "spinsim build fa
 R=$TOOLS/p1/P8X32A_DE2_115
 D=$HERE/../../../src/wpc/pinheck
 [ -f "$HERE/rtl/tb.cpp" ] && [ -f "$D/eeprom.c" ] || { echo "tools ready in $TOOLS (p1rtl needs rtl/tb.cpp and eeprom.c)"; exit 0; }
+rm -rf "$TOOLS/p1rtl"
 verilator --cc --exe --build -j 8 -O3 -Wno-fatal --x-initial 0 --x-assign 0 --public-flat-rw -I"$R" \
-	-CFLAGS "-O2 -I$D" "$R/dig.v" "$HERE/rtl/tb.cpp" "$D/eeprom.c" --Mdir "$TOOLS/p1rtl" -o p1rtl \
+	-CFLAGS "-O2 -I$D" -LDFLAGS -lz "$R/dig.v" "$HERE/rtl/tb.cpp" "$D/eeprom.c" "$D/sd.c" "$D/vfat.c" "$D/zipsrc.c" --Mdir "$TOOLS/p1rtl" -o p1rtl \
 	> "$TOOLS/p1rtl.log" 2>&1 || { echo "p1rtl build failed, see $TOOLS/p1rtl.log"; exit 2; }
 echo "tools ready in $TOOLS"

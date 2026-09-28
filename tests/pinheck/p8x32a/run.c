@@ -1,5 +1,9 @@
 #include "p8x32a.h"
 #include "eeprom.h"
+#include "sd.h"
+#include "vfat.h"
+#include "zipsrc.h"
+#include <zlib.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,16 +11,21 @@
 static p8x32a chip;
 static cat24m01 ee;
 static uint8_t eemem[0x20000];
-static int have_ee;
+static int have_ee, have_sd, notrace;
+static sd_card sd;
+static vfat vf;
+static zipsrc zs;
+static uint32_t sdbit = 1;
+static uint64_t cur_t;
 static uint32_t ext, eebits;
-static uint64_t at_t[64];
-static uint32_t at_v[64];
+static uint64_t at_t[8192];
+static uint32_t at_v[8192];
 static int nat;
 static int stop_cog = -1;
 static uint32_t stop_ptr;
 static uint64_t stop_at = P8X32A_NEVER;
 static uint64_t known_to = P8X32A_NEVER;
-static struct ev { uint64_t t; size_t seq; char line[48]; } *evs;
+static struct ev { uint64_t t; size_t seq; char line[96]; } *evs;
 static size_t nev, cap;
 
 static void emit(uint64_t t, const char *line)
@@ -38,6 +47,7 @@ static uint32_t pins_in(void *ctx, uint64_t t)
 	int k;
 	(void)ctx;
 	for (k = 0; k < nat && at_t[k] <= t; k++) v = at_v[k];
+	if (have_sd) v = (v & ~1u) | sdbit;
 	return have_ee ? (v & ~0x30000000u) | eebits : v;
 }
 
@@ -69,9 +79,72 @@ static void pins_out(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 		int drv = cat24m01_update(&ee, scl, sda);
 		eebits = 0x10000000u | (uint32_t)drv << 29;
 	}
-	char b[48];
-	sprintf(b, "P %llu %08x %08x", (unsigned long long)t, (unsigned)out, (unsigned)dir);
-	emit(t, b);
+	cur_t = t;
+	if (have_sd) {
+		int cs = (dir >> 3 & 1) ? (int)(out >> 3 & 1) : 1;
+		int sclk = (dir >> 1 & 1) ? (int)(out >> 1 & 1) : 0;
+		int mosi = (dir >> 2 & 1) ? (int)(out >> 2 & 1) : 1;
+		sdbit = (uint32_t)sd_update(&sd, cs, sclk, mosi);
+	}
+	if (notrace) return;
+	{
+		char b[48];
+		sprintf(b, "P %llu %08x %08x", (unsigned long long)t, (unsigned)out, (unsigned)dir);
+		emit(t, b);
+	}
+}
+
+static void node_path(int n, char *out)
+{
+	char part[13];
+	int k, j;
+	out[0] = 0;
+	if (n <= 0) return;
+	node_path(vf.node[n].parent, out);
+	for (k = 0, j = 0; k < 8 && vf.node[n].name[k] != ' '; k++) part[j++] = vf.node[n].name[k];
+	if (vf.node[n].name[8] != ' ') {
+		part[j++] = '.';
+		for (k = 8; k < 11 && vf.node[n].name[k] != ' '; k++) part[j++] = vf.node[n].name[k];
+	}
+	part[j] = 0;
+	if (out[0]) strcat(out, "/");
+	strcat(out, part);
+}
+
+static void sector_label(uint32_t lba, char *out)
+{
+	uint32_t r;
+	if (lba < vf.part_start) { strcpy(out, lba ? "GAP" : "MBR"); return; }
+	r = lba - vf.part_start;
+	if (r < 32) { strcpy(out, r == 0 || r == 6 ? "BOOT" : r == 1 || r == 7 ? "FSINFO" : "RESERVED"); return; }
+	if (r < vf.data_start) { sprintf(out, "FAT+%u", (unsigned)(r - 32)); return; }
+	{
+		uint32_t cl = 2 + (r - vf.data_start) / VFAT_SPC;
+		int k;
+		for (k = 0; k < vf.nalloc; k++) {
+			vfat_node *n = &vf.node[vf.alloc[k]];
+			if (cl >= n->first && cl < n->first + n->nclus) {
+				char path[64];
+				node_path(vf.alloc[k], path);
+				sprintf(out, "%s:%s+%u", n->is_dir ? "DIR" : "FILE", path[0] ? path : "/",
+				        (unsigned)(((cl - n->first) * VFAT_SPC + (r - vf.data_start) % VFAT_SPC) * 512));
+				return;
+			}
+		}
+	}
+	strcpy(out, "FREE");
+}
+
+static int sd_read(void *ctx, uint32_t lba, uint8_t *buf)
+{
+	char line[96], label[72];
+	int r;
+	(void)ctx;
+	r = vfat_read(&vf, lba, buf);
+	sector_label(lba, label);
+	sprintf(line, "D %llu %u %08lx %s", (unsigned long long)cur_t, (unsigned)lba, crc32(0L, buf, 512), label);
+	emit(cur_t, line);
+	return r;
 }
 
 static void cog_start(void *ctx, uint64_t t, int cog, uint32_t ptr)
@@ -135,9 +208,34 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "-ext") && i + 1 < argc) ext = (uint32_t)strtoul(argv[++i], NULL, 16);
 		else if (!strcmp(argv[i], "-stop") && i + 2 < argc) { stop_cog = atoi(argv[i + 1]); stop_ptr = (uint32_t)strtoul(argv[i + 2], NULL, 16); i += 2; }
 		else if (!strcmp(argv[i], "-halt")) halt = 1;
+		else if (!strcmp(argv[i], "-notrace")) notrace = 1;
+		else if (!strcmp(argv[i], "-uart") && i + 2 < argc) {
+			uint64_t t0 = strtoull(argv[i + 1], NULL, 0);
+			size_t nb = strlen(argv[i + 2]) / 2, k;
+			int b;
+			for (k = 0; k < nb && nat + 11 <= 8192; k++) {
+				char hx[3];
+				uint32_t byte;
+				hx[0] = argv[i + 2][2 * k]; hx[1] = argv[i + 2][2 * k + 1]; hx[2] = 0;
+				byte = (uint32_t)strtoul(hx, NULL, 16) | 0x100u;
+				at_t[nat] = t0; at_v[nat++] = ext & ~(1u << 24);
+				for (b = 0; b < 9; b++) { at_t[nat] = t0 + 903 * (uint64_t)(b + 1); at_v[nat++] = (ext & ~(1u << 24)) | ((byte >> b) & 1) << 24; }
+				t0 += 903 * 11;
+			}
+			i += 2;
+		}
+		else if (!strcmp(argv[i], "-sd") && i + 1 < argc) {
+			sd_blockdev dev;
+			if (zipsrc_open(&zs, argv[++i], 64u << 20) || vfat_init(&vf, zipsrc_source(&zs))) { fprintf(stderr, "p8run: cannot open romset %s\n", argv[i]); return 2; }
+			dev.ctx = NULL;
+			dev.sectors = vfat_sectors(&vf);
+			dev.read = sd_read;
+			sd_init(&sd, &dev);
+			have_sd = 1;
+		}
 		else if (!strcmp(argv[i], "-quantum") && i + 1 < argc) quantum = strtoull(argv[++i], NULL, 0);
-		else if (!strcmp(argv[i], "-extat") && i + 2 < argc && nat < 64) { at_t[nat] = strtoull(argv[i + 1], NULL, 0); at_v[nat++] = (uint32_t)strtoul(argv[i + 2], NULL, 16); i += 2; }
-		else { fprintf(stderr, "usage: p8run -rom f [-ram f] [-eeprom f] [-ext hex] [-cycles n] [-stop cog ptrhex] [-halt] [-quantum n] [-extat cycle hex]... [-dump f]\n"); return 2; }
+		else if (!strcmp(argv[i], "-extat") && i + 2 < argc && nat < 8192) { at_t[nat] = strtoull(argv[i + 1], NULL, 0); at_v[nat++] = (uint32_t)strtoul(argv[i + 2], NULL, 16); i += 2; }
+		else { fprintf(stderr, "usage: p8run -rom f [-ram f] [-eeprom f] [-ext hex] [-cycles n] [-stop cog ptrhex] [-halt] [-quantum n] [-sd romset.zip] [-notrace] [-uart cycle hexbytes] [-extat cycle hex]... [-dump f]\n"); return 2; }
 	}
 	if (!rom) { fprintf(stderr, "p8run: -rom is required\n"); return 2; }
 	p8x32a_init(&chip, &bus);

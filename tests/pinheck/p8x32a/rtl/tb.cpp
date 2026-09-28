@@ -5,6 +5,9 @@
 #include <cstring>
 #include <cstdint>
 #include "eeprom.h"
+#include "sd.h"
+#include "vfat.h"
+#include "zipsrc.h"
 
 static uint8_t eemem[0x20000];
 
@@ -22,6 +25,7 @@ int main(int argc, char **argv)
 	const char *rom = NULL, *ram = NULL, *eep = NULL, *dump = NULL;
 	unsigned long long limit = 1000000;
 	uint32_t ext = 0;
+	const char *sdzip = NULL;
 	unsigned long long at_t[64];
 	uint32_t at_v[64];
 	int nat = 0, ati = 0;
@@ -35,9 +39,10 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "-cycles") && i + 1 < argc) limit = strtoull(argv[++i], NULL, 0);
 		else if (!strcmp(argv[i], "-ext") && i + 1 < argc) ext = (uint32_t)strtoul(argv[++i], NULL, 16);
 		else if (!strcmp(argv[i], "-halt")) halt = 1;
+		else if (!strcmp(argv[i], "-sd") && i + 1 < argc) sdzip = argv[++i];
 		else if (!strcmp(argv[i], "-extat") && i + 2 < argc && nat < 64) { at_t[nat] = strtoull(argv[i + 1], NULL, 0); at_v[nat++] = (uint32_t)strtoul(argv[i + 2], NULL, 16); i += 2; }
 		else if (!strcmp(argv[i], "-stop") && i + 2 < argc) { stop_cog = atoi(argv[++i]); stop_ptr = (uint32_t)strtoul(argv[++i], NULL, 16); }
-		else { fprintf(stderr, "usage: p1rtl -rom f [-ram f] [-eeprom f] [-ext hex] [-cycles n] [-stop cog ptrhex] [-dump f]\n"); return 2; }
+		else { fprintf(stderr, "usage: p1rtl -rom f [-ram f] [-eeprom f] [-ext hex] [-sd romset.zip] [-cycles n] [-stop cog ptrhex] [-dump f]\n"); return 2; }
 	}
 	if (!rom) { fprintf(stderr, "p1rtl: -rom is required\n"); return 2; }
 
@@ -66,6 +71,18 @@ int main(int argc, char **argv)
 		cat24m01_init(&ee, eemem, 0);
 	}
 
+	static zipsrc zs;
+	static vfat vf;
+	static sd_card sd;
+	int sdbit = 1;
+	if (sdzip) {
+		sd_blockdev dev;
+		if (zipsrc_open(&zs, sdzip, 64u << 20) || vfat_init(&vf, zipsrc_source(&zs))) { fprintf(stderr, "p1rtl: cannot open romset %s\n", sdzip); return 2; }
+		dev.ctx = &vf;
+		dev.sectors = vfat_sectors(&vf);
+		dev.read = [](void *ctx, uint32_t lba, uint8_t *b) { return vfat_read((vfat *)ctx, lba, b); };
+		sd_init(&sd, &dev);
+	}
 	top->nres = 0;
 	top->pin_in = 0;
 	for (int i = 0; i < 4; i++) {
@@ -89,6 +106,13 @@ int main(int argc, char **argv)
 			int sda = (dir >> 29 & 1) ? (out >> 29 & 1) : 1;
 			int drv = cat24m01_update(&ee, scl, sda);
 			x = (x & ~0x30000000u) | 0x10000000u | (uint32_t)drv << 29;
+		}
+		if (sdzip) {
+			int cs = (dir >> 3 & 1) ? (out >> 3 & 1) : 1;
+			int sclk = (dir >> 1 & 1) ? (out >> 1 & 1) : 0;
+			int mosi = (dir >> 2 & 1) ? (out >> 2 & 1) : 1;
+			sdbit = sd_update(&sd, cs, sclk, mosi);
+			x = (x & ~1u) | (uint32_t)sdbit;
 		}
 		top->pin_in = (dir & out) | (~dir & x);
 		if (out != last_out || dir != last_dir) { printf("P %llu %08x %08x\n", cyc, out, dir); last_out = out; last_dir = dir; }

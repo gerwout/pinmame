@@ -11,7 +11,7 @@ DEV=../../../src/wpc/pinheck
 CC="cc -O2 -std=c99 -Wall -Wextra -Werror -pedantic"
 fail=0 pass=0
 
-for c in $CORE/*.c $DEV/eeprom.c; do
+for c in $CORE/*.c $DEV/eeprom.c $DEV/sd.c $DEV/vfat.c $DEV/zipsrc.c; do
 	[ -e "$c" ] || continue
 	cc -std=c89 -pedantic-errors -Wno-long-long -fsyntax-only -I$CORE -I$DEV "$c" || { echo "C89 FAIL $c"; fail=$((fail + 1)); }
 done
@@ -21,7 +21,7 @@ if [ -f ../eeprom/eeprom_test.c ]; then
 	./$B/eeprom_test || fail=$((fail + 1))
 fi
 [ -f $CORE/p8x32a.c ] || { echo "p8x32a: core not present yet"; exit 2; }
-$CC -I$CORE -I$DEV -o $B/p8run run.c $CORE/p8x32a.c $DEV/eeprom.c || exit 2
+$CC -I$CORE -I$DEV -o $B/p8run run.c $CORE/p8x32a.c $DEV/eeprom.c $DEV/sd.c $DEV/vfat.c $DEV/zipsrc.c -lz || exit 2
 if [ -f dasm_test.c ]; then
 	$CC -I$CORE -o $B/dasm_test dasm_test.c $CORE/p8x32adasm.c || exit 2
 	./$B/dasm_test || fail=$((fail + 1))
@@ -86,11 +86,31 @@ boot_case() {
 	else echo "BOOT MISMATCH ext=$ext"; diff "$ref.rtl" "$ref.our" | head -6; fail=$((fail + 1)); fi
 }
 
+sd_case() {
+	python3 -c "import sys; d=open(sys.argv[1],'rb').read(); open(sys.argv[2],'wb').write(d+b'\xff'*(131072-len(d)))" "$DOMINOS_PRP" $B/boot/eeprom.bin
+	ref=$B/boot/sd-$(cat "$P8X32A_ROM" $B/boot/eeprom.bin "$DOMINOS_ZIP" | sha1sum | cut -c1-16)
+	if [ ! -s "$ref.rtl" ]; then
+		echo "sdboot: building RTL reference to cycle 48100000 (about 6 minutes, cached afterwards)"
+		$P1RTL -rom "$P8X32A_ROM" -eeprom $B/boot/eeprom.bin -ext 01000000 -cycles 48100000 -sd "$DOMINOS_ZIP" -dump "$ref.rtlhub" > "$ref.tmp" &&
+			python3 nodac.py "$ref.tmp" > "$ref.rtl" && rm -f "$ref.tmp"
+	fi
+	./$B/p8run -rom "$P8X32A_ROM" -eeprom $B/boot/eeprom.bin -ext 01000000 -cycles 48100000 -sd "$DOMINOS_ZIP" -dump "$ref.ourhub" > "$ref.raw"
+	python3 nodac.py "$ref.raw" > "$ref.our"
+	if cmp -s "$ref.rtl" "$ref.our" && cmp -s "$ref.rtlhub" "$ref.ourhub"; then
+		pass=$((pass + 1)); echo "sdboot: $(wc -l < "$ref.our") trace lines and hub RAM match the RTL to cycle 48100000 (P14/P15 audio DUTY masked)"
+	else echo "SDBOOT MISMATCH"; diff "$ref.rtl" "$ref.our" | head -6; fail=$((fail + 1)); fi
+	./$B/p8run -rom "$P8X32A_ROM" -eeprom $B/boot/eeprom.bin -ext 01000000 -cycles 520000000 -notrace -sd "$DOMINOS_ZIP" > $B/boot/sd5s.trace 2> $B/boot/sd5s.log
+	if [ -s $B/boot/sd5s.log ]; then echo "SDBOOT LOG:"; cat $B/boot/sd5s.log; fail=$((fail + 1))
+	elif python3 sdcheck.py $B/boot/sd5s.trace "$DOMINOS_ZIP"; then pass=$((pass + 1))
+	else fail=$((fail + 1)); fi
+}
+
 if [ -n "$P8X32A_ROM" ] && [ -n "$DOMINOS_PRP" ]; then
 	crc=$(python3 -c "import zlib,sys; print('%08x' % (zlib.crc32(open(sys.argv[1],'rb').read()) & 0xffffffff))" "$P8X32A_ROM")
 	[ "$crc" = f99b3070 ] || echo "note: P8X32A_ROM crc32 $crc, expected f99b3070"
 	boot_case 0
 	boot_case 80000000
+	if [ -n "$DOMINOS_ZIP" ]; then sd_case; else echo "sdboot: skipped (set DOMINOS_ZIP to a romset zip to run it)"; fi
 else
 	echo "boot: skipped (set P8X32A_ROM and DOMINOS_PRP to run it)"
 fi
