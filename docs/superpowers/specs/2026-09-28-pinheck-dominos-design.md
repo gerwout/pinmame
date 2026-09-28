@@ -67,7 +67,7 @@ PIC32 to Propeller is bit-banged in software (`0x9D02DBE0`). A 16-byte buffer at
 
 28 call sites use 24 command IDs in `0x01–0x27`. The archived wiki documents the API those implement: `playSFX`, `playSFXQ`, `stereoSFX`, `volumeSFX`, `playMusic`, `playMusicOnce`, `stopMusic`, `fadeMusic`, `repeatMusic`, `video`, `videoQ`, `videoControl`, `videoPriority`, `stopVideo`, `killQ`, `text`, `value`, `numbers`, `killNumbers`, `killTimer`, `characterSprite`, `loadSprite`, `showProgressBar`, `showValue`, `graphicsMode`, `AddScore`, `SetScore`, `Update`, `EOBnumbers`, `sendHighScores`, `sendInitials`, `sendSwitches`, `readEEPROM`, `writeEEPROM`.
 
-Propeller to PIC32 is received by a chipKIT `HardwareSerial` (interrupt-filled ring buffer, head/tail at object offsets `+0x22C`/`+0x230`, 512-byte buffer at `+0x2C`).
+Propeller to PIC32 travels in the same exchange: while clocking each bit out on RF5 with RF12, the PIC32 samples RF13 (COMM_IN_TX), which the Propeller drives with its reply staged from the previous packet. There is no Propeller-to-PIC32 UART. The only UART in use is UART1, the service console (BRG 42, 115,200 baud nominal); the chipKIT `HardwareSerial` ring buffer in the firmware (head/tail at object offsets `+0x22C`/`+0x230`, 512-byte buffer at `+0x2C`) belongs to that console.
 
 Per the wiki: the PIC32 keeps its non-volatile data in the top half of the Propeller's EEPROM, and the PIC32 main loop runs at about 10 kHz.
 

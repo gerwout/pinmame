@@ -7,16 +7,20 @@ Each milestone of spec §8 gets its own implementation plan, written when its in
 | Plan | Milestone | Depends on | Open items | Exit criterion (spec §7/§8) | Status |
 |---|---|---|---|---|---|
 | `2026-09-28-pinheck-m1-mips32-core.md` | 1: `mips32` core + disassembler | none | none | QEMU `4KEc` differential suite + golden/unit tests pass | written |
-| `2026-09-28-pinheck-m2-pic32mx-soc.md` | 2: `pic32mx` SoC, PinMAME CPU registration, driver skeleton, `pinheck`/`dominos` romsets for the PIC32 side | Plan 1 | resolves **1** (chipKIT logical pin → port bit tables, return UART and baud) as its final task | machine check 1 via a test-only link stub (banner appears on the second boot); in PinMAME the run reaches `PROPELLER SYNC CHECK` | written; its Task 2 needs Plan 3's Task 2 (CAT24M01) |
+| `2026-09-28-pinheck-m2-pic32mx-soc.md` | 2: `pic32mx` SoC, PinMAME CPU registration, driver skeleton, `pinheck`/`dominos` romsets for the PIC32 side | Plan 1 | resolved **1**: logical pins 14/15/16 = RF13/RF12/RF5, no return UART (console UART1 at 115,200) | machine check 1 via a test-only link stub (banner appears on the second boot); in PinMAME the run reaches `PROPELLER SYNC CHECK` | written; its Task 2 needs Plan 3's Task 2 (CAT24M01) |
 | `2026-09-28-pinheck-m3-p8x32a-core.md` | 3: `p8x32a` core + disassembler, CAT24M01 model, boot of `PRP_V008.BIN` | none (parallel with Plans 1–2) | resolves **4** (mask ROM image and CRC) as its first task | spinsim differential suite passes; boots `PRP_V008.BIN` from the EEPROM model | written; mask ROM = silicon image, 32768 bytes, CRC32 f99b3070, SHA1 b7b4fdf4f096db7d18bda6355725cb42ae4a9378 |
 | m4 | 4: SD (SPI mode) + virtual FAT32 over the romset zip | Plan 3 for the exit criterion only | none | `fsck.vfat -n` clean, host mount byte-exact against the zip; Propeller mounts the card and opens `_DE/ERR.VID` | after Plan 3 |
-| m5 | 5: link: edge log, catch-up, UART decode | Plans 2, 3 | needs **1** | machine check 2: `PROPELLER SYNC CHECK`, `[E00000]` round trip | after Plans 2–4 |
+| m5 | 5: link: edge log, catch-up on reads of RF13 | Plans 2, 3 | needs **1** | machine check 2: `PROPELLER SYNC CHECK`, `[E00000]` round trip | after Plans 2–4 |
 | m6 | 6: video generator + display decoder | Plan 5 | resolves **2** (video cog signalling) as its first task, using Plan 3's disassembler | machine check 3: `[V00ABC]` frames pixel-exact against the `.VID` | after Plan 5 |
 | m7 | 7: audio (counter DUTY integration) | Plan 5 | none | machine check 4: `[F00ABC]` cross-correlation ≥ 0.95 against the `.wav` | after Plan 5 |
 | m8 | 8: board I/O + full PinMAME integration | Plans 6, 7 | resolves **3** (external WS2801 chain length) | machine check 5; a game can be started, played and ended | after Plans 6–7 |
 | m9 | 9: performance | Plan 8 | none | real time on the reference machine; baseline from Plan 1's `bench.sh` (106–118 M instr/s interpreter-only) | last |
 
 Plans 1–2 and 3–4 are independent tracks; either can run first.
+
+## Obligations carried into Plan 4 (from the Milestone 2+3 review)
+
+- First task: counter pin outputs. The firmware's SD driver (cog 3) clocks the card with counter A in NCO mode on P1 and sends data with counter B in NCO mode on P2; cog 6 drives P21/P22 the same way. The core must drive NCO/DUTY counter outputs onto the pins cycle-exactly (RTL-compared), visible in `pins_out`, `INA` and `WAITPEQ`/`WAITPNE`, and the suite must show that booting `PRP_V008.BIN` for several seconds logs no unmodelled counter mode. Without this the card never sees a clock and the exit criterion cannot be met.
 
 ## Obligations carried into Plan 5 (from Plans 2 and 3)
 
@@ -25,6 +29,18 @@ Plans 1–2 and 3–4 are independent tracks; either can run first.
 - Spec §5.1's exact 13/10 cycle ratio holds only after `CLKSET $6F`; the booter runs on the internal RC clock until then, so time conversion must follow the core's `clkset` callback.
 - Declare the `pinheck` BIOS set with `p8x32a.rom` (CRC32 f99b3070, SHA1 b7b4fdf4f096db7d18bda6355725cb42ae4a9378; GPL 3.0, user-supplied, never committed).
 - Add `src/wpc/pinheck/eeprom.c` and `src/cpu/p8x32a/` to the PinMAME build files (neither Plan 2 nor Plan 3 does).
+- `pins_next` may return `P8X32A_NEVER` while no PIC32 edge is known yet; since 217130d1 the core re-queries on every `run_until`, so the driver only has to append edges before advancing the Propeller past them.
+- Inject UART1 RX bytes in `pinheck.c` (machine check 2's `[E00000]` needs them) and wire the U13 CAT24M01 onto I2C1.
+- A PinMAME reset sets the PIC32 cycle count back to 0 while Propeller time must never go backwards: rebase the edge log and the time conversion on reset.
+
+## Carried into Plan 7
+
+- The counter-state sink required by spec §4.3/§5.4 (every `FRQx`/`CTRx` change with its cycle) is not in `p8x32a_bus` yet; the audio device needs it.
+
+## Carried into Plan 8
+
+- `pic32cpu_ICount` is only updated when `pic32mx_run` returns, so `timer_get_time()` inside a board callback reports the slice start. Spec §5.6 relies on per-edge timestamps for lamp and solenoid PWM: update the count around each board callback and honour `activecpu_abort_timeslice`, with a test that two GPIO edges in one slice get different times.
+- NVRAM for both CAT24M01 images; without it every PinMAME launch is a first boot and the banner never appears.
 
 ## Carried into Plan 9
 
