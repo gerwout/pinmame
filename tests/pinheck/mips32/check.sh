@@ -35,6 +35,7 @@ if [ -f gen.py ]; then
 fi
 for f in golden/*.S; do
 	[ -e "$f" ] || continue
+	grep -q "MD000\(86\|90\)" "$f" || { echo "CITATION FAIL $f"; fail=$((fail + 1)); }
 	n=$(basename "$f" .S) o=$B/golden/$(basename "$f" .S)
 	if ! $ASM -c "$f" -o $o.o || ! ld.lld -m elf32ltsmip -static -e __start -Ttext=0x80400000 --section-start=.exc=0x80000180 $o.o -o $o.elf; then
 		echo "BUILD FAIL $f"; fail=$((fail + 1)); continue

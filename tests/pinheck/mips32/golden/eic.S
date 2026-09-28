@@ -2,6 +2,8 @@
 
 #define LOG(r) la $24, logptr; lw $25, 0($24); sw r, 0($25); addiu $25, $25, 4; sw $25, 0($24)
 
+/* PRA = MD00090, ISA = MD00086; cited by section title. */
+/* PRA "Exception Vector Locations": interrupt vector = EBase + 0x200 + vector * (IntCtl.VS << 5) when Cause.IV = 1. */
 	.section .exc, "ax"
 	li $2, SYS_EXIT
 	li $4, 1
@@ -14,6 +16,7 @@
 	nop
 
 	.text
+/* PRA "GPR Shadow Registers" and "SRSCtl Register": EIC interrupt entry sets PSS = CSS, CSS = EICSS. */
 isr3:
 	la $26, logptr
 	lw $27, 0($26)
@@ -30,6 +33,7 @@ isr3:
 	sw $0, 0($8)
 	eret
 
+/* PRA "Compare Register": writing Compare clears Cause.TI. */
 isr0:
 	mfc0 $26, $13
 	la $27, isr0cause
@@ -58,6 +62,7 @@ __start:
 	la $8, logptr
 	la $10, out
 	sw $10, 0($8)
+/* PRA "External Interrupt Controller Mode": taken only when RIPL > Status.IPL. */
 	li $8, 0x1401
 	mtc0 $8, $12
 	ehb
@@ -68,12 +73,14 @@ __start:
 	nop
 	li $12, 0xaaaa0001
 	LOG($12)
+/* PRA "Cause Register": RIPL latched at entry; IV set. */
 	li $8, 0x0801
 	mtc0 $8, $12
 	ehb
 	nop
 	li $12, 0xaaaa0002
 	LOG($12)
+/* ISA "ERET": restores SRSCtl.CSS from PSS. */
 	mfc0 $12, $12, 2
 	LOG($12)
 	mtc0 $0, $12
@@ -82,6 +89,7 @@ __start:
 	mtc0 $8, $11
 	li $8, 1
 	mtc0 $8, $12
+/* ISA "WAIT" and PRA "Count Register"/"Compare Register": Count reaching Compare sets Cause.TI and wakes WAIT. */
 	wait
 	li $12, 0xaaaa0003
 	LOG($12)
