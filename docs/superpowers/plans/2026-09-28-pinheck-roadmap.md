@@ -10,7 +10,7 @@ Each milestone of spec §8 gets its own implementation plan, written when its in
 | `2026-09-28-pinheck-m2-pic32mx-soc.md` | 2: `pic32mx` SoC, PinMAME CPU registration, driver skeleton, `pinheck`/`dominos` romsets for the PIC32 side | Plan 1 | resolved **1**: logical pins 14/15/16 = RF13/RF12/RF5, no return UART (console UART1 at 115,200) | machine check 1 via a test-only link stub (banner appears on the second boot); in PinMAME the run reaches `PROPELLER SYNC CHECK` | written; its Task 2 needs Plan 3's Task 2 (CAT24M01) |
 | `2026-09-28-pinheck-m3-p8x32a-core.md` | 3: `p8x32a` core + disassembler, CAT24M01 model, boot of `PRP_V008.BIN` | none (parallel with Plans 1–2) | resolves **4** (mask ROM image and CRC) as its first task | spinsim differential suite passes; boots `PRP_V008.BIN` from the EEPROM model | written; mask ROM = silicon image, 32768 bytes, CRC32 f99b3070, SHA1 b7b4fdf4f096db7d18bda6355725cb42ae4a9378 |
 | m4 | 4: SD (SPI mode) + virtual FAT32 over the romset zip | Plan 3 for the exit criterion only | none | `fsck.vfat -n` clean, host mount byte-exact against the zip; Propeller mounts the card and opens `_DE/ERR.VID` | after Plan 3 |
-| m5 | 5: link: edge log, catch-up on reads of RF13 | Plans 2, 3 | needs **1** | machine check 2: `PROPELLER SYNC CHECK`, `[E00000]` round trip | after Plans 2–4 |
+| `2026-09-28-pinheck-m5-link.md` | 5: link: edge log, catch-up on reads of RF13, bootloader stand-in, DS1340, EEPROM NVRAM, `pinheck` BIOS set | Plans 2, 3, 4 (executed) | needs **1**; decisions **D1** (bootloader stand-in), **D2** (flash persistence) | machine check 2: update to `PLEASE RESTART` on blank NVRAM, then `PROPELLER SYNC CHECK`, banner and `[E97000]` | written |
 | m6 | 6: video generator + display decoder | Plan 5 | resolves **2** (video cog signalling) as its first task, using Plan 3's disassembler | machine check 3: `[V00ABC]` frames pixel-exact against the `.VID` | after Plan 5 |
 | m7 | 7: audio (counter DUTY integration) | Plan 5 | none | machine check 4: `[F00ABC]` cross-correlation ≥ 0.95 against the `.wav` | after Plan 5 |
 | m8 | 8: board I/O + full PinMAME integration | Plans 6, 7 | resolves **3** (external WS2801 chain length) | machine check 5; a game can be started, played and ended | after Plans 6–7 |
@@ -33,6 +33,10 @@ Plans 1–2 and 3–4 are independent tracks; either can run first.
 - Inject UART1 RX bytes in `pinheck.c` (machine check 2's `[E00000]` needs them) and wire the U13 CAT24M01 onto I2C1.
 - A PinMAME reset sets the PIC32 cycle count back to 0 while Propeller time must never go backwards: rebase the edge log and the time conversion on reset.
 
+## Carried into Plan 6
+
+- The Propeller's framebuffer is readable in hub RAM around `$57EE`–`$67ED` (128×32 RGB332, row-wrapped); it shows the boot and update screens, which is a useful cross-check for the display decoder.
+
 ## Carried into Plan 7
 
 - The counter-state sink required by spec §4.3/§5.4 (every `FRQx`/`CTRx` change with its cycle) is not in `p8x32a_bus` yet; the audio device needs it.
@@ -40,7 +44,6 @@ Plans 1–2 and 3–4 are independent tracks; either can run first.
 ## Carried into Plan 8
 
 - `pic32cpu_ICount` is only updated when `pic32mx_run` returns, so `timer_get_time()` inside a board callback reports the slice start. Spec §5.6 relies on per-edge timestamps for lamp and solenoid PWM: update the count around each board callback and honour `activecpu_abort_timeslice`, with a test that two GPIO edges in one slice get different times.
-- NVRAM for both CAT24M01 images; without it every PinMAME launch is a first boot and the banner never appears.
 
 ## Carried into Plan 9
 

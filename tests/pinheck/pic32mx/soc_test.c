@@ -38,7 +38,7 @@ static void put(uint32_t off, uint32_t w)
 
 static void setup(void)
 {
-	pic32mx_board board = { NULL, b_port_write, b_port_read, b_uart_tx, NULL, b_unmapped, b_exception };
+	pic32mx_board board = { NULL, b_port_write, b_port_read, b_uart_tx, NULL, b_unmapped, b_exception, NULL };
 	memset(&rec, 0, sizeof(rec));
 	memset(flash, 0, sizeof(flash));
 	put(0x1000, 0x1000FFFFu);
@@ -208,6 +208,22 @@ static void reserved_instruction(void)
 	CHECK(rec.exc_code == MIPS32_EXC_RI && rec.exc_pc == 0x9D001000u);
 }
 
+static uint64_t hold_until;
+
+static uint64_t b_hold(void *c, uint64_t cy) { (void)c; return cy < hold_until ? hold_until - cy : 0; }
+
+static void board_hold(void)
+{
+	setup();
+	put(0x1000, 0x0000003Fu);
+	soc.board.hold = b_hold;
+	hold_until = 1000;
+	pic32mx_run(&soc, 900);
+	CHECK(rec.exc_count == 0 && soc.cpu.cycles == 900);
+	pic32mx_run(&soc, 200);
+	CHECK(rec.exc_count > 0 && rec.exc_pc == 0x9D001000u);
+}
+
 int main(void)
 {
 	port_set_clr_inv();
@@ -221,6 +237,7 @@ int main(void)
 	i2c_timing_nack();
 	unmapped_sfr();
 	reserved_instruction();
+	board_hold();
 	printf("soc: %s\n", fails ? "FAIL" : "ok");
 	return fails != 0;
 }

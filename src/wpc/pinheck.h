@@ -6,6 +6,7 @@
 
 #define PINHECK_CPUREGION  REGION_CPU1
 #define PINHECK_PROPREGION REGION_USER1
+#define PINHECK_BIOSREGION REGION_USER2
 
 #define PINHECK_INPUT_PORTS_START(name, balls) \
   INPUT_PORTS_START(name) \
@@ -14,8 +15,13 @@
 
 #define PINHECK_INPUT_PORTS_END INPUT_PORTS_END
 
-#define PINHECK_ROMSTART(name, prg, prgsize, prghash, prp, prphash) \
+#define PINHECK_BIOS_ROMSTART(name) \
   ROM_START(name) \
+    ROM_REGION(0x8000, PINHECK_BIOSREGION, 0) \
+      ROM_LOAD("p8x32a.rom", 0x0000, 0x8000, CRC(f99b3070) SHA1(b7b4fdf4f096db7d18bda6355725cb42ae4a9378))
+
+#define PINHECK_ROMSTART(name, prg, prgsize, prghash, prp, prphash) \
+  PINHECK_BIOS_ROMSTART(name) \
     ROM_REGION(0x80000, PINHECK_CPUREGION, ROMREGION_ERASEFF) \
       ROM_LOAD(prg, 0x0000, prgsize, prghash) \
     ROM_REGION(0x8000, PINHECK_PROPREGION, 0) \

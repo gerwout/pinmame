@@ -576,6 +576,22 @@ set(PINMAME_SOURCES
    src/wpc/pinheck.c
    src/wpc/pinheck.h
    src/wpc/pinheckgames.c
+   src/cpu/p8x32a/p8x32a.c
+   src/cpu/p8x32a/p8x32a.h
+   src/wpc/pinheck/eeprom.c
+   src/wpc/pinheck/eeprom.h
+   src/wpc/pinheck/prop.c
+   src/wpc/pinheck/prop.h
+   src/wpc/pinheck/rtc.c
+   src/wpc/pinheck/rtc.h
+   src/wpc/pinheck/bootldr.c
+   src/wpc/pinheck/bootldr.h
+   src/wpc/pinheck/sd.c
+   src/wpc/pinheck/sd.h
+   src/wpc/pinheck/vfat.c
+   src/wpc/pinheck/vfat.h
+   src/wpc/pinheck/zipsrc.c
+   src/wpc/pinheck/zipsrc.h
    src/wpc/regama.c
    src/wpc/rfranco.c
    src/wpc/rfranco.h
