@@ -134,7 +134,7 @@ Peripherals:
 - **INTC**: `INTCON`, `INTSTAT`, `IFSx`, `IECx`, `IPCx`, priority and subpriority arbitration, `INTCON.MVEC`, `SRSMap` via priority, feeding the core's EIC input.
 - **Timer1–5**, including 32-bit pairing.
 - **PORTA–G**: `TRIS`, `PORT`, `LAT`, `ODC`, `CN*`. Pin reads and writes go through a board callback with the pin identity and the cycle timestamp.
-- **UART1–6**: TX to a byte sink with timestamps; RX from an edge-decoded line.
+- **UART1–6**: TX to a byte sink with timestamps; RX bytes injected by the board. The firmware enables only UART1, the service console (BRG 42: 115,200 baud nominal).
 - **I²C1–5** master, bit-level onto pins.
 - **Stubs**: OSC, CHECON, BMX, DDPCON, RCON, ADC configuration, NVM (read-only), WDT.
 - Configuration words read as 80 MHz from the 8 MHz crystal.
@@ -201,9 +201,9 @@ Every PIC32 write that changes a pin wired to a Propeller input is appended to t
 
 The Propeller is advanced to the PIC32's current cycle:
 - before any PIC32 read of a port containing a Propeller-driven pin
-- at every periodic quantum timer, whose period is below one character time of the return UART at the baud the firmware configures
+- at every periodic quantum timer, so the Propeller keeps producing video and audio while the PIC32 is not reading it
 
-Propeller output-pin edges are timestamped. The PIC32 UART decodes RX bytes from those edges at the programmed baud and raises its interrupts at the decoded times, which are never later than one quantum after the true time.
+There is no Propeller→PIC32 UART. The return path is RF13 (COMM_IN_TX, Propeller P24), which the PIC32 samples with `digitalRead(14)` after each falling edge of the clock it drives on RF12, during the same 16-byte exchange that shifts its own packet out on RF5. The first rule above therefore makes the return path exact.
 
 ### 5.4 Audio
 
@@ -245,7 +245,7 @@ External oracles are test tools only and are never linked into PinMAME.
 
 ### Machine level, through the firmware's UART1 console
 
-1. The PIC32 prints its banner (`pinHeck System 2011-2016`, `Game: DOM - DOMINOS`, `Version:`).
+1. The PIC32 prints its banner (`pinHeck System 2011-2016`, `Game: DOM - DOMINOS`, `Version:`) on the second boot. The firmware prints it only once U13 holds its settings, which the first boot on a blank EEPROM stores. Reaching it needs the Propeller's sync reply and its `readEEPROM`/`writeEEPROM` service; until milestone 5 the test stub `tests/pinheck/pic32mx/linkstub.c` provides them.
 2. `PROPELLER SYNC CHECK` succeeds, and `[E00000]` returns the version.
 3. `[V00ABC]` for a chosen clip produces display frames equal, pixel for pixel, to that `.VID`'s frames.
 4. `[F00ABC]` produces audio whose normalised cross-correlation with the `.wav` is at least 0.95.
@@ -271,7 +271,7 @@ Milestones 1–2 and 3–4 are independent of each other.
 
 Each is resolved by analysis of the shipped firmware before the milestone that needs it. None changes the architecture.
 
-1. **chipKIT logical pins → PIC32 port bits** (needed by milestone 5). Read the board variant's `digital_pin_to_port` / `digital_pin_to_bit_mask` tables referenced by `digitalWrite` (`0x9D02B8F4`), and confirm which of COMM_OUT / COMM_IN_TX / COMM_CLK_RX are pins 15 and 16. This also gives the Propeller→PIC32 UART and its baud (the image contains the constants 19200, 230400 and 1000000).
+1. **chipKIT logical pins → PIC32 port bits** (resolved by milestone 2; checked by `tests/pinheck/pic32mx/pins.py`). Logical 16 = RF5 = COMM_OUT (PIC32→Propeller data), 15 = RF12 = COMM_CLK_RX (clock, driven by the PIC32), 14 = RF13 = COMM_IN_TX (Propeller→PIC32 data). The link is a full-duplex, bit-banged exchange of 16 bytes, LSB first, byte 15 the command; the Propeller stages its reply from the previous packet. There is no Propeller→PIC32 UART: the firmware enables only UART1.
 2. **Display signalling on P16–P22** (needed by milestone 6). Disassemble the video cog (PASM around `0x3300–0x3E00` of `PRP_V008.BIN`): pin-group mapping, pixel clock, sync scheme, and how RGB332 source pixels map onto the seven connector lines.
 3. **External WS2801 chain length** (needed by milestone 8). Read it from the firmware's RGB routines. The chain is exposed as further custom solenoids after 61, three per LED.
 4. **Mask ROM image** (needed by milestone 3). Fix the exact 32 KB image the `pinheck` BIOS set declares, and its CRC, from the Parallax release. Check how the interpreter region is stored against what the booter expects.

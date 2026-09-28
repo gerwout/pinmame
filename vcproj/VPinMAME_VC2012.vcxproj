@@ -903,6 +903,10 @@ echo regsvr32 exec. time &gt; "$(OutDir)regsvr32.trg"
     </ClCompile>
     <ClCompile Include="..\src\cpu\at91\at91.c" />
     <ClCompile Include="..\src\cpu\at91\at91dasm.c" />
+    <ClCompile Include="..\src\cpu\mips32\mips32.c" />
+    <ClCompile Include="..\src\cpu\mips32\mips32dasm.c" />
+    <ClCompile Include="..\src\cpu\pic32mx\pic32mx.c" />
+    <ClCompile Include="..\src\cpu\pic32mx\pic32mxcpu.c" />
     <ClCompile Include="..\src\cpu\arm7\arm7.c" />
     <ClCompile Include="..\src\cpu\arm7\arm7core.c">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug with MAME Debugger|Win32'">true</ExcludedFromBuild>
@@ -1245,6 +1249,8 @@ echo regsvr32 exec. time &gt; "$(OutDir)regsvr32.trg"
     <ClCompile Include="..\src\wpc\playsnd.c" />
     <ClCompile Include="..\src\wpc\recel.c" />
     <ClCompile Include="..\src\wpc\recelgames.c" />
+    <ClCompile Include="..\src\wpc\pinheck.c" />
+    <ClCompile Include="..\src\wpc\pinheckgames.c" />
     <ClCompile Include="..\src\wpc\recelsnd.c" />
     <ClCompile Include="..\src\wpc\regama.c" />
     <ClCompile Include="..\src\wpc\rfranco.c" />
@@ -1487,6 +1493,10 @@ echo regsvr32 exec. time &gt; "$(OutDir)regsvr32.trg"
     <ClInclude Include="..\src\cpu\i8051\i8051.h" />
     <ClInclude Include="..\src\cpu\tms7000\tms7000.h" />
     <ClInclude Include="..\src\cpu\at91\at91.h" />
+    <ClInclude Include="..\src\cpu\mips32\mips32.h" />
+    <ClInclude Include="..\src\cpu\pic32mx\pic32mx.h" />
+    <ClInclude Include="..\src\cpu\pic32mx\pic32mxcpu.h" />
+    <ClInclude Include="..\src\wpc\pinheck.h" />
     <ClInclude Include="..\src\cpu\arm7\arm7.h" />
     <ClInclude Include="..\src\cpu\arm7\arm7core.h" />
     <ClInclude Include="..\src\cpu\arm7\arm7jit.h" />

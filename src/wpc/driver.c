@@ -3644,4 +3644,10 @@ DRIVERNV(nstrphnf)      //      New Star's Phoenix (French Speech)
 DRIVERNV(nstrphfp)      //      New Star's Phoenix (Free Play)
 DRIVERNV(nstrpffp)      //      New Star's Phoenix (French Speech Free Play)
 
+
+// ------------------
+// SPOOKY PINBALL GAMES
+// ------------------
+DRIVERNV(dominos)       //pinHeck 07/16 Domino's Spectacular Pinball Adventure
+
 #endif /* DRIVER_RECURSIVE */

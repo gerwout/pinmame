@@ -911,6 +911,24 @@
     <ClCompile Include="..\src\wpc\recel.c">
       <Filter>Source Files\PinMAME</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\cpu\mips32\mips32.c">
+      <Filter>Source Files\PinMAME</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\cpu\mips32\mips32dasm.c">
+      <Filter>Source Files\PinMAME</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\cpu\pic32mx\pic32mx.c">
+      <Filter>Source Files\PinMAME</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\cpu\pic32mx\pic32mxcpu.c">
+      <Filter>Source Files\PinMAME</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\wpc\pinheck.c">
+      <Filter>Source Files\PinMAME</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\wpc\pinheckgames.c">
+      <Filter>Source Files\PinMAME</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\wpc\recelgames.c">
       <Filter>Source Files\PinMAME</Filter>
     </ClCompile>
