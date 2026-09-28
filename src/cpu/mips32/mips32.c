@@ -23,8 +23,9 @@
 #define SIMM(op)  ((uint32_t)(int32_t)(int16_t)((op) & 0xFFFF))
 #define UIMM(op)  ((op) & 0xFFFFu)
 
+#define REGS(s) ((s)->gpr[(s)->srsctl & 7])
 #define USER(s) (((s)->status & (ST_UM | ST_EXL | ST_ERL)) == ST_UM)
-#define SET(n, v) do { uint32_t v_ = (v); int n_ = (n); if (n_) s->r[n_] = v_; } while (0)
+#define SET(n, v) do { uint32_t v_ = (v); int n_ = (n); if (n_) REGS(s)[n_] = v_; } while (0)
 
 static uint32_t ror32(uint32_t x, unsigned n) { n &= 31; return n ? (x >> n) | (x << (32 - n)) : x; }
 static uint32_t sra32(uint32_t x, unsigned n) { n &= 31; return n ? (x >> n) | ((x & 0x80000000u) ? ~(0xFFFFFFFFu >> n) : 0) : x; }
@@ -68,7 +69,6 @@ static void take_exception(mips32_state *s, int code, int ce)
 			uint32_t css = s->srsctl & 15;
 			uint32_t nss = (is_int ? (uint32_t)s->eic_srs : (s->srsctl >> 12)) & 7;
 			s->srsctl = (s->srsctl & ~0x3CFu) | (css << 6) | nss;
-			s->r = s->gpr[nss];
 		}
 	}
 	s->cause = (s->cause & ~0x3000007Cu) | ((uint32_t)code << 2) | ((uint32_t)ce << 28);
@@ -186,7 +186,6 @@ static void eret(mips32_state *s)
 		if (s->shadow_sets > 1 && !(s->status & ST_BEV)) {
 			uint32_t pss = (s->srsctl >> 6) & 7;
 			s->srsctl = (s->srsctl & ~15u) | pss;
-			s->r = s->gpr[pss];
 		}
 	}
 	s->npc = s->pc + 4;
@@ -196,7 +195,7 @@ static void eret(mips32_state *s)
 
 static void exec_special(mips32_state *s, uint32_t op)
 {
-	uint32_t rs = s->r[RS(op)], rt = s->r[RT(op)], res;
+	uint32_t rs = REGS(s)[RS(op)], rt = REGS(s)[RT(op)], res;
 	int64_t p;
 	uint64_t acc;
 
@@ -267,7 +266,7 @@ static void exec_special(mips32_state *s, uint32_t op)
 
 static void exec_regimm(mips32_state *s, uint32_t op)
 {
-	int32_t rs = (int32_t)s->r[RS(op)];
+	int32_t rs = (int32_t)REGS(s)[RS(op)];
 	uint32_t imm = SIMM(op);
 	int cond;
 
@@ -306,21 +305,21 @@ static void exec_cop0(mips32_state *s, uint32_t op)
 	}
 	switch (RS(op)) {
 	case 0x00: SET(RT(op), mips32_get_cp0(s, RD(op), op & 7)); break;
-	case 0x04: set_cp0(s, RD(op), op & 7, s->r[RT(op)]); break;
+	case 0x04: set_cp0(s, RD(op), op & 7, REGS(s)[RT(op)]); break;
 	case 0x0A: SET(RD(op), s->gpr[(s->srsctl >> 6) & 7][RT(op)]); break;
 	case 0x0B:
 		v = s->status;
 		if (op & 0x20) s->status |= ST_IE; else s->status &= ~ST_IE;
 		SET(RT(op), v);
 		break;
-	case 0x0E: if (RD(op)) s->gpr[(s->srsctl >> 6) & 7][RD(op)] = s->r[RT(op)]; break;
+	case 0x0E: if (RD(op)) s->gpr[(s->srsctl >> 6) & 7][RD(op)] = REGS(s)[RT(op)]; break;
 	default: take_exception(s, MIPS32_EXC_RI, 0); break;
 	}
 }
 
 static void exec_special2(mips32_state *s, uint32_t op)
 {
-	uint32_t rs = s->r[RS(op)], rt = s->r[RT(op)];
+	uint32_t rs = REGS(s)[RS(op)], rt = REGS(s)[RT(op)];
 	uint64_t acc = ((uint64_t)s->hi << 32) | s->lo;
 
 	switch (FUNCT(op)) {
@@ -339,7 +338,7 @@ static void exec_special2(mips32_state *s, uint32_t op)
 
 static void exec_special3(mips32_state *s, uint32_t op)
 {
-	uint32_t rs = s->r[RS(op)], rt = s->r[RT(op)], m;
+	uint32_t rs = REGS(s)[RS(op)], rt = REGS(s)[RT(op)], m;
 	unsigned lsb = SA(op), msb = RD(op);
 
 	switch (FUNCT(op)) {
@@ -372,7 +371,7 @@ static void exec_special3(mips32_state *s, uint32_t op)
 
 static void exec_mem(mips32_state *s, uint32_t op)
 {
-	uint32_t ea = s->r[RS(op)] + SIMM(op), rt = s->r[RT(op)], v;
+	uint32_t ea = REGS(s)[RS(op)] + SIMM(op), rt = REGS(s)[RT(op)], v;
 	unsigned b = ea & 3, i, sh;
 
 	switch (op >> 26) {
@@ -414,7 +413,7 @@ static void exec_mem(mips32_state *s, uint32_t op)
 
 static void execute(mips32_state *s, uint32_t op)
 {
-	uint32_t rs = s->r[RS(op)], rt = s->r[RT(op)], res;
+	uint32_t rs = REGS(s)[RS(op)], rt = REGS(s)[RT(op)], res;
 
 	switch (op >> 26) {
 	case 0x00: exec_special(s, op); break;
@@ -530,6 +529,8 @@ int mips32_run(mips32_state *s, int cycles)
 	return (int)(s->cycles - start);
 }
 
+uint32_t *mips32_regs(mips32_state *s) { return REGS(s); }
+
 void mips32_set_eic(mips32_state *s, int ripl, int vector, int srs)
 {
 	s->eic_ripl = ripl;
@@ -542,7 +543,6 @@ int mips32_soft_irq(const mips32_state *s) { return (int)((s->cause >> 8) & 3); 
 
 void mips32_reset(mips32_state *s)
 {
-	s->r = s->gpr[0];
 	s->pc = 0xBFC00000u;
 	s->npc = s->pc + 4;
 	s->delay = 0;

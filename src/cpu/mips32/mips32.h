@@ -31,7 +31,6 @@ typedef struct mips32_bus {
 
 struct mips32_state {
 	uint32_t gpr[8][32];
-	uint32_t *r;
 	uint32_t pc, npc, hi, lo;
 	int delay;
 	uint32_t cur_pc, skip_pc;
@@ -51,6 +50,7 @@ struct mips32_state {
 void mips32_init(mips32_state *s, const mips32_bus *bus, int shadow_sets, uint32_t prid);
 void mips32_reset(mips32_state *s);
 int mips32_run(mips32_state *s, int cycles);
+uint32_t *mips32_regs(mips32_state *s);
 void mips32_set_eic(mips32_state *s, int ripl, int vector, int srs);
 int mips32_timer_irq(const mips32_state *s);
 int mips32_soft_irq(const mips32_state *s);

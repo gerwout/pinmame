@@ -69,7 +69,7 @@ static void irq_in_delay_slot(void)
 	mips32_run(&s, 1);
 	CHECK(s.pc == 0x80001000u);
 	mips32_run(&s, 3);
-	CHECK(s.r[8] == 1);
+	CHECK(mips32_regs(&s)[8] == 1);
 	CHECK(s.pc == 0x80001010u);
 }
 
@@ -94,7 +94,7 @@ static void compare_crossed_by_div(void)
 	mips32_state s;
 	setup(&s, 0x80001000u, 0);
 	s.compare = 10;
-	s.r[9] = 3;
+	mips32_regs(&s)[9] = 3;
 	put(kmem, 0x1000, 0x0109001Au);
 	mips32_run(&s, 1);
 	CHECK(s.count == 17);
@@ -116,7 +116,7 @@ static void user_mode(void)
 	setup(&s, 0x00001000u, 0x00000010u);
 	CHECK(mips32_translate(&s, 0x00001000u, &pa) && pa == 0x40001000u);
 	CHECK(!mips32_translate(&s, 0x80000000u, &pa));
-	s.r[9] = 0x80000000u;
+	mips32_regs(&s)[9] = 0x80000000u;
 	put(umem, 0x1000, 0x8D280000u);
 	mips32_run(&s, 1);
 	CHECK(((s.cause >> 2) & 31) == MIPS32_EXC_ADEL);
@@ -125,7 +125,7 @@ static void user_mode(void)
 	CHECK(s.pc == 0x80000180u);
 
 	setup(&s, 0x00001000u, 0x00000010u);
-	s.r[9] = 0xA0000000u;
+	mips32_regs(&s)[9] = 0xA0000000u;
 	put(umem, 0x1000, 0xAD280000u);
 	mips32_run(&s, 1);
 	CHECK(((s.cause >> 2) & 31) == MIPS32_EXC_ADES);
@@ -140,8 +140,20 @@ static void user_mode(void)
 	CHECK(mips32_translate(&s, 0x00001000u, &pa) && pa == 0x00001000u);
 }
 
+static void state_copy_is_independent(void)
+{
+	mips32_state a, b;
+	setup(&a, 0x80001000u, 0);
+	put(kmem, 0x1000, 0x24080005u);
+	memcpy(&b, &a, sizeof(a));
+	mips32_run(&b, 1);
+	CHECK(b.gpr[0][8] == 5);
+	CHECK(a.gpr[0][8] == 0);
+}
+
 int main(void)
 {
+	state_copy_is_independent();
 	irq_in_delay_slot();
 	exception_with_exl_set();
 	compare_crossed_by_div();

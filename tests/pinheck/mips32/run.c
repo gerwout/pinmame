@@ -55,21 +55,21 @@ static int exc_hook(void *ctx, mips32_state *s, int code)
 {
 	(void)ctx;
 	if (code == MIPS32_EXC_SYS) {
-		uint32_t nr = s->r[2], i, pa;
+		uint32_t nr = mips32_regs(s)[2], i, pa;
 		if (nr == 4004) {
-			for (i = 0; i < s->r[6]; i++) {
-				if (!mips32_translate(s, s->r[5] + i, &pa) || pa >= MEMSIZE) {
-					fprintf(stderr, "write: bad buffer %08x\n", (unsigned)(s->r[5] + i));
+			for (i = 0; i < mips32_regs(s)[6]; i++) {
+				if (!mips32_translate(s, mips32_regs(s)[5] + i, &pa) || pa >= MEMSIZE) {
+					fprintf(stderr, "write: bad buffer %08x\n", (unsigned)(mips32_regs(s)[5] + i));
 					exit_status = 98;
 					return MIPS32_HOOK_STOP;
 				}
 				out_byte(mem[pa]);
 			}
-			s->r[2] = s->r[6];
-			s->r[7] = 0;
+			mips32_regs(s)[2] = mips32_regs(s)[6];
+			mips32_regs(s)[7] = 0;
 			return MIPS32_HOOK_SKIP;
 		}
-		if (nr == 4001) { exit_status = (int)(s->r[4] & 0xFF); return MIPS32_HOOK_STOP; }
+		if (nr == 4001) { exit_status = (int)(mips32_regs(s)[4] & 0xFF); return MIPS32_HOOK_STOP; }
 		if (allow_exc) return MIPS32_HOOK_DELIVER;
 		fprintf(stderr, "unsupported syscall %u at %08x\n", (unsigned)nr, (unsigned)s->cur_pc);
 		exit_status = 99;
