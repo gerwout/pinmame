@@ -69,7 +69,9 @@ PIC32 to Propeller is bit-banged in software (`0x9D02DBE0`). A 16-byte buffer at
 
 Propeller to PIC32 travels in the same exchange: while clocking each bit out on RF5 with RF12, the PIC32 samples RF13 (COMM_IN_TX), which the Propeller drives with its reply staged from the previous packet. There is no Propeller-to-PIC32 UART. The only UART in use is UART1, the service console (BRG 42, 115,200 baud nominal); the chipKIT `HardwareSerial` ring buffer in the firmware (head/tail at object offsets `+0x22C`/`+0x230`, 512-byte buffer at `+0x2C`) belongs to that console.
 
-Per the wiki: the PIC32 keeps its non-volatile data in the top half of the Propeller's EEPROM, and the PIC32 main loop runs at about 10 kHz.
+Per the wiki: the PIC32 keeps its non-volatile data in the top half of the Propeller's EEPROM, and the PIC32 main loop runs at about 10 kHz. It also keeps its settings in U13 on I2C1, next to the DS1340.
+
+Before serving the link, the Propeller checks its EEPROM long `$8000`. If its low 16 bits are not `$BAFA`, or P13 (`PROP_CONFIG`) is held low, or the long at `$8004` is `$ABBA0001` (written by the PIC32's `UPDATE CODE` action through `writeEEPROM`, word 1), it runs its update: `FLASHING TO:`, then a serial driver on P24 (RX) / P25 (TX) at 115,200 baud sends an STK500v2 `CMD_SIGN_ON` (`1B 00 00 01 0E 01 15`) to the PIC32 bootloader about 1.7 s after power-on and waits without timeout for an answer with status 0 and a signature starting `ST`. It then clears `$8004`, loads address 0 and programs the card's `DOM_V006.PRG` with `CMD_PROGRAM_FLASH_ISP` in 128/128/256-byte blocks, reads it back with `CMD_READ_FLASH_ISP` (256 bytes), reprograms and verifies its own EEPROM from the card's `PRP_V008.BIN` (`PRP V8 FOUND`, `PROGRAM AV EEPROM`, `VERIFY AV EEPROM`), writes `$8004 = $ABBA0002` and `$8000 = (v << 24) | $BAFA` (v = the digits after `_V`, 6 for `DOM_V006.PRG`), sends `CMD_LEAVE_PROGMODE_ISP` and shows `PLEASE RESTART` (about 135 s after power-on in total); it does not serve the game link in that power cycle. The Propeller drives neither MCLR nor RG9. Link pins RF12/RF13 are U3BRX/U3BTX (UART5) on the PIC32MX795. The open-source `Bootloader_Max32.hex` talks on UART1 and is CC BY-NC-SA 4.0, so it is not used.
 
 ### 2.4 Media
 
@@ -128,7 +130,7 @@ Interface:
 
 ### 4.2 `pic32mx`
 
-Memory map: 128 KB data RAM `0x00000000` (KSEG0 `0x80000000`, KSEG1 `0xA0000000`); 512 KB program flash `0x1D000000`; boot flash `0x1FC00000` holding a synthesised stub that jumps to `0x9D001000`; SFRs `0x1F800000–0x1F8FFFFF` including SET/CLR/INV aliases at +4/+8/+C.
+Memory map: 128 KB data RAM `0x00000000` (KSEG0 `0x80000000`, KSEG1 `0xA0000000`); 512 KB program flash `0x1D000000`; boot flash `0x1FC00000` holding a synthesised stub that jumps to `0x9D001000`, preceded by the bootloader stand-in of §4.4, which holds the core through the board's `hold` callback; SFRs `0x1F800000–0x1F8FFFFF` including SET/CLR/INV aliases at +4/+8/+C.
 
 Peripherals:
 - **INTC**: `INTCON`, `INTSTAT`, `IFSx`, `IECx`, `IPCx`, priority and subpriority arbitration, `INTCON.MVEC`, `SRSMap` via priority, feeding the core's EIC input.
@@ -159,12 +161,13 @@ Interface:
 
 ### 4.4 `pinheck/` devices
 
-- **`prop.c`** owns the Propeller instance and the shared-pin edge log (timestamped PIC32 writes to Propeller-input pins). It converts PIC32 cycles to Propeller cycles by ×13/10 and implements the catch-up rules in §5.
+- **`prop.c`** owns the Propeller instance, its CAT24M01 on P28/P29 and the shared-pin edge log (PIC32 writes to P25/P26, stored in PIC32 cycles). It converts PIC32 cycles to Propeller cycles through the clock map of §5.1 and implements the catch-up rules of §5.2–§5.3. Undriven pins read 0 except where the board pulls them up: SD `DO` and `CS`, P13 and SCL/SDA; P31 (RX) floats and reads 0. The SD card attaches through a `(cs, sclk, mosi) → DO` callback. A `CLKSET` with the reset bit restarts the chip at the end of the catch-up in which it executed.
 - **`sd.c`** implements SD in SPI mode as used by the firmware's SD driver: `CMD0/8/9/10/12/13/16/17/18/24/55/58/59` and `ACMD41`, the R1/R3/R7 responses and data tokens, with high-capacity addressing when the host negotiates it and byte addressing otherwise. The card shifts its output only after it has sampled a bit, because the firmware's NCO clock can be high when chip-select asserts. It is read-only: writes are accepted, discarded and counted.
-- **`vfat.c`** builds a FAT32 volume from the romset zip's `DMD/` and `SFX/` entries: an MBR partition at LBA 8192, boot sector, FSInfo, two FATs, root and subdirectories with 8.3 names stored uppercase, and one contiguous cluster run per file. Zip directory entries (for example empty folders) become empty directories. Clusters are 32 KB (64 sectors), because the firmware reads the reserved-sector and FAT-size fields from the boot sector but assumes 64 sectors per cluster. The volume has at least 65,536 clusters, as FAT32 requires, so it is padded with free space to about 2 GB. Data-sector reads map to (entry, offset).
+- **`vfat.c`** builds a FAT32 volume from the romset zip's root files and its `DMD/` and `SFX/` entries (the Propeller's update reads `DOM_V006.PRG` and `PRP_V008.BIN` from the card root): an MBR partition at LBA 8192, boot sector, FSInfo, two FATs, root and subdirectories with 8.3 names stored uppercase, and one contiguous cluster run per file. Zip directory entries (for example empty folders) become empty directories. Clusters are 32 KB (64 sectors), because the firmware reads the reserved-sector and FAT-size fields from the boot sector but assumes 64 sectors per cluster. The volume has at least 65,536 clusters, as FAT32 requires, so it is padded with free space to about 2 GB. Data-sector reads map to (entry, offset).
 - **`zipsrc.c`** reads the romset zip. Stored entries are read by range. Deflated entries are inflated whole into a bounded LRU cache, and an entry larger than the cache is held only until another entry is read.
 - **`eeprom.c`** is a CAT24M01 (128 KB) state machine on SCL/SDA pin edges: device addressing including the A16 bit in the control byte, page writes, sequential reads, ACK/NACK. There are two instances: one on Propeller P28/P29, preloaded in its lower 32 KB with `PRP_V008.BIN` and in its upper half from NVRAM; one on the PIC32's I²C, from NVRAM.
-- **`rtc.c`** is a DS1340 seeded from the host clock.
+- **`rtc.c`** is a DS1340 on I2C1 (device `$68`), sharing the bus with U13 (wired-AND). It is seeded from the host's local time at every reset and advances with PIC32 cycles; writes set the clock. Without it the firmware stops on the `SET DATETIME` screen on every boot after the first.
+- **`bootldr.c`** is a high-level stand-in for the PIC32 bootloader, whose binary is not available. After every PIC32 reset it holds the core for a boot window and listens on UART5 (RF12 in, RF13 out, 8N1, BRG 42) for STK500v2 frames. `CMD_SIGN_ON` answers `STK500_2` and keeps the core held; `LOAD_ADDRESS`, `PROGRAM_FLASH_ISP` (byte addresses from `0x9D000000`, erasing each 4 KB page on its first write) and `READ_FLASH_ISP` act on the emulated program flash; `LEAVE_PROGMODE_ISP` starts the application once its reply has been sent. Other commands answer `STATUS_CMD_FAILED` (`$C0`) and are logged once. Without a sign-on the window ends and the application starts at `0x9D001000`.
 
 ### 4.5 `pinheck.c` machine driver
 
@@ -178,12 +181,12 @@ Interface:
   - All of these are modulated outputs.
 - **Display**: a `CORE_VIDEO` layout of 128×32 with a custom renderer converting RGB332 to host colour, fed by the display decoder.
 - **Sound**: one stereo stream from the audio device (§5.4).
-- **NVRAM**: both EEPROM images. The DS1340 is not persisted.
+- **NVRAM**: U13 (128 KB) and the Propeller EEPROM above the 32 KB `PRP_V008.BIN` image, through PinMAME's NVRAM handler. A first run starts blank, so the Propeller runs its update against `bootldr.c` and stops at `PLEASE RESTART`; the next reset or launch boots the game. Program flash written by the update persists across resets within a session and is reloaded from the romset's `DOM_V006.PRG` at every launch (decision D2, §10). The DS1340 is not persisted.
 - **Service console**: UART1 TX is logged. An input path injects UART1 RX bytes for tests.
 
 ### 4.6 `pinheckgames.c`
 
-- `pinheck`: a BIOS set holding `p8x32a.rom` (32 KB, hub `$8000–$FFFF`), CRC-audited.
+- `pinheck`: a `NOT_A_DRIVER` parent set holding `p8x32a.rom` (32 KB, hub `$8000–$FFFF`, CRC32 `f99b3070`, SHA1 `b7b4fdf4f096db7d18bda6355725cb42ae4a9378`). It is GPL 3.0 and user-supplied, never committed. `dominos` is its clone, so PinMAME finds the ROM in `dominos.zip` or `pinheck.zip`.
 - `dominos`: the Domino's update zip renamed. It declares `DOM_V006.PRG` and `PRP_V008.BIN` as ROM regions with the CRC/SHA1 above. `DMD/` and `SFX/` are opened from the same zip by `vfat.c` and are not declared.
 
 Assumption: the official update zip carries both firmware files at its root, as in the extracted package.
@@ -192,19 +195,20 @@ Assumption: the official update zip carries both firmware files at its root, as 
 
 ### 5.1 Clock
 
-PinMAME schedules the PIC32 at 80 MHz. Propeller cycle = PIC32 cycle × 13 / 10, exactly. `prop_run_until(t)` never moves backwards.
+PinMAME schedules the PIC32 at 80 MHz. The Propeller clock follows its own `CLKSET`: after reset it runs on RCFAST, taken as the nominal 12 MHz (3/20 of the PIC32 rate); XIN and PLL1×–16× derive from the board's 6.5 MHz crystal, so PLL16× (`CLKSET $6F`, 104 MHz) is exactly 13/10. `prop.c` keeps a piecewise-linear map from PIC32 cycles to Propeller cycles with one segment per `CLKSET`. PIC32 cycles are offset by an epoch that grows by the PIC32's cycle count at each PinMAME reset, so Propeller time never moves backwards.
 
 ### 5.2 Link, PIC32 to Propeller
 
-Every PIC32 write that changes a pin wired to a Propeller input is appended to the edge log with its PIC32 timestamp. The Propeller's `INA` is evaluated at the reading cog's local cycle from the log. `WAITPEQ`/`WAITPNE` resolve to the cycle of the first matching edge. Appending to a full log first runs `prop_run_until(now)`, so edges are never dropped. Entries older than the Propeller's current cycle are discarded.
+Every PIC32 write that changes a pin wired to a Propeller input is appended to the edge log with its PIC32 timestamp; it becomes visible at Propeller cycle ⌊map(P)⌋, converted when the Propeller reads it, so a `CLKSET` between logging and use is honoured. The Propeller's `INA` is evaluated at the reading cog's local cycle from the log. `WAITPEQ`/`WAITPNE` resolve to the cycle of the first matching edge. A catch-up for PIC32 cycle R runs the Propeller to map(R) − 1, so a later PIC32 write always lands on a Propeller cycle not yet evaluated; results are then identical whether the Propeller is caught up every cycle or once. Appending to a full log first catches the Propeller up to that write, so edges are never dropped. Entries at or before the Propeller's current cycle are folded into its base pin state.
 
 ### 5.3 Link, Propeller to PIC32
 
 The Propeller is advanced to the PIC32's current cycle:
 - before any PIC32 read of a port containing a Propeller-driven pin
-- at every periodic quantum timer, so the Propeller keeps producing video and audio while the PIC32 is not reading it
+- at every tick of a 1 kHz PinMAME timer, so the Propeller keeps producing video and audio while the PIC32 is not reading it
+- at every step of a bootloader hold (§4.4), before the stand-in decodes the Propeller's P25 edges
 
-There is no Propeller→PIC32 UART. The return path is RF13 (COMM_IN_TX, Propeller P24), which the PIC32 samples with `digitalRead(14)` after each falling edge of the clock it drives on RF12, during the same 16-byte exchange that shifts its own packet out on RF5. The first rule above therefore makes the return path exact.
+The game link has no Propeller→PIC32 UART. Its return path is RF13 (COMM_IN_TX, Propeller P24), which the PIC32 samples with `digitalRead(14)` after each falling edge of the clock it drives on RF12, during the same 16-byte exchange that shifts its own packet out on RF5. The first rule above therefore makes the return path exact. The update path (§2.3) is a UART in both directions: every change of the Propeller's P25 output reaches the bootloader stand-in (§4.4) with its PIC32 timestamp, and the stand-in's replies on RF13 enter the edge log as P24, like PIC32 pin writes.
 
 ### 5.4 Audio
 
@@ -226,6 +230,7 @@ GPIO writes update the board logic immediately with their timestamp, so lamp and
 - **Unmodelled SFR**: reads return 0 and writes are ignored, logged once per address.
 - **Unmodelled counter mode or video-generator mode**: logged once. The device outputs silence or black.
 - **SD write commands**: accepted, data discarded, logged.
+- **Unsupported STK500v2 command** (bootloader stand-in): answered with `STATUS_CMD_FAILED`, logged once per command.
 - **Edge-log full**: forces catch-up (§5.2).
 - **Below real time**: runs slow. The quantum and edge resolution do not change with speed.
 
@@ -247,7 +252,7 @@ External oracles are test tools only and are never linked into PinMAME.
 ### Machine level, through the firmware's UART1 console
 
 1. The PIC32 prints its banner (`pinHeck System 2011-2016`, `Game: DOM - DOMINOS`, `Version:`) on the second boot. The firmware prints it only once U13 holds its settings, which the first boot on a blank EEPROM stores. Reaching it needs the Propeller's sync reply and its `readEEPROM`/`writeEEPROM` service; until milestone 5 the test stub `tests/pinheck/pic32mx/linkstub.c` provides them.
-2. `PROPELLER SYNC CHECK` succeeds, and `[E00000]` returns the version.
+2. On blank NVRAM the Propeller's update runs to `PLEASE RESTART` against the bootloader stand-in, programming and verifying the card's `DOM_V006.PRG` and writing its EEPROM record; after a restart `PROPELLER SYNC CHECK` succeeds against the emulated Propeller, the banner appears, and `[E97000]` injected on UART1 returns `Ball Search: DISABLED`. (`[E00000]`, which the help text documents as returning the version, prints an empty line in `DOM_V006`.)
 3. `[V00ABC]` for a chosen clip produces display frames equal, pixel for pixel, to that `.VID`'s frames.
 4. `[F00ABC]` produces audio whose normalised cross-correlation with the `.wav` is at least 0.95.
 5. The service-menu switch, lamp and solenoid tests, `[MXXzzz]` and `[LXXzzz]` drive exactly the PinMAME switches, lamps and solenoids given by §4.5.
@@ -280,6 +285,6 @@ Each is resolved by analysis of the shipped firmware before the milestone that n
 ## 10. Out of scope
 
 - High-level emulation of the Propeller.
-- The PIC32 boot-flash bootloader and the firmware-update path (`UPDATE CODE`, Propeller-driven PIC32 reflash).
+- The PIC32 bootloader binary itself. Decision D1: the bootloader is emulated at protocol level by `bootldr.c` (§4.4), so the Propeller's update path and `UPDATE CODE` work unmodified. Decision D2: program flash written by an update persists until the next launch, which reloads the romset's `DOM_V006.PRG`; since the card is the same romset zip, the images are normally identical.
 - Games other than Domino's, beyond not precluding them.
 - Pin-level synthesis of video or audio waveforms.
