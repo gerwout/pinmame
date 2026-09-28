@@ -12,6 +12,9 @@ if [ -f unit_test.c ]; then
 	cc -O2 -std=c99 -Wall -Wextra -Werror -pedantic -I../../../src/cpu/mips32 -o $B/unit_test unit_test.c ../../../src/cpu/mips32/mips32.c || exit 2
 fi
 fail=0 pass=0
+for c in ../../../src/cpu/mips32/*.c; do
+	cc -std=c89 -pedantic-errors -Wno-long-long -fsyntax-only -I../../../src/cpu/mips32 "$c" || { echo "C89 FAIL $c"; fail=$((fail + 1)); }
+done
 
 run_diff() {
 	n=$(basename "$1" .S) o=$2/$(basename "$1" .S)

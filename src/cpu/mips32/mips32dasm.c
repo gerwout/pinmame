@@ -27,19 +27,59 @@ static void f(char *buf, const char *m, const char *fmt, ...)
 	va_end(ap);
 }
 
-static const char *const special_r3[64] = {
-	[0x20] = "add", [0x21] = "addu", [0x22] = "sub", [0x23] = "subu", [0x24] = "and", [0x25] = "or",
-	[0x26] = "xor", [0x27] = "nor", [0x2A] = "slt", [0x2B] = "sltu", [0x0A] = "movz", [0x0B] = "movn"
-};
+static const char *special_r3(unsigned fn)
+{
+	switch (fn) {
+	case 0x0A: return "movz";
+	case 0x0B: return "movn";
+	case 0x20: return "add";
+	case 0x21: return "addu";
+	case 0x22: return "sub";
+	case 0x23: return "subu";
+	case 0x24: return "and";
+	case 0x25: return "or";
+	case 0x26: return "xor";
+	case 0x27: return "nor";
+	case 0x2A: return "slt";
+	case 0x2B: return "sltu";
+	}
+	return NULL;
+}
 static const char *const special_trap[8] = { "tge", "tgeu", "tlt", "tltu", "teq", NULL, "tne", NULL };
-static const char *const loadstore[64] = {
-	[0x20] = "lb", [0x21] = "lh", [0x22] = "lwl", [0x23] = "lw", [0x24] = "lbu", [0x25] = "lhu", [0x26] = "lwr",
-	[0x28] = "sb", [0x29] = "sh", [0x2A] = "swl", [0x2B] = "sw", [0x2E] = "swr", [0x30] = "ll", [0x38] = "sc"
-};
-static const char *const regimm[32] = {
-	[0x00] = "bltz", [0x01] = "bgez", [0x02] = "bltzl", [0x03] = "bgezl",
-	[0x10] = "bltzal", [0x11] = "bgezal", [0x12] = "bltzall", [0x13] = "bgezall"
-};
+static const char *loadstore(unsigned o)
+{
+	switch (o) {
+	case 0x20: return "lb";
+	case 0x21: return "lh";
+	case 0x22: return "lwl";
+	case 0x23: return "lw";
+	case 0x24: return "lbu";
+	case 0x25: return "lhu";
+	case 0x26: return "lwr";
+	case 0x28: return "sb";
+	case 0x29: return "sh";
+	case 0x2A: return "swl";
+	case 0x2B: return "sw";
+	case 0x2E: return "swr";
+	case 0x30: return "ll";
+	case 0x38: return "sc";
+	}
+	return NULL;
+}
+static const char *regimm(unsigned rt)
+{
+	switch (rt) {
+	case 0x00: return "bltz";
+	case 0x01: return "bgez";
+	case 0x02: return "bltzl";
+	case 0x03: return "bgezl";
+	case 0x10: return "bltzal";
+	case 0x11: return "bgezal";
+	case 0x12: return "bltzall";
+	case 0x13: return "bgezall";
+	}
+	return NULL;
+}
 static const char *const regimm_trap[8] = { "tgei", "tgeiu", "tlti", "tltiu", "teqi", NULL, "tnei", NULL };
 
 static void word(char *buf, uint32_t op) { sprintf(buf, "%-8s0x%08x", ".word", (unsigned)op); }
@@ -48,7 +88,7 @@ static void dasm_special(char *buf, uint32_t op)
 {
 	unsigned fn = FUNCT(op);
 
-	if (special_r3[fn]) { f(buf, special_r3[fn], "%s,%s,%s", rn[RD(op)], rn[RS(op)], rn[RT(op)]); return; }
+	if (special_r3(fn)) { f(buf, special_r3(fn), "%s,%s,%s", rn[RD(op)], rn[RS(op)], rn[RT(op)]); return; }
 	if (fn >= 0x30 && fn <= 0x37 && special_trap[fn - 0x30]) { f(buf, special_trap[fn - 0x30], "%s,%s", rn[RS(op)], rn[RT(op)]); return; }
 	switch (fn) {
 	case 0x00:
@@ -134,11 +174,11 @@ unsigned mips32_dasm(char *buf, uint32_t pc, uint32_t op)
 {
 	unsigned o = op >> 26;
 
-	if (loadstore[o]) { f(buf, loadstore[o], "%s,%d(%s)", rn[RT(op)], SIMM(op), rn[RS(op)]); return 4; }
+	if (loadstore(o)) { f(buf, loadstore(o), "%s,%d(%s)", rn[RT(op)], SIMM(op), rn[RS(op)]); return 4; }
 	switch (o) {
 	case 0x00: dasm_special(buf, op); break;
 	case 0x01:
-		if (regimm[RT(op)]) f(buf, regimm[RT(op)], "%s,0x%08x", rn[RS(op)], BTARGET(pc, op));
+		if (regimm(RT(op))) f(buf, regimm(RT(op)), "%s,0x%08x", rn[RS(op)], BTARGET(pc, op));
 		else if (RT(op) >= 8 && RT(op) <= 15 && regimm_trap[RT(op) - 8]) f(buf, regimm_trap[RT(op) - 8], "%s,%d", rn[RS(op)], SIMM(op));
 		else if (RT(op) == 0x1F) f(buf, "synci", "%d(%s)", SIMM(op), rn[RS(op)]);
 		else word(buf, op);
