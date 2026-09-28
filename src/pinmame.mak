@@ -63,6 +63,7 @@ DRVLIBS += $(PINOBJ)/atari.o $(PINOBJ)/atarisnd.o
 DRVLIBS += $(PINOBJ)/taito.o $(PINOBJ)/taitos.o
 DRVLIBS += $(PINOBJ)/gts1.o
 DRVLIBS += $(PINOBJ)/recel.o $(PINOBJ)/recelsnd.o
+DRVLIBS += $(PINOBJ)/pinheck.o
 DRVLIBS += $(PINOBJ)/alvg.o $(PINOBJ)/alvgdmd.o $(PINOBJ)/alvgs.o
 DRVLIBS += $(PINOBJ)/bingo.o
 DRVLIBS += $(PINOBJ)/techno.o
@@ -129,6 +130,7 @@ PINGAMES += $(PINOBJ)/taitogames.o
 PINGAMES += $(PINOBJ)/capgames.o
 PINGAMES += $(PINOBJ)/gts1games.o
 PINGAMES += $(PINOBJ)/recelgames.o
+PINGAMES += $(PINOBJ)/pinheckgames.o
 PINGAMES += $(PINOBJ)/alvggames.o
 PINGAMES += $(PINOBJ)/spinbgames.o
 PINGAMES += $(PINOBJ)/mrgamegames.o
@@ -230,6 +232,7 @@ CPUS += TMS7000@
 CPUS += SCAMP@
 CPUS += ARM7@
 CPUS += AT91@
+CPUS += PIC32MX@
 # The MediaGX core lives in src/p2k/, so only register it when that is built - otherwise
 # cpuintrf's table references symbols nothing provides and a plain build fails to link.
 ifdef P2K

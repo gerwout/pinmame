@@ -153,6 +153,7 @@ add_compile_definitions(
    HAS_I8752=1
    HAS_TMS7000=1
    HAS_AT91=1
+   HAS_PIC32MX=1
    HAS_ARM7=1
    HAS_CDP1802=1
    HAS_TMS9980=1
@@ -232,6 +233,13 @@ set(PINMAME_SOURCES
    src/cpu/at91/at91.c
    src/cpu/at91/at91.h
    src/cpu/at91/at91dasm.c
+   src/cpu/mips32/mips32.c
+   src/cpu/mips32/mips32.h
+   src/cpu/mips32/mips32dasm.c
+   src/cpu/pic32mx/pic32mx.c
+   src/cpu/pic32mx/pic32mx.h
+   src/cpu/pic32mx/pic32mxcpu.c
+   src/cpu/pic32mx/pic32mxcpu.h
    src/cpu/cdp1802/1802dasm.c
    src/cpu/cdp1802/cdp1802.c
    src/cpu/cdp1802/cdp1802.h
@@ -565,6 +573,9 @@ set(PINMAME_SOURCES
    src/wpc/recel.h
    src/wpc/recelgames.c
    src/wpc/recelsnd.c
+   src/wpc/pinheck.c
+   src/wpc/pinheck.h
+   src/wpc/pinheckgames.c
    src/wpc/regama.c
    src/wpc/rfranco.c
    src/wpc/rfranco.h
