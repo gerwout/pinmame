@@ -34,6 +34,8 @@ typedef struct p8x32a_cog {
 	p8x32a_reg outa, dira;
 	uint32_t ctr[2], frq[2], phs[2], vcfg, vscl;
 	uint64_t phs_t[2];
+	uint32_t ctr_old[2], frq_old[2], phs_old[2];
+	uint64_t phs_t_old[2], ctr_at[2];
 } p8x32a_cog;
 
 typedef struct p8x32a {
@@ -41,7 +43,7 @@ typedef struct p8x32a {
 	uint8_t hub[65536];
 	p8x32a_cog cog[8];
 	uint8_t cog_e, lock_e, lock_state, cfg, sys_q, sys_c;
-	uint64_t now, horizon, slot_base, cnt_base;
+	uint64_t now, horizon, flushed, slot_base, cnt_base;
 	uint64_t pend[40];
 	int npend;
 	uint32_t last_out, last_dir;

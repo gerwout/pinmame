@@ -64,14 +64,67 @@ static void regset(p8x32a *p, p8x32a_reg *r, uint32_t v, uint64_t at)
 	add_pending(p, at);
 }
 
+static int nco(uint32_t ctr)
+{
+	unsigned m = (ctr >> 26) & 31;
+	return m == 4 || m == 5;
+}
+
+static uint32_t ctr_pins(const p8x32a_cog *c, int k, uint64_t t)
+{
+	int old = t < c->ctr_at[k];
+	uint32_t ctr = old ? c->ctr_old[k] : c->ctr[k], x, a, r;
+	uint32_t frq = old ? c->frq_old[k] : c->frq[k], ph = old ? c->phs_old[k] : c->phs[k];
+	uint64_t pt = old ? c->phs_t_old[k] : c->phs_t[k];
+	if (!nco(ctr)) return 0;
+	x = t <= pt ? ph : ph + frq * (uint32_t)(t - pt);
+	a = x >> 31;
+	r = a << (ctr & 31);
+	if (((ctr >> 26) & 31) == 5) r |= (a ^ 1) << ((ctr >> 9) & 31);
+	return r;
+}
+
+static uint64_t nco_toggle(uint32_t ctr, uint32_t f, uint32_t ph, uint64_t pt, uint64_t t)
+{
+	uint32_t x;
+	uint64_t dt;
+	if (!nco(ctr)) return P8X32A_NEVER;
+	if (t < pt) return pt;
+	if (!f) return P8X32A_NEVER;
+	x = (ph + f * (uint32_t)(t - pt)) & 0x7FFFFFFFu;
+	if (f < 0x80000000u) dt = ((uint64_t)0x80000000u - x + f - 1) / f;
+	else dt = (uint64_t)x / (0x100000000ull - f) + 1;
+	return t + dt;
+}
+
+static uint64_t ctr_toggle(const p8x32a_cog *c, int k, uint64_t t)
+{
+	if (t < c->ctr_at[k]) {
+		uint64_t o = nco_toggle(c->ctr_old[k], c->frq_old[k], c->phs_old[k], c->phs_t_old[k], t);
+		return o < c->ctr_at[k] ? o : c->ctr_at[k];
+	}
+	return nco_toggle(c->ctr[k], c->frq[k], c->phs[k], c->phs_t[k], t);
+}
+
+static uint64_t ctr_next(const p8x32a *p, uint64_t t)
+{
+	uint64_t nt = P8X32A_NEVER, e;
+	int n, k;
+	for (n = 0; n < 8; n++)
+		for (k = 0; k < 2; k++)
+			if ((e = ctr_toggle(&p->cog[n], k, t)) < nt) nt = e;
+	return nt;
+}
+
 uint32_t p8x32a_pins(p8x32a *p, uint64_t t, uint32_t *dir)
 {
 	uint32_t o = 0, d = 0;
 	int n;
 	for (n = 0; n < 8; n++) {
-		uint32_t dd = regval(&p->cog[n].dira, t);
+		p8x32a_cog *c = &p->cog[n];
+		uint32_t dd = regval(&c->dira, t);
 		d |= dd;
-		o |= regval(&p->cog[n].outa, t) & dd;
+		o |= (regval(&c->outa, t) | ctr_pins(c, 0, t) | ctr_pins(c, 1, t)) & dd;
 	}
 	*dir = d;
 	return o;
@@ -82,15 +135,20 @@ static void flush(p8x32a *p, uint64_t t)
 	for (;;) {
 		int k, best = -1;
 		uint32_t out, dir;
+		uint64_t when = ctr_next(p, p->flushed);
 		for (k = 0; k < p->npend; k++)
 			if (p->pend[k] <= t && (best < 0 || p->pend[k] < p->pend[best])) best = k;
-		if (best < 0) return;
-		out = p8x32a_pins(p, p->pend[best], &dir);
-		if ((out != p->last_out || dir != p->last_dir) && p->bus.pins_out) p->bus.pins_out(p->bus.ctx, p->pend[best], out, dir);
+		if (best >= 0 && p->pend[best] < when) when = p->pend[best];
+		if (when > t) break;
+		out = p8x32a_pins(p, when, &dir);
+		if ((out != p->last_out || dir != p->last_dir) && p->bus.pins_out) p->bus.pins_out(p->bus.ctx, when, out, dir);
 		p->last_out = out;
 		p->last_dir = dir;
-		p->pend[best] = p->pend[--p->npend];
+		if (when > p->flushed) p->flushed = when;
+		for (k = 0; k < p->npend; k++)
+			if (p->pend[k] == when) { p->pend[k] = p->pend[--p->npend]; k--; }
 	}
+	if (t > p->flushed) p->flushed = t;
 }
 
 static uint32_t ina(p8x32a *p, uint64_t t)
@@ -126,7 +184,18 @@ static void ctr_check(p8x32a *p, uint32_t ctr)
 {
 	unsigned m = (ctr >> 26) & 31;
 	if ((m >= 8 && m <= 15) || (m >= 17 && m <= 30)) log_once(p, LOG_CTR_MODE, "p8x32a: pin-sensing counter mode not modelled");
-	if (m >= 2 && m <= 15) log_once(p, LOG_CTR_OUT, "p8x32a: counter pin outputs not modelled");
+	if (m >= 2 && m <= 3) log_once(p, LOG_CTR_OUT, "p8x32a: counter PLL pin outputs not modelled (Plan 6)");
+}
+
+static void ctr_save(p8x32a *p, p8x32a_cog *c, int k, uint64_t e)
+{
+	flush(p, p->now);
+	c->ctr_old[k] = c->ctr[k];
+	c->frq_old[k] = c->frq[k];
+	c->phs_old[k] = c->phs[k];
+	c->phs_t_old[k] = c->phs_t[k];
+	c->ctr_at[k] = e;
+	add_pending(p, e);
 }
 
 static void special_write(p8x32a *p, int n, unsigned a, uint32_t v, uint64_t m3)
@@ -137,9 +206,9 @@ static void special_write(p8x32a *p, int n, unsigned a, uint32_t v, uint64_t m3)
 	switch (a) {
 	case 0x1F4: regset(p, &c->outa, v, e); break;
 	case 0x1F6: if (e < c->disable_at) regset(p, &c->dira, v, e); break;
-	case 0x1F8: case 0x1F9: ctr_rebase(c, k, e); c->ctr[k] = v; ctr_check(p, v); break;
-	case 0x1FA: case 0x1FB: ctr_rebase(c, k, e); c->frq[k] = v; break;
-	case 0x1FC: case 0x1FD: c->phs[k] = v; c->phs_t[k] = e; break;
+	case 0x1F8: case 0x1F9: ctr_save(p, c, k, e); ctr_rebase(c, k, e); c->ctr[k] = v; ctr_check(p, v); break;
+	case 0x1FA: case 0x1FB: ctr_save(p, c, k, e); ctr_rebase(c, k, e); c->frq[k] = v; break;
+	case 0x1FC: case 0x1FD: ctr_save(p, c, k, e); c->phs[k] = v; c->phs_t[k] = e; break;
 	case 0x1FE: c->vcfg = v; break;
 	case 0x1FF: c->vscl = v; break;
 	}
@@ -315,6 +384,8 @@ static void stop_cog(p8x32a *p, int n, uint64_t d)
 	p8x32a_cog *c = &p->cog[n];
 	if (d < c->disable_at) c->disable_at = d;
 	regset(p, &c->dira, 0, d);
+	ctr_save(p, c, 0, d);
+	ctr_save(p, c, 1, d);
 	ctr_rebase(c, 0, d);
 	ctr_rebase(c, 1, d);
 	c->ctr[0] = c->ctr[1] = 0;
@@ -405,6 +476,7 @@ static void wait_pins(p8x32a *p, int n)
 	if (match) { c->ev = EV_DONE; c->ev_t = t + 2; return; }
 	for (k = 0; k < p->npend; k++)
 		if (p->pend[k] > t && p->pend[k] < nt) nt = p->pend[k];
+	if (ctr_next(p, t) < nt) nt = ctr_next(p, t);
 	for (k = 0; k < 8; k++)
 		if (k != n && p->cog[k].ev != EV_NONE && p->cog[k].ev_t + 1 < nt) nt = p->cog[k].ev_t + 1;
 	if (p->bus.pins_next) {
@@ -509,6 +581,7 @@ void p8x32a_reset(p8x32a *p, uint64_t t)
 	p->lock_e = p->lock_state = p->cfg = p->sys_q = p->sys_c = 0;
 	p->slot_base = t;
 	p->npend = 0;
+	p->flushed = t;
 	p->last_out = p->last_dir = 0;
 	p->cog[0].ptr = 0x3E00;
 	p->cog[0].restart_at = t + 3;
