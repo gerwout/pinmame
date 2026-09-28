@@ -1,0 +1,19 @@
+--- spinsim.c.orig
++++ spinsim.c
+@@ -931,6 +931,16 @@
+ #ifndef __MINGW32__
+     restore_console_io();
+ #endif
++    {
++        char *d = getenv("SPINSIM_DUMP"), path[256];
++        unsigned a, n;
++        FILE *f;
++        if (d && sscanf(d, "%x,%x,%255s", &a, &n, path) == 3 && (f = fopen(path, "wb")))
++        {
++            fwrite(hubram + a, 1, n, f);
++            fclose(f);
++        }
++    }
+     if (eeprom) EEPromClose();
+     if (profile) PrintStats();
+     return 0;
