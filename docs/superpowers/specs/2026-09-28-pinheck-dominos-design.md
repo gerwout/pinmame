@@ -148,7 +148,7 @@ The chipKIT logical-pin table used by `digitalWrite` is resolved from the firmwa
 - 4 clocks per instruction; hub instructions wait for the cog's slot in the 16-clock rotation. `WAITCNT`/`WAITPEQ`/`WAITPNE`/`WAITVID` stall until their condition.
 - 32 KB hub RAM and 32 KB ROM; 8 locks; `COGINIT`/`COGSTOP`/`COGID`/`CLKSET`.
 - `OUTA`/`DIRA` are the OR of all running cogs.
-- Counters: all modes the firmware uses, modelled functionally.
+- Counters: NCO single and differential outputs drive pins cycle-exactly. The firmware uses NCO on P1/P2 (SD clock and data), P21/P22 (display) and P25 (serial TX), mostly with `FRQ` = 0 and data shifted through `PHS`. DUTY modes (the firmware's audio DAC on P14/P15) are not driven onto pins: the audio device integrates `FRQ` instead (§5.4). PLL pin outputs and pin-sensing modes are reported once, not modelled.
 - Video generator: `VCFG`/`VSCL`/`WAITVID` modelled functionally, emitting pin-group values per pixel clock.
 - Idle cogs (in a `WAIT*` with a known wake time) advance without executing.
 
@@ -160,8 +160,9 @@ Interface:
 ### 4.4 `pinheck/` devices
 
 - **`prop.c`** owns the Propeller instance and the shared-pin edge log (timestamped PIC32 writes to Propeller-input pins). It converts PIC32 cycles to Propeller cycles by ×13/10 and implements the catch-up rules in §5.
-- **`sd.c`** implements SD in SPI mode as used by the firmware's SD driver: `CMD0/8/9/10/12/13/16/17/18/24/55/58/59` and `ACMD41`, the R1/R3/R7 responses and data tokens, with high-capacity addressing. It is read-only: writes are accepted and discarded, and logged.
-- **`vfat.c`** builds a FAT32 volume from the romset zip's `DMD/` and `SFX/` entries: MBR, boot sector, FSInfo, two FATs, root and subdirectories with 8.3 names stored uppercase, and one contiguous cluster run per file. Data-sector reads map to (entry, offset). Stored entries are read by range; deflated entries are inflated whole into a bounded LRU cache, and an entry larger than the cache is held only while in use.
+- **`sd.c`** implements SD in SPI mode as used by the firmware's SD driver: `CMD0/8/9/10/12/13/16/17/18/24/55/58/59` and `ACMD41`, the R1/R3/R7 responses and data tokens, with high-capacity addressing when the host negotiates it and byte addressing otherwise. The card shifts its output only after it has sampled a bit, because the firmware's NCO clock can be high when chip-select asserts. It is read-only: writes are accepted, discarded and counted.
+- **`vfat.c`** builds a FAT32 volume from the romset zip's `DMD/` and `SFX/` entries: an MBR partition at LBA 8192, boot sector, FSInfo, two FATs, root and subdirectories with 8.3 names stored uppercase, and one contiguous cluster run per file. Zip directory entries (for example empty folders) become empty directories. Clusters are 32 KB (64 sectors), because the firmware reads the reserved-sector and FAT-size fields from the boot sector but assumes 64 sectors per cluster. The volume has at least 65,536 clusters, as FAT32 requires, so it is padded with free space to about 2 GB. Data-sector reads map to (entry, offset).
+- **`zipsrc.c`** reads the romset zip. Stored entries are read by range. Deflated entries are inflated whole into a bounded LRU cache, and an entry larger than the cache is held only until another entry is read.
 - **`eeprom.c`** is a CAT24M01 (128 KB) state machine on SCL/SDA pin edges: device addressing including the A16 bit in the control byte, page writes, sequential reads, ACK/NACK. There are two instances: one on Propeller P28/P29, preloaded in its lower 32 KB with `PRP_V008.BIN` and in its upper half from NVRAM; one on the PIC32's I²C, from NVRAM.
 - **`rtc.c`** is a DS1340 seeded from the host clock.
 
