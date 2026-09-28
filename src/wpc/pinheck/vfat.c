@@ -40,7 +40,7 @@ static int split(const char *path, rec *r)
 	const char *p = path, *q;
 	int k = 0;
 	size_t kl = 0;
-	if (!((path[0] == 'D' || path[0] == 'd') && (path[1] == 'M' || path[1] == 'm') && (path[2] == 'D' || path[2] == 'd') && path[3] == '/') &&
+	if (strchr(path, '/') && !((path[0] == 'D' || path[0] == 'd') && (path[1] == 'M' || path[1] == 'm') && (path[2] == 'D' || path[2] == 'd') && path[3] == '/') &&
 	    !((path[0] == 'S' || path[0] == 's') && (path[1] == 'F' || path[1] == 'f') && (path[2] == 'X' || path[2] == 'x') && path[3] == '/'))
 		return 1;
 	r->is_dir = 0;

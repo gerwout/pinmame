@@ -10,7 +10,7 @@ ok83 = re.compile(r'^[A-Z0-9$%\'\-_@~`!(){}^#&]{1,8}(\.[A-Z0-9$%\'\-_@~`!(){}^#&
 want = {}
 for n in z.namelist():
     parts = n.upper().rstrip('/').split('/')
-    if parts[0] not in ('DMD', 'SFX') or n.endswith('/') or not all(ok83.match(p) for p in parts):
+    if (len(parts) > 1 and parts[0] not in ('DMD', 'SFX')) or n.endswith('/') or not all(ok83.match(p) for p in parts):
         continue
     want['/'.join(parts)] = n
 got = {}

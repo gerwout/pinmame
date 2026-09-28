@@ -22,7 +22,7 @@ if [ -f vfat_test.c ]; then
 		./$B/vfatimg "$z" volume $B/vol.img > /dev/null || { fail=$((fail + 1)); continue; }
 		if fsck.vfat -n $B/vol.img > $B/fsck.log 2>&1; then echo "fsck: clean ($z)"; else echo "FSCK FAIL $z"; cat $B/fsck.log; fail=$((fail + 1)); fi
 		rm -rf $B/extract && mkdir $B/extract
-		MTOOLS_SKIP_CHECK=1 mcopy -s -n -i $B/vol.img ::/DMD ::/SFX $B/extract/ 2> /dev/null
+		MTOOLS_SKIP_CHECK=1 mcopy -s -n -i $B/vol.img '::/*' $B/extract/ 2> /dev/null
 		python3 cmpzip.py "$z" $B/extract || fail=$((fail + 1))
 	done
 fi

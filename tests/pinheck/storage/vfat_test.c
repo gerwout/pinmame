@@ -72,7 +72,7 @@ int main(void)
 	CHECK(vfat_read(&v, cl_lba(2), root) == 0);
 	CHECK(root[11] == 0x08);
 	CHECK(entry(root, "DMD        ") && entry(root, "SFX        "));
-	CHECK(!entry(root, "DOM_V006PRG") && !entry(root, "OTHER      "));
+	CHECK(entry(root, "DOM_V006PRG") && !entry(root, "OTHER      "));
 	e = entry(root, "DMD        ");
 	CHECK(e && e[11] == 0x10);
 	cl = le16(e + 26) | le16(e + 20) << 16;
