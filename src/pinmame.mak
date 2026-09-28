@@ -64,6 +64,8 @@ DRVLIBS += $(PINOBJ)/taito.o $(PINOBJ)/taitos.o
 DRVLIBS += $(PINOBJ)/gts1.o
 DRVLIBS += $(PINOBJ)/recel.o $(PINOBJ)/recelsnd.o
 DRVLIBS += $(PINOBJ)/pinheck.o
+DRVLIBS += $(PINOBJ)/pinheck/sd.o $(PINOBJ)/pinheck/vfat.o $(PINOBJ)/pinheck/zipsrc.o
+DRVLIBS += $(PINOBJ)/pinheck/prop.o $(PINOBJ)/pinheck/eeprom.o $(PINOBJ)/pinheck/rtc.o $(PINOBJ)/pinheck/bootldr.o $(OBJ)/cpu/p8x32a/p8x32a.o
 DRVLIBS += $(PINOBJ)/alvg.o $(PINOBJ)/alvgdmd.o $(PINOBJ)/alvgs.o
 DRVLIBS += $(PINOBJ)/bingo.o
 DRVLIBS += $(PINOBJ)/techno.o
@@ -286,6 +288,7 @@ SOUNDS += SAA1099@
 SOUNDS += QSOUND@
 
 OBJDIRS += $(PINOBJ)
+OBJDIRS += $(PINOBJ)/pinheck $(OBJ)/cpu/p8x32a
 OBJDIRS += $(PINOBJ)/sims
 OBJDIRS += $(PINOBJ)/sims/wpc
 OBJDIRS += $(PINOBJ)/sims/wpc/prelim
