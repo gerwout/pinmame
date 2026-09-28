@@ -21,5 +21,6 @@ if [ -f boot.c ]; then
 	fi
 fi
 ./makefile_link_check.sh || fail=$((fail + 1))
+python3 ../link/vcxproj_check.py ../../../vcproj || fail=$((fail + 1))
 echo "pic32mx: $fail failed"
 [ $fail -eq 0 ]

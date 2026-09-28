@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import glob
 import os
+import re
 import sys
 
 os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..'))
@@ -71,9 +72,26 @@ for path in sorted(glob.glob('vcproj/*.vcxproj')):
     if 'pinheckgames.c' not in s:
         continue
     line_after(path, '<ClCompile Include="..\\src\\wpc\\pinheckgames.c" />',
-               ['<ClCompile Include="%s" />' % win(p) for p in srcs if p.endswith('.c')])
+               ['<ClCompile Include="%s" />' % win(p) for p in srcs
+                if p.endswith('.c') and '<ClCompile Include="%s"' % win(p) not in s])
     line_after(path, '<ClInclude Include="..\\src\\wpc\\pinheck.h" />',
                ['<ClInclude Include="%s" />' % win(p) for p in srcs if p.endswith('.h')])
+
+PINHECK_ITEM = re.compile(r'<ClCompile Include="(\.\.\\src\\wpc\\pinheck\\[^"]+\.c)" />')
+for path in sorted(glob.glob('vcproj/*.vcxproj')):
+    s = open(path, newline='').read()
+    configs = re.findall(r'<ProjectConfiguration Include="([^"]+)">', s)
+    m = PINHECK_ITEM.search(s)
+    while m:
+        start, end, nl = line_span(s, m.start())
+        indent = s[start:m.start()]
+        block = indent + '<ClCompile Include="%s">' % m.group(1) + nl
+        block += ''.join(indent + "  <ObjectFileName Condition=\"'$(Configuration)|$(Platform)'=='%s'\">$(IntDir)pinheck\\</ObjectFileName>" % c + nl for c in configs)
+        block += indent + '</ClCompile>' + nl
+        s = s[:start] + block + s[end:]
+        changed.append(path)
+        m = PINHECK_ITEM.search(s)
+    open(path, 'w', newline='').write(s)
 
 for path in sorted(glob.glob('vcproj/*.vcxproj.filters')):
     s = open(path, newline='').read()
