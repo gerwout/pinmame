@@ -411,6 +411,7 @@ static void wait_pins(p8x32a *p, int n)
 		uint64_t e = p->bus.pins_next(p->bus.ctx, t);
 		if (e < nt) nt = e;
 	}
+	if (p->horizon != P8X32A_NEVER && nt > p->horizon + 1) nt = p->horizon + 1;
 	if (nt <= t) nt = t + 1;
 	c->ev_t = nt;
 }
@@ -463,6 +464,7 @@ static void restart(p8x32a *p, int n)
 
 void p8x32a_run_until(p8x32a *p, uint64_t t)
 {
+	p->horizon = t;
 	for (;;) {
 		int n, best = -1;
 		p8x32a_cog *b;

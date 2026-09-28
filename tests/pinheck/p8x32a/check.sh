@@ -40,7 +40,7 @@ rtl_case() {
 	compile "$1" "$o" || { fail=$((fail + 1)); return; }
 	python3 mkrom.py "$o.binary" "$o.rom" "$o.ram"
 	$P1RTL -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args -dump "$o.rtlhub" > "$o.rtl"
-	./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args -dump "$o.ourhub" > "$o.our" 2> "$o.log"
+	./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args $3 -dump "$o.ourhub" > "$o.our" 2> "$o.log"
 	if cmp -s "$o.rtl" "$o.our" && cmp -s "$o.rtlhub" "$o.ourhub"; then pass=$((pass + 1))
 	else echo "RTL MISMATCH $1"; diff "$o.rtl" "$o.our" | head -6; fail=$((fail + 1)); fi
 	exp=$(sed -n "s/^' EXPECT-LOG: //p" "$1")
@@ -60,6 +60,7 @@ spin_case() {
 }
 
 for f in chip/*.spin isa/*.spin; do [ -e "$f" ] && rtl_case "$f" $B/rtl; done
+mkdir -p $B/rtl-q && rtl_case chip/waitext.spin $B/rtl-q "-quantum 1000"
 if [ -f gen.py ]; then
 	rm -rf $B/rtl/rand $B/spin/rand
 	python3 gen.py --out $B/rtl/rand --count "$SEEDS" --hubflags

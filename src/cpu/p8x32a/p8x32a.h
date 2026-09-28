@@ -12,7 +12,7 @@ extern "C" {
 typedef struct p8x32a_bus {
 	void *ctx;
 	uint32_t (*pins_in)(void *ctx, uint64_t t);
-	uint64_t (*pins_next)(void *ctx, uint64_t t);
+	uint64_t (*pins_next)(void *ctx, uint64_t t); /* P8X32A_NEVER if no edge is known yet; re-queried every run_until */
 	void (*pins_out)(void *ctx, uint64_t t, uint32_t out, uint32_t dir);
 	void (*cog_start)(void *ctx, uint64_t t, int cog, uint32_t ptr);
 	void (*clkset)(void *ctx, uint64_t t, uint8_t cfg);
@@ -41,7 +41,7 @@ typedef struct p8x32a {
 	uint8_t hub[65536];
 	p8x32a_cog cog[8];
 	uint8_t cog_e, lock_e, lock_state, cfg, sys_q, sys_c;
-	uint64_t now, slot_base, cnt_base;
+	uint64_t now, horizon, slot_base, cnt_base;
 	uint64_t pend[40];
 	int npend;
 	uint32_t last_out, last_dir;

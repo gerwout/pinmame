@@ -15,6 +15,7 @@ static int nat;
 static int stop_cog = -1;
 static uint32_t stop_ptr;
 static uint64_t stop_at = P8X32A_NEVER;
+static uint64_t known_to = P8X32A_NEVER;
 static struct ev { uint64_t t; size_t seq; char line[48]; } *evs;
 static size_t nev, cap;
 
@@ -45,7 +46,7 @@ static uint64_t pins_next(void *ctx, uint64_t t)
 	int k;
 	(void)ctx;
 	for (k = 0; k < nat; k++)
-		if (at_t[k] > t) return at_t[k];
+		if (at_t[k] > t) return at_t[k] <= known_to ? at_t[k] : P8X32A_NEVER;
 	return P8X32A_NEVER;
 }
 
@@ -121,7 +122,7 @@ int main(int argc, char **argv)
 {
 	p8x32a_bus bus = { NULL, pins_in, pins_next, pins_out, cog_start, clkset, logmsg };
 	const char *rom = NULL, *ram = NULL, *eep = NULL, *dump = NULL;
-	unsigned long long limit = 1000000, t, end;
+	unsigned long long limit = 1000000, t, end, quantum = 4096;
 	int halt = 0, i;
 	size_t n;
 
@@ -134,8 +135,9 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "-ext") && i + 1 < argc) ext = (uint32_t)strtoul(argv[++i], NULL, 16);
 		else if (!strcmp(argv[i], "-stop") && i + 2 < argc) { stop_cog = atoi(argv[i + 1]); stop_ptr = (uint32_t)strtoul(argv[i + 2], NULL, 16); i += 2; }
 		else if (!strcmp(argv[i], "-halt")) halt = 1;
+		else if (!strcmp(argv[i], "-quantum") && i + 1 < argc) quantum = strtoull(argv[++i], NULL, 0);
 		else if (!strcmp(argv[i], "-extat") && i + 2 < argc && nat < 64) { at_t[nat] = strtoull(argv[i + 1], NULL, 0); at_v[nat++] = (uint32_t)strtoul(argv[i + 2], NULL, 16); i += 2; }
-		else { fprintf(stderr, "usage: p8run -rom f [-ram f] [-eeprom f] [-ext hex] [-cycles n] [-stop cog ptrhex] [-halt] [-extat cycle hex]... [-dump f]\n"); return 2; }
+		else { fprintf(stderr, "usage: p8run -rom f [-ram f] [-eeprom f] [-ext hex] [-cycles n] [-stop cog ptrhex] [-halt] [-quantum n] [-extat cycle hex]... [-dump f]\n"); return 2; }
 	}
 	if (!rom) { fprintf(stderr, "p8run: -rom is required\n"); return 2; }
 	p8x32a_init(&chip, &bus);
@@ -150,9 +152,10 @@ int main(int argc, char **argv)
 	}
 	printf("P 0 00000000 00000000\nK 0 00\n");
 	end = limit;
-	for (t = 0; t < limit; t += 4096) {
-		unsigned long long to = t + 4095 < limit - 1 ? t + 4095 : limit - 1;
+	for (t = 0; t < limit; t += quantum) {
+		unsigned long long to = t + quantum - 1 < limit - 1 ? t + quantum - 1 : limit - 1;
 		uint64_t h;
+		if (quantum != 4096) known_to = to;
 		p8x32a_run_until(&chip, to);
 		if (chip.stop) { end = stop_at + 1; break; }
 		if (halt && (h = halted()) != P8X32A_NEVER && h >= 2) { end = h; break; }
