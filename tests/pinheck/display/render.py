@@ -2,8 +2,8 @@
 """Check a PinMAME screen snapshot of a pinHeck game against the decoded frame log:
 the visible area is SCALE x the 128x32 frame wide and the full screen high, the frame is
 drawn SCALE x SCALE at the top left, and everything else is black apart from the core's
-lamp/switch/solenoid panel, which starts 3 rows under the display and uses at most its two
-dot pens (off and on; their exact values depend on the palette's brightness and gamma)."""
+lamp/switch/solenoid panel, which starts 3 rows under the display and uses only the core's
+own pens, never an RGB332 frame colour."""
 import argparse
 import struct
 import sys
@@ -90,15 +90,17 @@ def main():
     bad = [(x, y) for y in range(min(h, panel)) for x in range(w)
            if not (y < H * SCALE and x < W * SCALE) and not near(rows[y][x], (0, 0, 0))]
     pens = set(rows[y][x] for y in range(panel, h) for x in range(w)) - {(0, 0, 0)}
+    shown = [tuple((c >> 3) << 3 | c >> 5 for c in rgb332(v)) for v in range(1, 256)]  # as a 15 bpp screen shows them
+    frame_pens = [p for p in pens if any(all(abs(a - b) <= 1 for a, b in zip(p, q)) for q in shown)]
     if bad:
         x, y = bad[0]
         print('render: FAIL, %d pixels between the frame and the core panel are not black, first at (%d,%d) = %s' % (len(bad), x, y, rows[y][x]))
         fail = 1
-    elif len(pens) > 2:
-        print('render: FAIL, the core panel area holds %d colours, more than its two dot pens' % len(pens))
+    elif frame_pens:
+        print('render: FAIL, the core panel area holds frame colours, first %s' % (frame_pens[0],))
         fail = 1
     else:
-        print('render: %dx%d visible, black outside the frame apart from the core panel (%d dot pens)' % (w, h, len(pens)))
+        print('render: %dx%d visible, black outside the frame apart from the core panel (%d pens, none a frame colour)' % (w, h, len(pens)))
     sys.exit(fail)
 
 
