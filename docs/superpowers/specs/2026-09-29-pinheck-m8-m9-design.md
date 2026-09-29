@@ -60,6 +60,8 @@ All of it is already in `pinheck`.
 - the Noid and target-bank servos;
 - the outlanes and drain back into the trough.
 
+Measured by Plan 8a, for the simulator: the firmware times coil pulses in units of its main-loop counter (`[MXXzzz]` clamps 15 × zzz to 255 units, 42.4 ms emulated for any zzz ≥ 17; the solenoid test pulses the knocker 5.5 ms and the pops 10 ms), so the simulator reacts to solenoid edges, not to pulse lengths. The Noid is servo 0 driven as a continuous-rotation servo (544 µs one way, 2,400 µs the other, pulses stopped = stop); the board reports the stop as a detach event.
+
 Playfield switches get keyboard keys. The cabinet keys follow PinMAME's usual layout: coin, start, both flippers, tilt, and Enter/Back/Menu/User.
 
 ### 3.4 Verification
