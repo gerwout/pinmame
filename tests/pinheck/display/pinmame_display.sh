@@ -29,7 +29,7 @@ grep -aq "Playing Video" $B/uart2.log || { echo "PINMAME FAIL: [V00$CLIP] not ac
 grep -q "^display: config" $B/prop1.log || { echo "PINMAME FAIL: no display config packet"; fail=1; }
 grep "^display: \(frame\|latch\|mode\)" $B/prop1.log $B/prop2.log && { echo "PINMAME FAIL: malformed display transfers"; fail=1; }
 python3 frames.py $B/frames1.bin || fail=1
-python3 render.py $B/snap/dominos.png $B/frames1.bin || fail=1
+python3 render.py $B/snap/dominos.png $B/frames1.bin --config "$(grep '^display: config ' $B/prop1.log | tail -1 | cut -d' ' -f3-)" || fail=1
 dir=$(echo "$CLIP" | cut -c1)
 python3 frames.py $B/frames2.bin --after "$SEND_AT" --vid "$PINHECK_UPDATE_DIR/DMD/_D$dir/$CLIP.VID" || fail=1
 [ $fail -eq 0 ] || exit 1
