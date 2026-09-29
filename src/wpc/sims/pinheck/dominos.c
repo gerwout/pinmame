@@ -182,7 +182,7 @@ static sim_tState dominos_stateDef[] = {
 static int dominos_handleBallState(sim_tBallStatus *ball, int *inports) {
   (void)inports;
   switch (ball->state) {
-    case stTrough1:   if (sol(sLoad))   return setState(stShooter, 5); break;
+    case stTrough1:   if (sol(sLoad) && !core_getSw(swShooter)) return setState(stShooter, 5); break; /* a full lane loses the pulse */
     case stShooter:   if (sol(sLaunch) || sim_getSol(sShooterRel)) return setState(stLaunched, 2); break;
     case stLScoop:    if (sol(sLScoop)) return setState(stFree, 5); break;
     case stRScoop:    if (sol(sRScoop)) return setState(stFree, 5); break;

@@ -27,6 +27,7 @@ static sim_tSimData *simData = NULL;  /* data about the game simulator */
 static struct {
   sim_tBallStatus balls[SIM_MAXBALLS]; /* ball status etc */
   int  currBall;      /* currently select ball */
+  int  prevIn[CORE_MAXPORTS]; /* last frame's game inports (autoBall: a key moves a ball when pressed) */
   int  shooterRel;    /* plunger released */
   int  shooterSpeed;  /* */
   struct {
@@ -69,7 +70,9 @@ void sim_run(int *inports, int firstGameInport, int useSimKeys, int noOfBalls) {
     sim_tInportData *iData = simData->inportData;
     int eventFound = FALSE;
     while (iData->mask) {
-	if (!eventFound && (inports[iData->port + firstGameInport] & iData->mask) == iData->mask) {
+	if (!eventFound && (inports[iData->port + firstGameInport] & iData->mask) == iData->mask &&
+	    !(simData->autoBall && iData->action >= SIM_STATES &&
+	      (locals.prevIn[iData->port + firstGameInport] & iData->mask) == iData->mask)) {
    	   /*-- mask this event off --*/
 	   eventFound = TRUE;
         /*-- check all conditions --*/
@@ -99,6 +102,8 @@ void sim_run(int *inports, int firstGameInport, int useSimKeys, int noOfBalls) {
       iData += 1;
     }
   }
+  for (ii = 0; ii < simData->inports && firstGameInport + ii < CORE_MAXPORTS; ii++)
+    locals.prevIn[firstGameInport + ii] = inports[firstGameInport + ii];
   /*----------------------------------------------
   /  update swithes depending playfield mechanics
   /-----------------------------------------------*/

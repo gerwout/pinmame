@@ -13,7 +13,7 @@ ln -s "$PINHECK_ZIP" $B/roms/dominos.zip || exit 2
 python3 check5.py plan $B || exit 2
 launch() {
 	(cd $B && PINHECK_INSERVICE=6 PINHECK_OUT_LOG=$PWD/out$1.log PINHECK_UART1_LOG=$PWD/uart$1.log PINHECK_PROP_LOG=$PWD/prop$1.log \
-		timeout 3000 "$SDL3PINMAME" dominos -rompath roms -nvram_directory nvram -cfg_directory cfg -headless -frames_to_run $2 -skip_gamewarnings -nothrottle $3 > run$1.out 2>&1) \
+		timeout -k 30 3000 "$SDL3PINMAME" dominos -rompath roms -nvram_directory nvram -cfg_directory cfg -headless -frames_to_run $2 -skip_gamewarnings -nothrottle $3 > run$1.out 2>&1) \
 		|| { echo "BOARD FAIL: launch $1 exited $?"; tail -5 $B/run$1.out; exit 1; }
 }
 launch 1 1200

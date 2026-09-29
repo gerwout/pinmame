@@ -62,7 +62,7 @@ static UINT32 brd_sols_seen;
 static UINT16 brd_gi8_seen;
 static UINT8 brd_cust[PINHECK_NSOLS - PINHECK_SOL_RGB], brd_logged[PINHECK_NLAMPS + PINHECK_NSOLS];
 static int brd_servo_us[BOARD_SERVOS];
-static UINT8 brd_sw_logged[10];
+static UINT8 brd_sw_logged[10], brd_lamps_logged[9];
 
 static uint8_t pinheck_brd_swcol(void *ctx, int col) { (void)ctx; return coreGlobals.swMatrix[col + 1]; }
 static uint16_t pinheck_brd_cab(void *ctx) { (void)ctx; return (uint16_t)(coreGlobals.swMatrix[0] | coreGlobals.swMatrix[9] << 8); }
@@ -175,6 +175,12 @@ static void pinheck_brd_log_outputs(void)
 			n += sprintf(line + n, " %d=%d", coreData->m2sw(i / 8, i % 8), (coreGlobals.swMatrix[i / 8] >> (i % 8)) & 1);
 	memcpy(brd_sw_logged, (void *)coreGlobals.swMatrix, sizeof(brd_sw_logged));
 	if (n) fprintf(brd_log, "%.9f W%s\n", timer_get_time(), line);
+	/* the binary lamp matrix (columns 1-8, then lamps 91-98) when it changed */
+	if (memcmp(brd_lamps_logged, (void *)coreGlobals.lampMatrix, 9)) {
+		memcpy(brd_lamps_logged, (void *)coreGlobals.lampMatrix, 9);
+		for (n = 0, i = 0; i < 9; i++) n += sprintf(line + n, "%02x", brd_lamps_logged[i]);
+		fprintf(brd_log, "%.9f B %s\n", timer_get_time(), line);
+	}
 }
 
 static void pinheck_brd_init(void)
