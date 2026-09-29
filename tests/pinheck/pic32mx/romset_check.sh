@@ -12,14 +12,17 @@ cp "$P8X32A_ROM" $B/p8x32a.rom && (cd $B && zip -q -j bios/pinheck.zip p8x32a.ro
 (cd "$PINHECK_UPDATE_DIR" && zip -q -0 "$OLDPWD/$B/nomedia/dominos.zip" DOM_V006.PRG PRP_V008.BIN) || exit 2
 fail=0
 run() {
-	(cd $B && timeout 600 "$SDL3PINMAME" "$1" -rompath "$2" -nvram_directory nvram -headless -frames_to_run 120 -skip_gamewarnings -nothrottle > "$3.out" 2>&1)
+	name=$1 path=$2 out=$3
+	shift 3
+	(cd $B && timeout -k 5 120 "$SDL3PINMAME" "$name" -rompath "$path" -nvram_directory nvram -headless -skip_gamewarnings -nothrottle "$@" > "$out.out" 2>&1)
 	echo $?
 }
+# no -frames_to_run: the system set has to refuse and stop by itself, with an error status
 rc=$(run pinheck bios bios)
-if [ "$rc" -gt 128 ] || ! grep -qF "pinheck: 'pinheck' is the pinHeck system set" $B/bios.out; then
-	echo "ROMSET FAIL: 'pinheck' alone exited $rc"; tail -3 $B/bios.out; fail=1
+if [ "$rc" -eq 0 ] || [ "$rc" -ge 124 ] || ! grep -qF "pinheck: 'pinheck' is the pinHeck system set" $B/bios.out; then
+	echo "ROMSET FAIL: 'pinheck' alone exited $rc, want a prompt error exit"; tail -3 $B/bios.out; fail=1
 fi
-rc=$(run dominos nomedia nomedia)
+rc=$(run dominos nomedia nomedia -frames_to_run 120)
 if [ "$rc" -gt 128 ] || ! grep -qF "pinheck: the SD card from dominos.zip has no DMD/ and no SFX/" $B/nomedia.out; then
 	echo "ROMSET FAIL: dominos without media exited $rc"; tail -3 $B/nomedia.out; fail=1
 fi

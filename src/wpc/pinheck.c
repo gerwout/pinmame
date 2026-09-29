@@ -18,6 +18,7 @@
 #define PINHECK_CLOCK 80000000
 #define PINHECK_LOG_MAX 64
 #define PINHECK_ZIP_CACHE (64u << 20)
+#define PINHECK_REFUSE_SECS 5
 #define RF5  (1u << 5)
 #define RF12 (1u << 12)
 #define RF13 (1u << 13)
@@ -290,6 +291,8 @@ PINMAME_VIDEO_UPDATE(pinheck_video)
 
 static INTERRUPT_GEN(pinheck_vblank)
 {
+	/* the system set refuses to run: leave its on-screen message up, then stop with an error */
+	if (locals.idle && timer_get_time() >= PINHECK_REFUSE_SECS) mame_schedule_error_exit();
 	core_updateSw(0);
 }
 
@@ -403,6 +406,7 @@ static MACHINE_INIT(pinheck)
 	if (pinheck_system_only()) {
 		locals.idle = 1;
 		fprintf(stderr, "pinheck: '%s' is the pinHeck system set, not a game; run a game such as dominos\n", Machine->gamedrv->name);
+		usrintf_showmessage_secs(PINHECK_REFUSE_SECS, "'%.16s' is the pinHeck system set, not a game. Run a game such as dominos.", Machine->gamedrv->name);
 		logerror("pinheck: '%s' is the pinHeck system set, not a game\n", Machine->gamedrv->name);
 		return;
 	}
