@@ -73,6 +73,7 @@ spin_case() {
 
 for f in chip/*.spin isa/*.spin; do [ -e "$f" ] && rtl_case "$f" $B/rtl; done
 mkdir -p $B/rtl-q && rtl_case chip/waitext.spin $B/rtl-q "-quantum 1000"
+rtl_case chip/idle_ina.spin $B/rtl-q "-quantum 1000"
 if [ -f gen.py ]; then
 	rm -rf $B/rtl/rand $B/spin/rand
 	python3 gen.py --out $B/rtl/rand --count "$SEEDS" --hubflags
