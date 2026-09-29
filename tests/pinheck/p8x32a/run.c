@@ -156,6 +156,14 @@ static void cog_start(void *ctx, uint64_t t, int cog, uint32_t ptr)
 	if (cog == stop_cog && ptr == stop_ptr) { stop_at = t; chip.stop = 1; }
 }
 
+static FILE *ctrlog;
+
+static void ctr_state(void *ctx, uint64_t t, int cog, int ctr, uint32_t ctr_reg, uint32_t frq)
+{
+	(void)ctx;
+	if (ctrlog) fprintf(ctrlog, "C %llu %d %d %08x %08x\n", (unsigned long long)t, cog, ctr, (unsigned)ctr_reg, (unsigned)frq);
+}
+
 static void clkset(void *ctx, uint64_t t, uint8_t cfg)
 {
 	(void)ctx;
@@ -193,7 +201,7 @@ static uint64_t halted(void)
 
 int main(int argc, char **argv)
 {
-	p8x32a_bus bus = { NULL, pins_in, pins_next, pins_out, cog_start, clkset, logmsg };
+	p8x32a_bus bus = { NULL, pins_in, pins_next, pins_out, cog_start, clkset, logmsg, ctr_state };
 	const char *rom = NULL, *ram = NULL, *eep = NULL, *dump = NULL;
 	unsigned long long limit = 1000000, t, end, quantum = 4096;
 	int halt = 0, i;
@@ -209,6 +217,7 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "-stop") && i + 2 < argc) { stop_cog = atoi(argv[i + 1]); stop_ptr = (uint32_t)strtoul(argv[i + 2], NULL, 16); i += 2; }
 		else if (!strcmp(argv[i], "-halt")) halt = 1;
 		else if (!strcmp(argv[i], "-notrace")) notrace = 1;
+		else if (!strcmp(argv[i], "-ctrlog") && i + 1 < argc) { if (!(ctrlog = fopen(argv[++i], "w"))) { perror(argv[i]); return 2; } }
 		else if (!strcmp(argv[i], "-uart") && i + 2 < argc) {
 			uint64_t t0 = strtoull(argv[i + 1], NULL, 0);
 			size_t nb = strlen(argv[i + 2]) / 2, k;
@@ -235,7 +244,7 @@ int main(int argc, char **argv)
 		}
 		else if (!strcmp(argv[i], "-quantum") && i + 1 < argc) quantum = strtoull(argv[++i], NULL, 0);
 		else if (!strcmp(argv[i], "-extat") && i + 2 < argc && nat < 8192) { at_t[nat] = strtoull(argv[i + 1], NULL, 0); at_v[nat++] = (uint32_t)strtoul(argv[i + 2], NULL, 16); i += 2; }
-		else { fprintf(stderr, "usage: p8run -rom f [-ram f] [-eeprom f] [-ext hex] [-cycles n] [-stop cog ptrhex] [-halt] [-quantum n] [-sd romset.zip] [-notrace] [-uart cycle hexbytes] [-extat cycle hex]... [-dump f]\n"); return 2; }
+		else { fprintf(stderr, "usage: p8run -rom f [-ram f] [-eeprom f] [-ext hex] [-cycles n] [-stop cog ptrhex] [-halt] [-quantum n] [-sd romset.zip] [-notrace] [-ctrlog f] [-uart cycle hexbytes] [-extat cycle hex]... [-dump f]\n"); return 2; }
 	}
 	if (!rom) { fprintf(stderr, "p8run: -rom is required\n"); return 2; }
 	p8x32a_init(&chip, &bus);

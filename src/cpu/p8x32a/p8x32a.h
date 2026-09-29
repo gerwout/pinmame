@@ -17,6 +17,7 @@ typedef struct p8x32a_bus {
 	void (*cog_start)(void *ctx, uint64_t t, int cog, uint32_t ptr);
 	void (*clkset)(void *ctx, uint64_t t, uint8_t cfg);
 	void (*log)(void *ctx, const char *msg);
+	void (*ctr_state)(void *ctx, uint64_t t, int cog, int ctr, uint32_t ctr_reg, uint32_t frq); /* ctr: 0 = A, 1 = B; t = cycle the change takes effect */
 } p8x32a_bus;
 
 typedef struct p8x32a_reg {
@@ -36,6 +37,7 @@ typedef struct p8x32a_cog {
 	uint64_t phs_t[2];
 	uint32_t ctr_old[2], frq_old[2], phs_old[2];
 	uint64_t phs_t_old[2], ctr_at[2];
+	uint32_t ctr_seen[2], frq_seen[2];
 } p8x32a_cog;
 
 typedef struct p8x32a {
