@@ -32,7 +32,8 @@ int pic32cpu_execute(int cycles)
 {
 	pic32cpu_ICount = cycles;
 	if (!soc.flash) return cycles;
-	while (pic32cpu_ICount > 0) pic32cpu_ICount -= pic32mx_run(&soc, pic32cpu_ICount);
+	soc.icount = &pic32cpu_ICount;
+	pic32mx_run(&soc, cycles);
 	return cycles - pic32cpu_ICount;
 }
 

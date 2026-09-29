@@ -10,6 +10,7 @@
 #define OFF_OSCCON      0x0F000u
 #define OFF_RCON        0x0F600u
 #define OFF_TRISA       0x86000u
+#define OFF_AD1PCFG     0x09060u
 #define INTCON_MVEC     (1u << 12)
 #define CON_ON          (1u << 15)
 
@@ -196,13 +197,29 @@ static uint32_t uart_read(pic32mx *p, int u, uint32_t reg)
 	return SFR(p, base + reg);
 }
 
+/* the host's cycle counter is current inside board callbacks; lowering it ends the run there */
+static void host_enter(pic32mx *p)
+{
+	if (p->icount) *p->icount = (int)((int64_t)p->run_end - (int64_t)p->cpu.cycles);
+}
+
+static void host_leave(pic32mx *p)
+{
+	int left;
+	if (!p->icount) return;
+	left = (int)((int64_t)p->run_end - (int64_t)p->cpu.cycles);
+	if (*p->icount >= left) return;
+	p->run_end = p->cpu.cycles + (uint64_t)(*p->icount > 0 ? *p->icount : 0);
+	p->cpu.stop = 1;
+}
+
 static void uart_write(pic32mx *p, int u, uint32_t reg, uint32_t old, uint32_t v)
 {
 	uint32_t base = uart_base[u];
 
 	if (reg == 0x20) {
 		if ((SFR(p, base) & CON_ON) && (SFR(p, base + 0x10) & (1u << 10))) {
-			if (p->board.uart_tx) p->board.uart_tx(p->board.ctx, u + 1, (uint8_t)v, p->cpu.cycles);
+			if (p->board.uart_tx) { host_enter(p); p->board.uart_tx(p->board.ctx, u + 1, (uint8_t)v, p->cpu.cycles); host_leave(p); }
 			pic32mx_set_irq(p, uart_irq[u] + 2);
 		}
 	} else if (reg == 0x10 && !(old & (1u << 10)) && (v & (1u << 10)))
@@ -211,7 +228,12 @@ static void uart_write(pic32mx *p, int u, uint32_t reg, uint32_t old, uint32_t v
 
 static int i2c_pins(pic32mx *p, int m, int scl, int sda)
 {
-	return p->board.i2c_pins ? p->board.i2c_pins(p->board.ctx, m + 1, scl, sda, p->cpu.cycles) : sda;
+	int r;
+	if (!p->board.i2c_pins) return sda;
+	host_enter(p);
+	r = p->board.i2c_pins(p->board.ctx, m + 1, scl, sda, p->cpu.cycles);
+	host_leave(p);
+	return r;
 }
 
 static int i2c_reg(uint32_t off, int *m, uint32_t *reg)
@@ -269,7 +291,13 @@ static void i2c_write(pic32mx *p, int m, uint32_t reg, uint32_t v)
 	uint32_t base = i2c_base[m], con = SFR(p, base);
 	int i, b, ack;
 
-	if (!(con & CON_ON) || p->i2c[m].pending) return;
+	if (!(con & CON_ON)) return;
+	if (p->i2c[m].pending) {
+		uint32_t col = reg == 0x00 ? v & 0x1Fu & ~p->i2c[m].con_clear : reg == 0x50 ? 1u : 0;
+		if (reg == 0x00) SFR(p, base) &= ~col;
+		if (col) SFR(p, base + 0x10) |= 1u << 7;
+		return;
+	}
 	if (reg == 0x50) {
 		for (i = 7; i >= 0; i--) {
 			b = (int)((v >> i) & 1);
@@ -313,7 +341,9 @@ static uint32_t port_read(pic32mx *p, uint32_t off)
 	int port = (int)((off - OFF_TRISA) >> 6);
 	uint32_t reg = (off - OFF_TRISA) & 0x30u, tris = SFR(p, OFF_TRISA + (uint32_t)port * 0x40);
 	if (reg == 0x10) {
-		uint32_t in = p->board.port_read ? p->board.port_read(p->board.ctx, port, p->cpu.cycles) : 0xFFFFu;
+		uint32_t in = 0xFFFFu;
+		if (p->board.port_read) { host_enter(p); in = p->board.port_read(p->board.ctx, port, p->cpu.cycles); host_leave(p); }
+		if (port == PIC32MX_PORTB) in &= SFR(p, OFF_AD1PCFG);
 		return (SFR(p, OFF_TRISA + (uint32_t)port * 0x40 + 0x20) & ~tris) | (in & tris);
 	}
 	return SFR(p, off & ~0xFu);
@@ -325,8 +355,10 @@ static void port_write(pic32mx *p, uint32_t off, uint32_t old, uint32_t v)
 	uint32_t base = OFF_TRISA + (uint32_t)port * 0x40;
 
 	if (((off - OFF_TRISA) & 0x30u) == 0x30 || old == v) return;
-	if (p->board.port_write)
-		p->board.port_write(p->board.ctx, port, SFR(p, base + 0x20), SFR(p, base), p->cpu.cycles);
+	if (!p->board.port_write) return;
+	host_enter(p);
+	p->board.port_write(p->board.ctx, port, SFR(p, base + 0x20), SFR(p, base), p->cpu.cycles);
+	host_leave(p);
 }
 
 static int is_known(uint32_t off)
@@ -427,6 +459,15 @@ static uint32_t bus_read(void *ctx, uint32_t pa, int size, int fetch, int *err)
 	return v;
 }
 
+static uint32_t merge_base(pic32mx *p, uint32_t reg)
+{
+	int i;
+	uint32_t sub;
+	if (reg >= OFF_TRISA && reg < OFF_TRISA + PIC32MX_PORTS * 0x40 && (reg & 0x30u) == 0x10) return SFR(p, reg + 0x10);
+	if (timer_reg(reg, &i, &sub) && sub == 0x10) return timer_read(p, i, sub);
+	return SFR(p, reg);
+}
+
 static void bus_write(void *ctx, uint32_t pa, uint32_t data, int size, int *err)
 {
 	pic32mx *p = (pic32mx *)ctx;
@@ -437,7 +478,7 @@ static void bus_write(void *ctx, uint32_t pa, uint32_t data, int size, int *err)
 		uint32_t off = pa - PIC32MX_SFR_BASE, sh = (off & 3) * 8;
 		if (size < 4) {
 			uint32_t mask = ((1u << (size * 8)) - 1) << sh;
-			if (!(off & 0xCu)) data = (SFR(p, off & ~0xFu) & ~mask) | ((data << sh) & mask);
+			if (!(off & 0xCu)) data = (merge_base(p, off & ~0xFu) & ~mask) | ((data << sh) & mask);
 			else data = (data << sh) & mask;
 		}
 		sfr_write(p, off & ~3u, data);
@@ -503,10 +544,11 @@ void pic32mx_init(pic32mx *p, const pic32mx_board *board, const uint8_t *flash, 
 
 int pic32mx_run(pic32mx *p, int cycles)
 {
-	uint64_t start = p->cpu.cycles, end = start + (uint64_t)(cycles > 0 ? cycles : 0);
+	uint64_t start = p->cpu.cycles;
 
-	while (p->cpu.cycles < end) {
-		uint64_t slice = end - p->cpu.cycles, ev = next_timer_event(p), e2 = next_i2c_event(p);
+	p->run_end = start + (uint64_t)(cycles > 0 ? cycles : 0);
+	while (p->cpu.cycles < p->run_end) {
+		uint64_t slice = p->run_end - p->cpu.cycles, ev = next_timer_event(p), e2 = next_i2c_event(p);
 		uint64_t h = p->board.hold ? p->board.hold(p->board.ctx, p->cpu.cycles) : 0;
 		if (h) {
 			p->cpu.cycles += h < slice ? h : slice;
@@ -519,6 +561,7 @@ int pic32mx_run(pic32mx *p, int cycles)
 		i2c_sync(p);
 		if (mips32_timer_irq(&p->cpu)) pic32mx_set_irq(p, 0);
 	}
+	host_enter(p);
 	return (int)(p->cpu.cycles - start);
 }
 
