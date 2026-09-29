@@ -25,10 +25,10 @@ spec() {
 	esac
 }
 
-# machine directory for one build: romset, and NVRAM after a first boot in service (kept while the binary is the same)
+# machine directory for one build: romset, and NVRAM after a first boot in service (kept while the binary, mask ROM and romset are the same)
 machine() {
 	M=$B/$1
-	sum=$(sha1sum < "$2")
+	sum=$(cat "$2" "$P8X32A_ROM" "$PINHECK_ZIP" | sha1sum)
 	[ -s $M/nvram.base/dominos.nv ] && [ "$(cat $M/binary.sha 2> /dev/null)" = "$sum" ] && return
 	rm -rf $M && mkdir -p $M/roms $M/cfg $M/nvram.base || exit 2
 	cp "$P8X32A_ROM" $M/p8x32a.rom && (cd $M && zip -q -j roms/pinheck.zip p8x32a.rom && rm p8x32a.rom) || exit 2
@@ -45,9 +45,11 @@ run() {
 	spec $w
 	machine $label $bin
 	D=$B/$label/$w
-	# the reference's runs are kept while its binary is the same
-	if [ $label = ref ] && [ -s $D/bench.txt ]; then cat $D/bench.txt; return; fi
+	# the reference's runs are kept while its machine and the workload are the same
+	key="$FRAMES $MARK $SEND_AT $SEND"
+	if [ $label = ref ] && [ -s $D/bench.txt ] && [ "$(cat $D/spec.txt 2> /dev/null)" = "$key" ]; then cat $D/bench.txt; return; fi
 	rm -rf $D && mkdir -p $D && cp -r $B/$label/nvram.base $D/nvram || exit 2
+	echo "$key" > $D/spec.txt
 	wrap=
 	[ -n "$PERF" ] && wrap="$PERF stat -e task-clock,instructions:u,cycles:u -o $D/perf.txt"
 	[ -n "$PERF" ] && [ "$4" = record ] && wrap="$PERF record -F 999 -o $D/perf.data --"
