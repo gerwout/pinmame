@@ -15,7 +15,8 @@ Each milestone of spec §8 gets its own implementation plan, written when its in
 | `2026-09-29-pinheck-m7-audio.md` | 7: audio: counter-state sink, exact DUTY integration on P15/P14, DC blocker, stereo stream | Plan 5 | none | machine check 4: `[F00ABC]` cross-correlation ≥ 0.95 per channel against the `.wav` | being written (parallel with 6) |
 | `2026-09-29-pinheck-m8a-board.md` | 8a: board I/O (lamps, coils, switches, cabinet chain, GI, RGB, servos, start lamp), PinMAME time in board callbacks, PORTB/sub-word/I²C carried items, libpinmame `PINHECK` | Plans 6, 7 | resolved **3** (one external WS2801 LED) | machine check 5: `[MXXzzz]`, `[LXXzzz]` and the service-menu solenoid, servo, lamp, RGB and switch tests land on spec §4.5 numbers | written |
 | m8b | 8b: playfield simulator, keyboard play, scripted headless game via `-key_script` | Plan 8a | none | the scripted game plays from coin-up to high-score entry | after Plan 8a |
-| m9 | 9: performance, staged: profile, interpreter fast paths, `asmjit` JIT, deterministic threading only if needed | Plan 8 | none | ≥ 1.0× real time on the Ryzen 7 7730U for attract, scripted game and video+audio, byte-identical to the reference build | after Plan 8 (parallel with the display look) |
+| `2026-09-29-pinheck-m9-performance.md` | 9, stages 1–2: benchmark and profile; exact interpreter fast paths (Propeller ALU by unit, local run-ahead, idle-loop sleep; MIPS32 direct memory, lazy Count) | Plan 8a (Plan 8b for the scripted-game workload, Task 5) | none | byte-identical to the reference build; 0.45–0.53× attract, 0.40–0.47× video; ≥ 1.0× left to stage 3 | written |
+| m9b | 9, stages 3–4: `asmjit` JIT for the Spin-interpreter cogs and the MIPS32, deterministic threading only if needed | Plan 9 | none | ≥ 1.0× real time on the Ryzen 7 7730U for attract, scripted game and video+audio, byte-identical to the reference build | after Plan 9 |
 | look | display look: decode and render the config packet (`PIXEL SHAPE`, `BRIGHTNESS`, `POSITION`, `BAR BRIGHT`) | Plans 6, 8 | none | packet decoding tests and golden images per setting; shape rendering labelled an approximation | after Plan 8 (parallel with 9) |
 | m10 | 10: VPX support: libpinmame export proof, `pinheck_names.h`, minimal test table (outside the repo), VPX standalone on Linux and Windows VPX + VPinMAME | Plan 9 | none | export paths equal M6/M7/M8 outputs; test table checklist passes on Linux; Windows checklist handed to the user | after Plan 9 |
 | release | release: destination decided when the game runs (upstream PR or fork); conventions, CI, what ships, ROM instructions, deferred minors | Plan 10 | none | designed when the game runs; branch stays local until then | last |
@@ -52,3 +53,7 @@ Plans 1–2 and 3–4 are independent tracks; either can run first.
 ## Carried into Plan 9
 
 - Interpreter throughput: `mips32` 106–118 M instr/s (needs ~80); `p8x32a` ~52 M cycles/s with one busy cog (needs 104 M cycles/s with up to 8 cogs), so the Propeller core is the real-time risk.
+
+## Carried into stages 3–4 (m9b)
+
+- After Plan 9 the machine takes about 2 CPU seconds per emulated second (22–24 G host instructions): the Propeller core about 60% (cogs 0 and 5 run the ROM Spin interpreter, about 16 M instructions/s each; the polling cogs sleep), the PIC32 about 33%. `tests/pinheck/perf/bench.sh` with `REFERENCE` is the determinism check for every later stage; run Plan 9 Task 5 (the scripted game) once Plan 8b is merged.

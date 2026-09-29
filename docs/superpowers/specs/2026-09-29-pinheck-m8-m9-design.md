@@ -88,6 +88,11 @@ Playfield switches get keyboard keys. The cabinet keys follow PinMAME's usual la
   2. Interpreter fast paths: pre-decoded instructions, direct RAM/flash fetch that bypasses bus callbacks for memory, cheaper hub-slot and idle-cog handling.
   3. A JIT through the vendored `asmjit`, only for the core the profile still blames.
   4. Multi-threading only if the result stays deterministic.
+- **Established by Plan 9 (stages 1 and 2):**
+  - `tests/pinheck/perf/bench.sh` times attract mode (10–40 s) and a video with music and three effects (16–40 s) headless, with the DS1340 seeded from a fixed clock (without it UART1 and the frames differ between runs), and requires byte-identical UART1, frame, sound and NVRAM output against a reference build; `bench.sh profile` groups a `perf` profile of a `-g` build by component.
+  - The reference build (`3d9971c3`) executed 111 G host instructions per emulated second in attract mode and 115 G with video and four channels (0.07–0.13× real time on the shared machine); 85% of its time was in the Propeller core and 10% in the PIC32.
+  - Stage 2 is exact: the RTL, spinsim and QEMU suites and every machine check pass, and both workloads stay byte-identical to the reference. Host instructions per emulated second, attract / video: Propeller fast paths 43 / 45 G, idle loops 29 / 31 G, MIPS32 fast paths 22 / 24 G, about 5× fewer than the reference; 0.45–0.53× (attract) and 0.40–0.47× (video) real time at load averages 3–5.
+  - After stage 2 the Propeller core takes about 60% of the time and the PIC32 about 33%: the two cogs running the ROM Spin interpreter (about 16 M instructions/s each) and the MIPS32 interpreter. Real time needs the machine below one CPU second per emulated second, more than 2× less than now: stage 3 must bring the Propeller core from about 1.2 s to about 0.45 s and the PIC32 from about 0.7 s to about 0.35 s per emulated second (a JIT for the Spin-interpreter cogs and for the MIPS32 code in flash); stage 4 (the Propeller and the PIC32 on two threads) would bound the total by the larger of the two.
 - **Proof for every stage:**
   - all existing suites pass, including the RTL and QEMU differential suites;
   - a determinism check: the optimised build reproduces the reference build's UART1 log, display frames and audio byte for byte over a fixed firmware run.
