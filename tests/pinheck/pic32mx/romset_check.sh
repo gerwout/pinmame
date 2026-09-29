@@ -7,14 +7,14 @@ P8X32A_ROM=$(realpath "$P8X32A_ROM") || exit 2
 PINHECK_UPDATE_DIR=$(realpath "$PINHECK_UPDATE_DIR") || exit 2
 cd "$(dirname "$0")" || exit 2
 B=build/romset
-rm -rf $B && mkdir -p $B/bios $B/nomedia $B/nvram || exit 2
+rm -rf $B && mkdir -p $B/bios $B/nomedia $B/nvram $B/cfg || exit 2
 cp "$P8X32A_ROM" $B/p8x32a.rom && (cd $B && zip -q -j bios/pinheck.zip p8x32a.rom && cp bios/pinheck.zip nomedia/ && rm p8x32a.rom) || exit 2
 (cd "$PINHECK_UPDATE_DIR" && zip -q -0 "$OLDPWD/$B/nomedia/dominos.zip" DOM_V006.PRG PRP_V008.BIN) || exit 2
 fail=0
 run() {
 	name=$1 path=$2 out=$3
 	shift 3
-	(cd $B && timeout -k 5 120 "$SDL3PINMAME" "$name" -rompath "$path" -nvram_directory nvram -headless -skip_gamewarnings -nothrottle "$@" > "$out.out" 2>&1)
+	(cd $B && timeout -k 5 120 "$SDL3PINMAME" "$name" -rompath "$path" -nvram_directory nvram -cfg_directory cfg -headless -skip_gamewarnings -nothrottle "$@" > "$out.out" 2>&1)
 	echo $?
 }
 # no -frames_to_run: the system set has to refuse and stop by itself, with an error status
