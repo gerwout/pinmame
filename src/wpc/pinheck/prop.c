@@ -87,6 +87,7 @@ static void pins_out(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 		p->tx_level = tx;
 		p->tx(p->tx_ctx, to_pic(p, t), tx);
 	}
+	if (p->snd_pins) p->snd_pins(p->snd_ctx, t, out, dir);
 	p->ee_bits = PIN_SCL | (cat24m01_update(&p->eeprom, scl, sda) ? PIN_SDA : 0);
 	if (p->sd) {
 		int cs = (dir & PIN_CS) ? (out & PIN_CS) != 0 : 1;
@@ -95,6 +96,12 @@ static void pins_out(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 		p->sd_do = p->sd(p->sd_ctx, cs, sclk, mosi) != 0;
 	}
 	if (p->pins) p->pins(p->pins_ctx, t, out, dir);
+}
+
+static void ctr_state(void *ctx, uint64_t t, int cog, int ctr, uint32_t ctr_reg, uint32_t frq)
+{
+	pinheck_prop *p = (pinheck_prop *)ctx;
+	if (p->snd_ctr) p->snd_ctr(p->snd_ctx, t, cog, ctr, ctr_reg, frq);
 }
 
 static void clkset(void *ctx, uint64_t t, uint8_t cfg)
@@ -141,6 +148,7 @@ void prop_init(pinheck_prop *p, const uint8_t *rom32k, uint8_t *eemem)
 	bus.cog_start = NULL;
 	bus.clkset = clkset;
 	bus.log = logmsg;
+	bus.ctr_state = ctr_state;
 	p8x32a_init(&p->chip, &bus);
 	memcpy(p->chip.hub + 0x8000, rom32k, 0x8000);
 	p->eemem = eemem;
@@ -176,6 +184,13 @@ void prop_set_pins(pinheck_prop *p, prop_pins_fn fn, void *ctx)
 {
 	p->pins = fn;
 	p->pins_ctx = ctx;
+}
+
+void prop_set_sound(pinheck_prop *p, prop_ctr_fn ctr, prop_pins_fn pins, void *ctx)
+{
+	p->snd_ctr = ctr;
+	p->snd_pins = pins;
+	p->snd_ctx = ctx;
 }
 
 void prop_reset(pinheck_prop *p, uint64_t pic_cycle)
