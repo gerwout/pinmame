@@ -300,8 +300,8 @@ static int pinheck_system_only(void)
 static audio snd;
 static struct {
 	int started, rate;
-	uint64_t samples, base;
-	FILE *wav;
+	uint64_t samples;
+	FILE *wav, *lag;
 	uint32_t wav_bytes;
 } sndl;
 
@@ -328,19 +328,22 @@ static void pinheck_snd_update(int param, INT16 **buffer, int length)
 {
 	int16_t tmp[2 * 512];
 	int done = 0, i;
+	uint64_t now, t0, t1;
 	(void)param;
 	if (locals.idle) {
 		memset(buffer[0], 0, length * sizeof(INT16));
 		memset(buffer[1], 0, length * sizeof(INT16));
 		return;
 	}
+	/* render up to the current emulated time; the mixer's sample count per frame need not be rate/fps */
+	now = pic32cpu_soc()->cpu.cycles;
+	prop_catch_up(&prop, now);
+	t0 = snd.t_render;
+	t1 = prop_time(&prop, now);
+	if (t1 < t0) t1 = t0;
 	while (done < length) {
 		int n = length - done > 512 ? 512 : length - done;
-		uint64_t pic = (uint64_t)((double)(sndl.samples + n - sndl.base) * PINHECK_CLOCK / sndl.rate);
-		uint64_t now = pic32cpu_soc()->cpu.cycles;
-		if (pic > now) pic = now;
-		prop_catch_up(&prop, pic);
-		audio_render(&snd, tmp, n, prop_time(&prop, pic));
+		audio_render(&snd, tmp, n, t0 + (t1 - t0) * (uint64_t)(done + n) / (uint64_t)length);
 		for (i = 0; i < n; i++) {
 			buffer[0][done + i] = tmp[2 * i];
 			buffer[1][done + i] = tmp[2 * i + 1];
@@ -350,19 +353,21 @@ static void pinheck_snd_update(int param, INT16 **buffer, int length)
 		sndl.samples += (uint64_t)n;
 		done += n;
 	}
+	if (sndl.lag) fprintf(sndl.lag, "%llu %lld\n", (unsigned long long)now, (long long)(t1 - snd.t_render));
 }
 
 static int pinheck_sh_start(const struct MachineSound *msound)
 {
 	const char *names[] = { "Propeller Left", "Propeller Right" };
 	const int vol[2] = { MIXER(100, MIXER_PAN_LEFT), MIXER(100, MIXER_PAN_RIGHT) };
-	const char *wav = getenv("PINHECK_WAV");
+	const char *wav = getenv("PINHECK_WAV"), *lag = getenv("PINHECK_SND_LAG");
 	(void)msound;
 	memset(&sndl, 0, sizeof(sndl));
 	if (Machine->sample_rate <= 0) return 0;
 	sndl.rate = Machine->sample_rate;
 	audio_init(&snd, sndl.rate, pinheck_snd_log, NULL);
 	if (wav && (sndl.wav = fopen(wav, "wb")) != NULL) pinheck_wav_header(sndl.wav, (uint32_t)sndl.rate, 0);
+	if (lag) sndl.lag = fopen(lag, "w");
 	sndl.started = 1;
 	return stream_init_multi(2, names, vol, sndl.rate, 0, pinheck_snd_update) < 0;
 }
@@ -374,6 +379,8 @@ static void pinheck_sh_stop(void)
 		fclose(sndl.wav);
 		sndl.wav = NULL;
 	}
+	if (sndl.lag) fclose(sndl.lag);
+	sndl.lag = NULL;
 	sndl.started = 0;
 }
 
@@ -414,7 +421,6 @@ static MACHINE_RESET(pinheck)
 	const char *at = getenv("PINHECK_UART1_SEND_AT");
 	if (locals.idle) return;
 	prop_reset(&prop, 0);
-	sndl.base = sndl.samples;
 	boot_reset(&boot, 0);
 	pinheck_disp_reset();
 	cat24m01_init(&u13, u13mem, 0);

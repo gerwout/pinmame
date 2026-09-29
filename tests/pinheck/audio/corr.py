@@ -14,14 +14,17 @@ def load(path):
 
 
 def main():
-    if len(sys.argv) not in (3, 4):
-        sys.exit('usage: corr.py capture.wav reference.wav [playback_rate]')
+    if len(sys.argv) not in (3, 4, 5):
+        sys.exit('usage: corr.py capture.wav reference.wav [playback_rate [fps]]')
     rate, cap = load(sys.argv[1])
     rrate, ref = load(sys.argv[2])
-    if len(sys.argv) == 4:
+    if len(sys.argv) >= 4:
         rrate = float(sys.argv[3])
-    n = int(len(ref) * rate / rrate)
-    t = np.arange(n) * (rrate / rate)
+    fps = int(sys.argv[4]) if len(sys.argv) == 5 else 60
+    # the OSD mixes sample_rate // fps samples per frame, so that many per emulated second of fps frames
+    eff = (rate // fps) * fps
+    n = int(len(ref) * eff / rrate)
+    t = np.arange(n) * (rrate / eff)
     ref = np.stack([np.interp(t, np.arange(len(ref)), ref[:, c]) for c in range(2)], axis=1)
     if len(cap) < n:
         sys.exit('corr: capture shorter than the reference')
@@ -37,7 +40,7 @@ def main():
             u = cap[d:d + n, c] - cap[d:d + n, c].mean()
             best = max(best, float(np.dot(u, v) / np.sqrt(np.dot(u, u) * np.dot(v, v))))
         out.append(best)
-    print('corr: L %.4f R %.4f at %.3f s (%d samples at %d Hz, source played at %.2f Hz)' % (out[0], out[1], lag / rate, n, rate, rrate))
+    print('corr: L %.4f R %.4f at %.4f s (%d samples at %d Hz, %d per emulated second, source played at %.2f Hz)' % (out[0], out[1], lag / eff, n, rate, eff, rrate))
     sys.exit(0 if min(out) >= 0.95 else 1)
 
 
