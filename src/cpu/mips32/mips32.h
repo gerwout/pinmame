@@ -21,6 +21,15 @@ enum { MIPS32_HOOK_DELIVER = 0, MIPS32_HOOK_SKIP = 1, MIPS32_HOOK_STOP = 2 };
 
 typedef struct mips32_state mips32_state;
 
+#define MIPS32_REGIONS 4
+
+/* physical memory served directly, without the bus callbacks; wr NULL = read-only (writes go to the bus) */
+typedef struct mips32_region {
+	uint32_t base, size;
+	const uint8_t *rd;
+	uint8_t *wr;
+} mips32_region;
+
 typedef struct mips32_bus {
 	void *ctx;
 	uint32_t (*read)(void *ctx, uint32_t pa, int size, int fetch, int *err);
@@ -45,10 +54,16 @@ struct mips32_state {
 	int eic_ripl, eic_vector, eic_srs;
 	uint64_t cycles;
 	mips32_bus bus;
+	mips32_region region[MIPS32_REGIONS];
+	uint64_t c0, count_at, ti_at; /* instruction start; count/count_half hold Count at count_at; Timer fires at ti_at */
+	int irq_chk;                  /* interrupt state may have changed */
+	uint32_t fva, fsize;          /* instructions at [fva, fva + fsize) come from fptr */
+	const uint8_t *fptr;
 };
 
 void mips32_init(mips32_state *s, const mips32_bus *bus, int shadow_sets, uint32_t prid);
 void mips32_reset(mips32_state *s);
+void mips32_direct(mips32_state *s, int slot, uint32_t base, uint32_t size, const uint8_t *rd, uint8_t *wr);
 int mips32_run(mips32_state *s, int cycles);
 uint32_t *mips32_regs(mips32_state *s);
 void mips32_set_eic(mips32_state *s, int ripl, int vector, int srs);

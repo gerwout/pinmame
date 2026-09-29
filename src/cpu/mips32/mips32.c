@@ -24,6 +24,8 @@
 #define UIMM(op)  ((op) & 0xFFFFu)
 
 #define REGS(s) ((s)->gpr[(s)->srsctl & 7])
+#define STATUS_CHANGED(s) ((s)->irq_chk = 1, (s)->fsize = 0)
+#define NEVER (~(uint64_t)0)
 #define USER(s) (((s)->status & (ST_UM | ST_EXL | ST_ERL)) == ST_UM)
 #define SET(n, v) do { uint32_t v_ = (v); int n_ = (n); if (n_) REGS(s)[n_] = v_; } while (0)
 
@@ -50,6 +52,29 @@ int mips32_translate(const mips32_state *s, uint32_t va, uint32_t *pa)
 	return 1;
 }
 
+/* Count advances every other cycle; count and count_half hold its value at cycle count_at */
+static uint32_t count_now(const mips32_state *s, uint64_t c)
+{
+	return s->count + (uint32_t)((c - s->count_at + (uint64_t)s->count_half) >> 1);
+}
+
+static void count_sync(mips32_state *s, uint64_t c)
+{
+	uint64_t t = c - s->count_at + (uint64_t)s->count_half;
+	s->count += (uint32_t)(t >> 1);
+	s->count_half = (int)(t & 1);
+	s->count_at = c;
+}
+
+/* the first cycle at which Count equals Compare, while the Timer interrupt is not pending */
+static void count_arm(mips32_state *s)
+{
+	uint64_t d = (uint32_t)(s->compare - s->count);
+	if (s->cause & CA_TI) { s->ti_at = NEVER; return; }
+	if (!d) d = (uint64_t)1 << 32;
+	s->ti_at = s->count_at + 2 * d - (uint64_t)s->count_half;
+}
+
 static void take_exception(mips32_state *s, int code, int ce)
 {
 	int is_int = code == MIPS32_EXC_INT;
@@ -74,6 +99,7 @@ static void take_exception(mips32_state *s, int code, int ce)
 	s->cause = (s->cause & ~0x3000007Cu) | ((uint32_t)code << 2) | ((uint32_t)ce << 28);
 	if (is_int) s->cause = (s->cause & ~0xFC00u) | ((uint32_t)s->eic_ripl << 10);
 	s->status |= ST_EXL;
+	STATUS_CHANGED(s);
 	base = (s->status & ST_BEV) ? 0xBFC00200u : (s->ebase & 0xFFFFF000u);
 	s->pc = base + off;
 	s->npc = s->pc + 4;
@@ -82,14 +108,41 @@ static void take_exception(mips32_state *s, int code, int ce)
 	if (is_int && s->bus.irq_taken) s->bus.irq_taken(s->bus.ctx, s->eic_vector);
 }
 
+static const uint8_t *direct_rd(const mips32_state *s, uint32_t pa, uint32_t size)
+{
+	int k;
+	for (k = 0; k < MIPS32_REGIONS; k++) {
+		const mips32_region *m = &s->region[k];
+		if (pa - m->base < m->size && m->size - (pa - m->base) >= size) return m->rd + (pa - m->base);
+	}
+	return NULL;
+}
+
+static uint8_t *direct_wr(const mips32_state *s, uint32_t pa, uint32_t size)
+{
+	int k;
+	for (k = 0; k < MIPS32_REGIONS; k++) {
+		const mips32_region *m = &s->region[k];
+		if (m->wr && pa - m->base < m->size && m->size - (pa - m->base) >= size) return m->wr + (pa - m->base);
+	}
+	return NULL;
+}
+
+static uint32_t le32(const uint8_t *m) { return m[0] | (uint32_t)m[1] << 8 | (uint32_t)m[2] << 16 | (uint32_t)m[3] << 24; }
+
 static int load(mips32_state *s, uint32_t va, int size, uint32_t *out)
 {
 	uint32_t pa;
+	const uint8_t *m;
 	int err = 0;
 	if ((va & (uint32_t)(size - 1)) || !mips32_translate(s, va, &pa)) {
 		s->badvaddr = va;
 		take_exception(s, MIPS32_EXC_ADEL, 0);
 		return 0;
+	}
+	if ((m = direct_rd(s, pa, (uint32_t)size)) != NULL) {
+		*out = size == 4 ? le32(m) : size == 2 ? (uint32_t)(m[0] | m[1] << 8) : m[0];
+		return 1;
 	}
 	*out = s->bus.read(s->bus.ctx, pa, size, 0, &err);
 	if (err) { take_exception(s, MIPS32_EXC_DBE, 0); return 0; }
@@ -99,11 +152,16 @@ static int load(mips32_state *s, uint32_t va, int size, uint32_t *out)
 static int store(mips32_state *s, uint32_t va, uint32_t v, int size)
 {
 	uint32_t pa;
-	int err = 0;
+	uint8_t *m;
+	int err = 0, i;
 	if ((va & (uint32_t)(size - 1)) || !mips32_translate(s, va, &pa)) {
 		s->badvaddr = va;
 		take_exception(s, MIPS32_EXC_ADES, 0);
 		return 0;
+	}
+	if ((m = direct_wr(s, pa, (uint32_t)size)) != NULL) {
+		for (i = 0; i < size; i++) m[i] = (uint8_t)(v >> (8 * i));
+		return 1;
 	}
 	s->bus.write(s->bus.ctx, pa, v, size, &err);
 	if (err) { take_exception(s, MIPS32_EXC_DBE, 0); return 0; }
@@ -115,7 +173,7 @@ uint32_t mips32_get_cp0(const mips32_state *s, int reg, int sel)
 	switch (reg * 8 + sel) {
 	case 7 * 8:      return s->hwrena;
 	case 8 * 8:      return s->badvaddr;
-	case 9 * 8:      return s->count;
+	case 9 * 8:      return count_now(s, s->c0);
 	case 11 * 8:     return s->compare;
 	case 12 * 8:     return s->status;
 	case 12 * 8 + 1: return s->intctl;
@@ -138,9 +196,9 @@ static void set_cp0(mips32_state *s, int reg, int sel, uint32_t v)
 {
 	switch (reg * 8 + sel) {
 	case 7 * 8:      s->hwrena = v & 0xFu; break;
-	case 9 * 8:      s->count = v; s->count_half = 0; break;
-	case 11 * 8:     s->compare = v; s->cause &= ~CA_TI; break;
-	case 12 * 8:     s->status = (s->status & ~ST_WMASK) | (v & ST_WMASK); break;
+	case 9 * 8:      count_sync(s, s->c0); s->count = v; s->count_half = 0; count_arm(s); break;
+	case 11 * 8:     count_sync(s, s->c0); s->compare = v; s->cause &= ~CA_TI; count_arm(s); break;
+	case 12 * 8:     s->status = (s->status & ~ST_WMASK) | (v & ST_WMASK); STATUS_CHANGED(s); break;
 	case 12 * 8 + 1: s->intctl = v & 0x3E0u; break;
 	case 12 * 8 + 2: s->srsctl = (s->srsctl & ~0xF3C0u) | (v & 0xF3C0u); break;
 	case 12 * 8 + 3: s->srsmap = v; break;
@@ -177,6 +235,7 @@ static void jump(mips32_state *s, uint32_t target)
 
 static void eret(mips32_state *s)
 {
+	STATUS_CHANGED(s);
 	if (s->status & ST_ERL) {
 		s->pc = s->errorepc;
 		s->status &= ~ST_ERL;
@@ -310,6 +369,7 @@ static void exec_cop0(mips32_state *s, uint32_t op)
 	case 0x0B:
 		v = s->status;
 		if (op & 0x20) s->status |= ST_IE; else s->status &= ~ST_IE;
+		STATUS_CHANGED(s);
 		SET(RT(op), v);
 		break;
 	case 0x0E: if (RD(op)) s->gpr[(s->srsctl >> 6) & 7][RD(op)] = REGS(s)[RT(op)]; break;
@@ -360,7 +420,7 @@ static void exec_special3(mips32_state *s, uint32_t op)
 		switch (RD(op)) {
 		case 0: SET(RT(op), s->ebase & 0x3FFu); break;
 		case 1: SET(RT(op), 0); break;
-		case 2: SET(RT(op), s->count); break;
+		case 2: SET(RT(op), count_now(s, s->c0)); break;
 		case 3: SET(RT(op), 2); break;
 		default: take_exception(s, MIPS32_EXC_RI, 0); break;
 		}
@@ -458,41 +518,50 @@ static void execute(mips32_state *s, uint32_t op)
 	}
 }
 
+/* remember the direct region the fetch at pc (physical pa) came from */
+static void fetch_cache(mips32_state *s, uint32_t pa)
+{
+	int k;
+	for (k = 0; k < MIPS32_REGIONS; k++) {
+		const mips32_region *m = &s->region[k];
+		if (pa - m->base < m->size && m->size >= 4 && !(m->base & 3)) {
+			s->fva = s->pc - (pa - m->base);
+			s->fsize = m->size - 3;
+			s->fptr = m->rd;
+			return;
+		}
+	}
+}
+
 static void step(mips32_state *s)
 {
-	uint32_t pa, op;
+	uint32_t pa, op, off = s->pc - s->fva;
+	const uint8_t *m;
 	int err = 0;
 
 	s->cur_pc = s->pc;
 	s->cur_delay = s->delay;
 	s->skip_pc = s->npc;
 	s->cycles++;
-	if ((s->pc & 3) || !mips32_translate(s, s->pc, &pa)) {
-		s->badvaddr = s->pc;
-		take_exception(s, MIPS32_EXC_ADEL, 0);
-		return;
+	if (off < s->fsize && !(off & 3)) op = le32(s->fptr + off);
+	else {
+		if ((s->pc & 3) || !mips32_translate(s, s->pc, &pa)) {
+			s->badvaddr = s->pc;
+			take_exception(s, MIPS32_EXC_ADEL, 0);
+			return;
+		}
+		if ((m = direct_rd(s, pa, 4)) != NULL) {
+			op = le32(m);
+			fetch_cache(s, pa);
+		} else {
+			op = s->bus.read(s->bus.ctx, pa, 4, 1, &err);
+			if (err) { take_exception(s, MIPS32_EXC_IBE, 0); return; }
+		}
 	}
-	op = s->bus.read(s->bus.ctx, pa, 4, 1, &err);
-	if (err) { take_exception(s, MIPS32_EXC_IBE, 0); return; }
 	s->pc = s->npc;
 	s->npc += 4;
 	s->delay = 0;
 	execute(s, op);
-}
-
-static void tick(mips32_state *s, uint64_t n)
-{
-	uint64_t t = n + (uint64_t)s->count_half;
-	uint32_t inc = (uint32_t)(t >> 1), old;
-
-	s->count_half = (int)(t & 1);
-	if (!inc) return;
-	old = s->count;
-	s->count += inc;
-	if (s->compare - old - 1 < inc && !(s->cause & CA_TI)) {
-		s->cause |= CA_TI;
-		s->stop = 1;
-	}
 }
 
 static int irq_pending(const mips32_state *s)
@@ -505,17 +574,24 @@ int mips32_run(mips32_state *s, int cycles)
 	uint64_t start = s->cycles, end = start + (uint64_t)(cycles > 0 ? cycles : 0);
 
 	s->stop = 0;
+	s->count_at = s->c0 = s->cycles;
+	count_arm(s);
+	STATUS_CHANGED(s);
 	while (s->cycles < end && !s->stop) {
-		uint64_t c0 = s->cycles;
-		if (irq_pending(s)) {
-			s->cur_pc = s->pc;
-			s->cur_delay = s->delay;
-			s->skip_pc = s->pc;
-			take_exception(s, MIPS32_EXC_INT, 0);
-			if (s->stop) break;
+		s->c0 = s->cycles;
+		if (s->irq_chk) {
+			s->irq_chk = 0;
+			if (irq_pending(s)) {
+				s->cur_pc = s->pc;
+				s->cur_delay = s->delay;
+				s->skip_pc = s->pc;
+				take_exception(s, MIPS32_EXC_INT, 0);
+				if (s->stop) break;
+			}
 		}
 		if (s->waiting) {
 			uint64_t burn = end - s->cycles;
+			count_sync(s, s->cycles);
 			if (!(s->cause & CA_TI)) {
 				uint64_t need = 2 * (uint64_t)(uint32_t)(s->compare - s->count);
 				need = need > (uint64_t)s->count_half ? need - (uint64_t)s->count_half : 0;
@@ -524,15 +600,34 @@ int mips32_run(mips32_state *s, int cycles)
 			s->cycles += burn;
 		} else
 			step(s);
-		tick(s, s->cycles - c0);
+		if (s->cycles >= s->ti_at) {
+			s->cause |= CA_TI;
+			s->stop = 1;
+			s->ti_at = NEVER;
+		}
 	}
+	count_sync(s, s->cycles);
+	s->c0 = s->cycles;
 	return (int)(s->cycles - start);
 }
 
 uint32_t *mips32_regs(mips32_state *s) { return REGS(s); }
 
+void mips32_direct(mips32_state *s, int slot, uint32_t base, uint32_t size, const uint8_t *rd, uint8_t *wr)
+{
+	mips32_region *m;
+	if (slot < 0 || slot >= MIPS32_REGIONS) return;
+	m = &s->region[slot];
+	m->base = base;
+	m->size = rd ? size : 0;
+	m->rd = rd;
+	m->wr = wr;
+	s->fsize = 0;
+}
+
 void mips32_set_eic(mips32_state *s, int ripl, int vector, int srs)
 {
+	s->irq_chk = 1;
 	s->eic_ripl = ripl;
 	s->eic_vector = vector;
 	s->eic_srs = srs;

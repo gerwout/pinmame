@@ -539,6 +539,9 @@ void pic32mx_init(pic32mx *p, const pic32mx_board *board, const uint8_t *flash, 
 	bus.exc_hook = exc_hook;
 	bus.irq_taken = irq_taken;
 	mips32_init(&p->cpu, &bus, 2, 0x00018700u);
+	mips32_direct(&p->cpu, 0, 0x1D000000u, p->flash_size, p->flash, NULL);
+	mips32_direct(&p->cpu, 1, 0, PIC32MX_RAM_SIZE, p->ram, p->ram);
+	mips32_direct(&p->cpu, 2, 0x1FC00000u, PIC32MX_BOOT_SIZE, p->boot, NULL);
 	pic32mx_reset(p);
 }
 

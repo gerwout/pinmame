@@ -4,6 +4,7 @@
 
 static uint8_t kmem[0x10000], umem[0x10000];
 static int fails;
+static mips32_state *eic_cpu; /* a store to physical 0xFFF0 raises its EIC request */
 
 #define CHECK(c) do { if (!(c)) { printf("UNIT FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
 
@@ -30,6 +31,7 @@ static void wr(void *ctx, uint32_t pa, uint32_t v, int size, int *err)
 	uint8_t *p = map(pa, size);
 	int i;
 	(void)ctx;
+	if (pa == 0xFFF0 && eic_cpu) { mips32_set_eic(eic_cpu, 1, 0, 0); return; }
 	if (!p) { *err = 1; return; }
 	for (i = 0; i < size; i++) p[i] = (uint8_t)(v >> (8 * i));
 }
@@ -108,6 +110,51 @@ static void compare_crossed_by_div(void)
 	CHECK(!mips32_timer_irq(&s));
 }
 
+/* Count advances every other cycle: the Timer stops the run after the instruction on whose cycle Count reaches Compare */
+static void timer_fires_on_its_cycle(void)
+{
+	mips32_state s;
+	setup(&s, 0x80001000u, 0);
+	s.compare = 5;
+	CHECK(mips32_run(&s, 100) == 10);
+	CHECK(mips32_timer_irq(&s) && s.count == 5);
+
+	setup(&s, 0x80001000u, 0);
+	s.count_half = 1;
+	s.compare = 5;
+	CHECK(mips32_run(&s, 100) == 9);
+
+	setup(&s, 0x80001000u, 0);
+	put(kmem, 0x1000, 0x24080014u);
+	put(kmem, 0x1004, 0x40885800u);
+	CHECK(mips32_run(&s, 100) == 40);
+	CHECK(mips32_timer_irq(&s) && s.count == 20);
+
+	/* Compare written below Count: the Timer waits for Count to wrap */
+	setup(&s, 0x80001000u, 0);
+	s.count = 10;
+	put(kmem, 0x1028, 0x2408000Cu);
+	put(kmem, 0x102C, 0x40885800u);
+	CHECK(mips32_run(&s, 100) == 100);
+	CHECK(!mips32_timer_irq(&s) && s.count == 60);
+}
+
+/* an interrupt raised by a store's bus callback is taken before the next instruction */
+static void eic_raised_by_a_store(void)
+{
+	mips32_state s;
+	setup(&s, 0x80001000u, 0x00000001u);
+	put(kmem, 0x1000, 0x3C098001u);
+	put(kmem, 0x1004, 0xAD20FFF0u);
+	put(kmem, 0x1008, 0x24080001u);
+	eic_cpu = &s;
+	mips32_run(&s, 3);
+	eic_cpu = NULL;
+	CHECK(s.epc == 0x80001008u);
+	CHECK(mips32_regs(&s)[8] == 0);
+	CHECK(s.pc == 0x80000184u);
+}
+
 static void user_mode(void)
 {
 	mips32_state s;
@@ -157,6 +204,8 @@ int main(void)
 	irq_in_delay_slot();
 	exception_with_exl_set();
 	compare_crossed_by_div();
+	timer_fires_on_its_cycle();
+	eic_raised_by_a_store();
 	user_mode();
 	printf("unit: %s\n", fails ? "FAIL" : "ok");
 	return fails != 0;

@@ -134,6 +134,7 @@ int main(int argc, char **argv)
 	mem = calloc(1, MEMSIZE);
 	if (!mem) return 2;
 	mips32_init(&cpu, &bus, 2, 0x00018700u);
+	if (!getenv("MIPS32RUN_BUS")) mips32_direct(&cpu, 0, 0, MMIO_EIC & ~0xFFFu, mem, mem); /* all but the MMIO page */
 	if (!load_elf(path, &entry)) return 2;
 	cpu.pc = entry;
 	cpu.npc = entry + 4;
