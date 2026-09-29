@@ -8,6 +8,11 @@
 #define PINHECK_PROPREGION REGION_USER1
 #define PINHECK_BIOSREGION REGION_USER2
 
+/* the 128x32 panel is drawn 2x2 per dot, like a DMD, and that is also the exported frame */
+#define PINHECK_VIDEO_SCALE 2
+#define PINHECK_VIDEO_W (128 * PINHECK_VIDEO_SCALE)
+#define PINHECK_VIDEO_H (32 * PINHECK_VIDEO_SCALE)
+
 #define PINHECK_INPUT_PORTS_START(name, balls) \
   INPUT_PORTS_START(name) \
     CORE_PORTS \

@@ -276,13 +276,15 @@ static void pinheck_disp_stop(void)
 
 PINMAME_VIDEO_UPDATE(pinheck_video)
 {
+	const int s = PINHECK_VIDEO_SCALE, x0 = layout->left, y0 = layout->top;
 	int x, y;
-	(void)layout; (void)cliprect;
-	for (y = 0; y < DISPLAY_H && y < bitmap->height; y++)
-		for (x = 0; x < DISPLAY_W && x < bitmap->width; x++) {
-			const uint8_t v = disp_shown[y * DISPLAY_W + x];
-			if (bitmap->depth == 32) ((UINT32 *)bitmap->line[y])[x] = disp_rgb32[v];
-			else ((UINT16 *)bitmap->line[y])[x] = disp_rgb15[v];
+	/* the core's visible area is larger than the panel: clear it so nothing stale shows */
+	fillbitmap(bitmap, get_black_pen(), cliprect);
+	for (y = 0; y < DISPLAY_H * s && y0 + y < bitmap->height; y++)
+		for (x = 0; x < DISPLAY_W * s && x0 + x < bitmap->width; x++) {
+			const uint8_t v = disp_shown[(y / s) * DISPLAY_W + x / s];
+			if (bitmap->depth == 32) ((UINT32 *)bitmap->line[y0 + y])[x0 + x] = disp_rgb32[v];
+			else ((UINT16 *)bitmap->line[y0 + y])[x0 + x] = disp_rgb15[v];
 		}
 }
 
@@ -474,7 +476,5 @@ MACHINE_DRIVER_START(PINHECK)
 	MDRV_NVRAM_HANDLER(pinheck)
 	MDRV_SOUND_ADD(CUSTOM, pinheck_sndInt)
 	MDRV_SOUND_ATTRIBUTES(SOUND_SUPPORTS_STEREO)
-	MDRV_SCREEN_SIZE(128, 32)
-	MDRV_VISIBLE_AREA(0, 127, 0, 31)
 	MDRV_VIDEO_ATTRIBUTES(VIDEO_TYPE_RASTER | VIDEO_RGB_DIRECT)
 MACHINE_DRIVER_END

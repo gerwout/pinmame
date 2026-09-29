@@ -11,15 +11,17 @@ cd "$(dirname "$0")" || exit 2
 B=build/pinmame
 CLIP=${PINHECK_CLIP:-LT5}
 SEND_AT=${PINHECK_CLIP_AT:-12}
-rm -rf $B && mkdir -p $B/roms $B/nvram || exit 2
+rm -rf $B && mkdir -p $B/roms $B/nvram $B/snap || exit 2
 cp "$P8X32A_ROM" $B/p8x32a.rom && (cd $B && zip -q -j roms/pinheck.zip p8x32a.rom && rm p8x32a.rom) || exit 2
 ln -s "$PINHECK_ZIP" $B/roms/dominos.zip || exit 2
 launch() {
 	(cd $B && PINHECK_INSERVICE=6 PINHECK_FRAME_LOG=$PWD/frames$1.bin PINHECK_UART1_LOG=$PWD/uart$1.log PINHECK_PROP_LOG=$PWD/prop$1.log \
-		timeout 3000 "$SDL3PINMAME" dominos -rompath roms -nvram_directory nvram -headless -frames_to_run $2 -skip_gamewarnings -nothrottle > run$1.out 2>&1) \
+		timeout 3000 "$SDL3PINMAME" dominos -rompath roms -nvram_directory nvram -headless -frames_to_run $2 -skip_gamewarnings -nothrottle $3 > run$1.out 2>&1) \
 		|| { echo "PINMAME FAIL: launch $1 exited $?"; tail -5 $B/run$1.out; exit 1; }
 }
-launch 1 1200
+# F12 just before the end of launch 1: a screen snapshot for render.py
+echo "1190 tap 2 KEYCODE_F12" > $B/snap.ks
+launch 1 1200 "-key_script $PWD/$B/snap.ks -snapshot_directory $PWD/$B/snap"
 PINHECK_UART1_SEND_AT=$SEND_AT PINHECK_UART1_SEND="[V00$CLIP]" launch 2 900
 fail=0
 grep -aq "PROPELLER SYNC CHECK\.*OK" $B/uart2.log || { echo "PINMAME FAIL: no sync check"; fail=1; }
@@ -27,6 +29,7 @@ grep -aq "Playing Video" $B/uart2.log || { echo "PINMAME FAIL: [V00$CLIP] not ac
 grep -q "^display: config" $B/prop1.log || { echo "PINMAME FAIL: no display config packet"; fail=1; }
 grep "^display: \(frame\|latch\|mode\)" $B/prop1.log $B/prop2.log && { echo "PINMAME FAIL: malformed display transfers"; fail=1; }
 python3 frames.py $B/frames1.bin || fail=1
+python3 render.py $B/snap/dominos.png $B/frames1.bin || fail=1
 dir=$(echo "$CLIP" | cut -c1)
 python3 frames.py $B/frames2.bin --after "$SEND_AT" --vid "$PINHECK_UPDATE_DIR/DMD/_D$dir/$CLIP.VID" || fail=1
 [ $fail -eq 0 ] || exit 1
