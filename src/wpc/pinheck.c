@@ -7,6 +7,7 @@
 #include "pinheck/bootldr.h"
 #include "pinheck/sd.h"
 #include "pinheck/zipsrc.h"
+#include "pinheck/audio.h"
 #include "pinheck/display.h"
 #include "pinheck.h"
 #include <stdio.h>
@@ -190,6 +191,10 @@ static void pinheck_tick(int param)
 		machine_reset();
 		return;
 	}
+	if (locals.send && *locals.send == '~' && soc->cpu.cycles >= locals.send_at) {
+		locals.send_at = soc->cpu.cycles + PINHECK_CLOCK;
+		locals.send++;
+	}
 	if (locals.send && *locals.send && soc->cpu.cycles >= locals.send_at) {
 		int n = soc->uart[0].rx_count;
 		pic32mx_uart_rx(soc, 0, (uint8_t)*locals.send);
@@ -291,6 +296,89 @@ static int pinheck_system_only(void)
 	return !memory_region(PINHECK_CPUREGION) || !memory_region(PINHECK_PROPREGION);
 }
 
+/* sound: Propeller DUTY counters on P15/P14 integrated by audio.c */
+static audio snd;
+static struct {
+	int started, rate;
+	uint64_t samples, base;
+	FILE *wav;
+	uint32_t wav_bytes;
+} sndl;
+
+static void pinheck_snd_ctr(void *ctx, uint64_t t, int cog, int ctr, uint32_t ctr_reg, uint32_t frq) { (void)ctx; audio_ctr(&snd, t, cog, ctr, ctr_reg, frq); }
+static void pinheck_snd_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir) { (void)ctx; audio_pins(&snd, t, out, dir); }
+static void pinheck_snd_log(void *ctx, const char *msg) { (void)ctx; logerror("pinheck: %s\n", msg); }
+
+static void pinheck_wav_le(FILE *f, uint32_t v, int n)
+{
+	while (n--) { fputc((int)(v & 0xFF), f); v >>= 8; }
+}
+
+static void pinheck_wav_header(FILE *f, uint32_t rate, uint32_t bytes)
+{
+	fseek(f, 0, SEEK_SET);
+	fwrite("RIFF", 1, 4, f); pinheck_wav_le(f, 36 + bytes, 4); fwrite("WAVEfmt ", 1, 8, f);
+	pinheck_wav_le(f, 16, 4); pinheck_wav_le(f, 1, 2); pinheck_wav_le(f, 2, 2); pinheck_wav_le(f, rate, 4);
+	pinheck_wav_le(f, rate * 4, 4); pinheck_wav_le(f, 4, 2); pinheck_wav_le(f, 16, 2);
+	fwrite("data", 1, 4, f); pinheck_wav_le(f, bytes, 4);
+	fseek(f, 0, SEEK_END);
+}
+
+static void pinheck_snd_update(int param, INT16 **buffer, int length)
+{
+	int16_t tmp[2 * 512];
+	int done = 0, i;
+	(void)param;
+	if (locals.idle) {
+		memset(buffer[0], 0, length * sizeof(INT16));
+		memset(buffer[1], 0, length * sizeof(INT16));
+		return;
+	}
+	while (done < length) {
+		int n = length - done > 512 ? 512 : length - done;
+		uint64_t pic = (uint64_t)((double)(sndl.samples + n - sndl.base) * PINHECK_CLOCK / sndl.rate);
+		uint64_t now = pic32cpu_soc()->cpu.cycles;
+		if (pic > now) pic = now;
+		prop_catch_up(&prop, pic);
+		audio_render(&snd, tmp, n, prop_time(&prop, pic));
+		for (i = 0; i < n; i++) {
+			buffer[0][done + i] = tmp[2 * i];
+			buffer[1][done + i] = tmp[2 * i + 1];
+			if (sndl.wav) { pinheck_wav_le(sndl.wav, (uint16_t)tmp[2 * i], 2); pinheck_wav_le(sndl.wav, (uint16_t)tmp[2 * i + 1], 2); }
+		}
+		if (sndl.wav) sndl.wav_bytes += 4 * (uint32_t)n;
+		sndl.samples += (uint64_t)n;
+		done += n;
+	}
+}
+
+static int pinheck_sh_start(const struct MachineSound *msound)
+{
+	const char *names[] = { "Propeller Left", "Propeller Right" };
+	const int vol[2] = { MIXER(100, MIXER_PAN_LEFT), MIXER(100, MIXER_PAN_RIGHT) };
+	const char *wav = getenv("PINHECK_WAV");
+	(void)msound;
+	memset(&sndl, 0, sizeof(sndl));
+	if (Machine->sample_rate <= 0) return 0;
+	sndl.rate = Machine->sample_rate;
+	audio_init(&snd, sndl.rate, pinheck_snd_log, NULL);
+	if (wav && (sndl.wav = fopen(wav, "wb")) != NULL) pinheck_wav_header(sndl.wav, (uint32_t)sndl.rate, 0);
+	sndl.started = 1;
+	return stream_init_multi(2, names, vol, sndl.rate, 0, pinheck_snd_update) < 0;
+}
+
+static void pinheck_sh_stop(void)
+{
+	if (sndl.wav) {
+		pinheck_wav_header(sndl.wav, (uint32_t)sndl.rate, sndl.wav_bytes);
+		fclose(sndl.wav);
+		sndl.wav = NULL;
+	}
+	sndl.started = 0;
+}
+
+static struct CustomSound_interface pinheck_sndInt = { pinheck_sh_start, pinheck_sh_stop, 0 };
+
 static MACHINE_INIT(pinheck)
 {
 	pic32mx_board board = { NULL, pinheck_port_write, pinheck_port_read, pinheck_uart_tx, pinheck_i2c_pins, pinheck_unmapped, pinheck_exception, pinheck_hold };
@@ -313,6 +401,7 @@ static MACHINE_INIT(pinheck)
 	prop_init(&prop, memory_region(PINHECK_BIOSREGION), propmem);
 	prop_set_log(&prop, pinheck_prop_log, NULL);
 	prop_set_tx(&prop, pinheck_prop_tx, NULL);
+	if (sndl.started) prop_set_sound(&prop, pinheck_snd_ctr, pinheck_snd_pins, NULL);
 	boot_init(&boot, memory_region(PINHECK_CPUREGION), memory_region_length(PINHECK_CPUREGION), pinheck_boot_tx, NULL);
 	boot_set_log(&boot, pinheck_prop_log, NULL);
 	pinheck_open_card();
@@ -325,6 +414,7 @@ static MACHINE_RESET(pinheck)
 	const char *at = getenv("PINHECK_UART1_SEND_AT");
 	if (locals.idle) return;
 	prop_reset(&prop, 0);
+	sndl.base = sndl.samples;
 	boot_reset(&boot, 0);
 	pinheck_disp_reset();
 	cat24m01_init(&u13, u13mem, 0);
@@ -370,6 +460,8 @@ MACHINE_DRIVER_START(PINHECK)
 	MDRV_CPU_VBLANK_INT(pinheck_vblank, 1)
 	MDRV_TIMER_ADD(pinheck_tick, 1000)
 	MDRV_NVRAM_HANDLER(pinheck)
+	MDRV_SOUND_ADD(CUSTOM, pinheck_sndInt)
+	MDRV_SOUND_ATTRIBUTES(SOUND_SUPPORTS_STEREO)
 	MDRV_SCREEN_SIZE(128, 32)
 	MDRV_VISIBLE_AREA(0, 127, 0, 31)
 	MDRV_VIDEO_ATTRIBUTES(VIDEO_TYPE_RASTER | VIDEO_RGB_DIRECT)

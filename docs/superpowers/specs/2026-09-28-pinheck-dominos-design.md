@@ -212,7 +212,13 @@ The game link has no Propeller→PIC32 UART. Its return path is RF13 (COMM_IN_TX
 
 ### 5.4 Audio
 
-For each counter in a DUTY mode on P14/P15, the device integrates `FRQx / 2^32` over time. Every value change of `FRQx` or `CTRx` closes a segment. Each output sample at the stream rate (44.1 kHz stereo) is the time-weighted average over its interval, scaled to ±1 and DC-centred. Other counter modes on these pins are logged and output silence.
+The Propeller core reports every change of a cog's `CTRx`/`FRQx` pair through the `ctr_state` bus callback, at the cycle the write takes effect; a COGSTOP and a chip reset report the counter as off. `prop.c` forwards these and the pin-output stream, in Propeller cycles, to `audio.c`.
+
+For each audio pin (P15 left, P14 right) `audio.c` keeps the pin's level over time: 0 while no cog drives the pin as an output, 1 while OUTA holds it high, otherwise the sum of `FRQ / 2^32` of the DUTY-single counters whose APIN is that pin, capped at 1 (more than one driver is logged once). Any other counter mode aimed at an audio pin, including the differential modes through BPIN, is logged once and outputs silence. Counters on other pins are ignored without cost, which matters because the SD and display drivers re-program their NCO counters millions of times a minute.
+
+Each output sample, at PinMAME's sample rate, is the exact time-weighted mean of that level over its interval, followed by a first-order DC blocker `y[n] = x[n] − x[n−1] + R·y[n−1]` with `R = exp(−2π·10 Hz / fs)`, then scaling to int16. Sample boundaries are PIC32 cycles derived from the stream's sample count (rebased on every machine reset) and converted to Propeller cycles through the clock map (§5.1).
+
+Measured in game (`PRP_V008.BIN`): cog 4 drives P14 with counter A and P15 with counter B, both DUTY single, silent at `FRQ = $8000_0000`. It writes new samples every 4,720, 4,720, 4,720, 4,704 cycles, a period of exactly 4,716 cycles: the machine plays its 22,050 Hz files at 104 MHz / 4,716 = 22,052.59 Hz, 0.012 % fast. Within each period P14 (right) is written a median 4,080 cycles after P15 (left).
 
 ### 5.5 Video
 

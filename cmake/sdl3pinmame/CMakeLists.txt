@@ -583,6 +583,8 @@ add_executable(sdl3pinmame
    src/wpc/pinheck.c
    src/wpc/pinheck.h
    src/wpc/pinheckgames.c
+   src/wpc/pinheck/audio.c
+   src/wpc/pinheck/audio.h
    src/wpc/pinheck/display.c
    src/wpc/pinheck/display.h
    src/cpu/p8x32a/p8x32a.c

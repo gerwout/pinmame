@@ -198,6 +198,15 @@ static void ctr_save(p8x32a *p, p8x32a_cog *c, int k, uint64_t e)
 	add_pending(p, e);
 }
 
+static void ctr_notify(p8x32a *p, int n, int k, uint64_t t)
+{
+	p8x32a_cog *c = &p->cog[n];
+	if (c->ctr[k] == c->ctr_seen[k] && c->frq[k] == c->frq_seen[k]) return;
+	c->ctr_seen[k] = c->ctr[k];
+	c->frq_seen[k] = c->frq[k];
+	if (p->bus.ctr_state) p->bus.ctr_state(p->bus.ctx, t, n, k, c->ctr[k], c->frq[k]);
+}
+
 static void special_write(p8x32a *p, int n, unsigned a, uint32_t v, uint64_t m3)
 {
 	p8x32a_cog *c = &p->cog[n];
@@ -206,8 +215,8 @@ static void special_write(p8x32a *p, int n, unsigned a, uint32_t v, uint64_t m3)
 	switch (a) {
 	case 0x1F4: regset(p, &c->outa, v, e); break;
 	case 0x1F6: if (e < c->disable_at) regset(p, &c->dira, v, e); break;
-	case 0x1F8: case 0x1F9: ctr_save(p, c, k, e); ctr_rebase(c, k, e); c->ctr[k] = v; ctr_check(p, v); break;
-	case 0x1FA: case 0x1FB: ctr_save(p, c, k, e); ctr_rebase(c, k, e); c->frq[k] = v; break;
+	case 0x1F8: case 0x1F9: ctr_save(p, c, k, e); ctr_rebase(c, k, e); c->ctr[k] = v; ctr_check(p, v); ctr_notify(p, n, k, e); break;
+	case 0x1FA: case 0x1FB: ctr_save(p, c, k, e); ctr_rebase(c, k, e); c->frq[k] = v; ctr_notify(p, n, k, e); break;
 	case 0x1FC: case 0x1FD: ctr_save(p, c, k, e); c->phs[k] = v; c->phs_t[k] = e; break;
 	case 0x1FE: c->vcfg = v; break;
 	case 0x1FF: c->vscl = v; break;
@@ -389,6 +398,8 @@ static void stop_cog(p8x32a *p, int n, uint64_t d)
 	ctr_rebase(c, 0, d);
 	ctr_rebase(c, 1, d);
 	c->ctr[0] = c->ctr[1] = 0;
+	ctr_notify(p, n, 0, d);
+	ctr_notify(p, n, 1, d);
 }
 
 static void sys(p8x32a *p, int n, uint64_t h)
@@ -570,6 +581,9 @@ void p8x32a_reset(p8x32a *p, uint64_t t)
 	for (n = 0; n < 8; n++) {
 		p8x32a_cog *c = &p->cog[n];
 		uint32_t ram[512];
+		c->ctr[0] = c->ctr[1] = 0;
+		ctr_notify(p, n, 0, t);
+		ctr_notify(p, n, 1, t);
 		memcpy(ram, c->ram, sizeof(ram));
 		memset(c, 0, sizeof(*c));
 		memcpy(c->ram, ram, sizeof(ram));

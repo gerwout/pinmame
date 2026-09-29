@@ -14,6 +14,8 @@ GROUPS = [
     (['src/wpc/pinheck/sd.c', 'src/wpc/pinheck/sd.h', 'src/wpc/pinheck/vfat.c', 'src/wpc/pinheck/vfat.h',
       'src/wpc/pinheck/zipsrc.c', 'src/wpc/pinheck/zipsrc.h'],
      'DRVLIBS += $(PINOBJ)/pinheck/sd.o $(PINOBJ)/pinheck/vfat.o $(PINOBJ)/pinheck/zipsrc.o\n'),
+    (['src/wpc/pinheck/audio.c', 'src/wpc/pinheck/audio.h'],
+     'DRVLIBS += $(PINOBJ)/pinheck/audio.o\n'),
     (['src/wpc/pinheck/display.c', 'src/wpc/pinheck/display.h'],
      'DRVLIBS += $(PINOBJ)/pinheck/display.o\n'),
 ]
