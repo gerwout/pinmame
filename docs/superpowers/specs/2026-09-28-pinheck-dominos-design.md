@@ -151,13 +151,13 @@ The chipKIT logical-pin table used by `digitalWrite` is resolved from the firmwa
 - 32 KB hub RAM and 32 KB ROM; 8 locks; `COGINIT`/`COGSTOP`/`COGID`/`CLKSET`.
 - `OUTA`/`DIRA` are the OR of all running cogs.
 - Counters: NCO single and differential outputs drive pins cycle-exactly. The firmware uses NCO on P1/P2 (SD clock and data), P21/P22 (display) and P25 (serial TX), mostly with `FRQ` = 0 and data shifted through `PHS`. DUTY modes (the firmware's audio DAC on P14/P15) are not driven onto pins: the audio device integrates `FRQ` instead (§5.4). PLL pin outputs and pin-sensing modes are reported once, not modelled.
-- Video generator: `VCFG`/`VSCL`/`WAITVID` modelled functionally, emitting pin-group values per pixel clock.
+- Video generator: not modelled. `PRP_V008.BIN` never executes `WAITVID`; the display is a serial frame link (§5.5). `WAITVID` is reported once, not modelled.
 - Idle cogs (in a `WAIT*` with a known wake time) advance without executing.
 
 Interface:
 - `run_until(cycle)`
 - a pin-input callback taking the cog-local cycle, plus a next-edge query for `WAITPEQ`/`WAITPNE`
-- sinks for pin-output edges, video runs and counter-state changes
+- sinks for pin-output edges and counter-state changes
 
 ### 4.4 `pinheck/` devices
 
@@ -179,7 +179,7 @@ Interface:
   - Onboard RGB (left R, G, B, right R, G, B) → custom solenoids 51–56.
   - Servos 0–4 → custom solenoids 57–61, carrying the pulse width normalised over 1.0–2.0 ms.
   - All of these are modulated outputs.
-- **Display**: a `CORE_VIDEO` layout of 128×32 with a custom renderer converting RGB332 to host colour, fed by the display decoder.
+- **Display**: a `CORE_VIDEO` layout of 128×32 with a custom renderer converting RGB332 to host colour, fed by the display module model (`display.c`, §5.5).
 - **Sound**: one stereo stream from the audio device (§5.4).
 - **NVRAM**: U13 (128 KB) and the Propeller EEPROM above the 32 KB `PRP_V008.BIN` image, through PinMAME's NVRAM handler. A first run starts blank, so the Propeller runs its update against `bootldr.c` and stops at `PLEASE RESTART`; the next reset or launch boots the game. Program flash written by the update persists across resets within a session and is reloaded from the romset's `DOM_V006.PRG` at every launch (decision D2, §10). The DS1340 is not persisted.
 - **Service console**: UART1 TX is logged. An input path injects UART1 RX bytes for tests.
@@ -216,7 +216,7 @@ For each counter in a DUTY mode on P14/P15, the device integrates `FRQx / 2^32` 
 
 ### 5.5 Video
 
-The video generator emits runs of 8-bit pin-group values with their pixel-clock timing. The display decoder reconstructs 128×32 RGB332 frames from those runs according to the signalling the video cog uses (open item 2) and presents each completed frame to the renderer.
+The Propeller sends finished frames to the display module over a clocked serial link: P22 (DMD_1) clock, data valid on the rising edge; P21 (DMD_3) data, MSB first; P20 (DMD_5) latch pulse; P17 (DMD_11) held high during a config packet. The latch pulse carries one clock edge of its own, which is not data. A frame is 4096 bytes, 128 × 32 pixels, RGB332, the `.VID` format; the firmware sends one only when the picture changes (every 33 ms while a clip plays at 30 fps, every 46 ms on the score screen). The config packet is 14 bytes (`00 b1 01 54 00 00 00 ff 00 80 00 20 00 3e` on a default machine), sent once at start-up. `display.c` models the receiving module from the Propeller's pin edges: it latches a transfer on the rising edge of P20, delivers exactly 4096 bytes as a frame, and discards anything else with one log line. The renderer shows the last complete frame. The firmware keeps its framebuffer at hub `$5870`; every frame it sends equals that buffer when latched. Starting a clip with `video()`, the firmware shows the clip from its frame 1: frame 0 is loaded but not sent.
 
 ### 5.6 I/O
 
@@ -253,7 +253,7 @@ External oracles are test tools only and are never linked into PinMAME.
 
 1. The PIC32 prints its banner (`pinHeck System 2011-2016`, `Game: DOM - DOMINOS`, `Version:`) on the second boot. The firmware prints it only once U13 holds its settings, which the first boot on a blank EEPROM stores. Reaching it needs the Propeller's sync reply and its `readEEPROM`/`writeEEPROM` service; until milestone 5 the test stub `tests/pinheck/pic32mx/linkstub.c` provides them.
 2. On blank NVRAM the Propeller's update runs to `PLEASE RESTART` against the bootloader stand-in, programming and verifying the card's `DOM_V006.PRG` and writing its EEPROM record; after a restart `PROPELLER SYNC CHECK` succeeds against the emulated Propeller, the banner appears, and `[E97000]` injected on UART1 returns `Ball Search: DISABLED`. (`[E00000]`, which the help text documents as returning the version, prints an empty line in `DOM_V006`.)
-3. `[V00ABC]` for a chosen clip produces display frames equal, pixel for pixel, to that `.VID`'s frames.
+3. `[V00ABC]` for a chosen clip produces display frames equal, pixel for pixel, to that `.VID`'s frames, contiguous and in order from the first frame shown (frame 1, §5.5) through the last. Each equals the firmware framebuffer at hub `$5870` when latched.
 4. `[F00ABC]` produces audio whose normalised cross-correlation with the `.wav` is at least 0.95.
 5. The service-menu switch, lamp and solenoid tests, `[MXXzzz]` and `[LXXzzz]` drive exactly the PinMAME switches, lamps and solenoids given by §4.5.
 
@@ -266,7 +266,7 @@ External oracles are test tools only and are never linked into PinMAME.
 | 3 | `p8x32a` + disassembler | spinsim differential suite passes; boots `PRP_V008.BIN` from the EEPROM model |
 | 4 | `sd` + `vfat` | volume tests pass; the Propeller mounts the card and opens `_DE/ERR.VID` |
 | 5 | Link (§5.2, §5.3) | machine check 2 |
-| 6 | Video generator + display decoder | machine check 3 |
+| 6 | Display module model and renderer | machine check 3 |
 | 7 | Audio | machine check 4 |
 | 8 | Board I/O + PinMAME integration | machine check 5; a game can be started, played and ended |
 | 9 | Performance | real time on the reference machine; any JIT/DRC work is driven by profiles |
@@ -278,7 +278,7 @@ Milestones 1–2 and 3–4 are independent of each other.
 Each is resolved by analysis of the shipped firmware before the milestone that needs it. None changes the architecture.
 
 1. **chipKIT logical pins → PIC32 port bits** (resolved by milestone 2; checked by `tests/pinheck/pic32mx/pins.py`). Logical 16 = RF5 = COMM_OUT (PIC32→Propeller data), 15 = RF12 = COMM_CLK_RX (clock, driven by the PIC32), 14 = RF13 = COMM_IN_TX (Propeller→PIC32 data). The link is a full-duplex, bit-banged exchange of 16 bytes, LSB first, byte 15 the command; the Propeller stages its reply from the previous packet. There is no Propeller→PIC32 UART: the firmware enables only UART1.
-2. **Display signalling on P16–P22** (needed by milestone 6). Disassemble the video cog (PASM around `0x3300–0x3E00` of `PRP_V008.BIN`): pin-group mapping, pixel clock, sync scheme, and how RGB332 source pixels map onto the seven connector lines.
+2. **Display signalling on P16–P22** (resolved by milestone 6; checked by `tests/pinheck/display/`). Not the video generator: a clocked serial frame link, P22 clock, P21 data, P20 latch, P17 config (§5.5).
 3. **External WS2801 chain length** (needed by milestone 8). Read it from the firmware's RGB routines. The chain is exposed as further custom solenoids after 61, three per LED.
 4. **Mask ROM image** (needed by milestone 3). Fix the exact 32 KB image the `pinheck` BIOS set declares, and its CRC, from the Parallax release. Check how the interpreter region is stored against what the booter expects.
 
