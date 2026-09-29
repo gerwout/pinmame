@@ -654,6 +654,8 @@ static void sys(p8x32a *p, int n, uint64_t h)
 	case 0:
 		p->cfg = (uint8_t)dc;
 		if (p->bus.clkset) p->bus.clkset(p->bus.ctx, h + 1, p->cfg);
+		/* the host may retime its queued edges: sleepers re-check */
+		if (p->sleepers) loop_notify(p, h + 1, 0xFFFFFFFFu);
 		if (dc & 0x80) log_once(p, LOG_REBOOT, "p8x32a: CLKSET reset bit not modelled");
 		break;
 	case 2:

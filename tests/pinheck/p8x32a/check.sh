@@ -51,6 +51,12 @@ rtl_case() {
 	exp=$(sed -n "s/^' EXPECT-LOG: //p" "$1")
 	if [ -n "$exp" ] && ! grep -qF "$exp" "$o.log"; then echo "LOG MISSING $1: $exp"; fail=$((fail + 1)); fi
 	if [ -n "$sleeps" ] && ! grep -qxF "p8run: $sleeps idle-loop sleeps" "$o.log"; then echo "SLEEPS $1: $(grep -F idle-loop "$o.log"), expected $sleeps"; fail=$((fail + 1)); fi
+	# EXPECT-CLKSHIFT: d v = with CLKSET moving queued edges d cycles earlier, the long at $6000 is v
+	set -- "$1" $(sed -n "s/^' EXPECT-CLKSHIFT: //p" "$1")
+	[ $# -eq 3 ] || return
+	./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args -clkshift "$2" -dump "$o.shifthub" > /dev/null 2>&1
+	got=$(od -An -tu4 -j 24576 -N 4 "$o.shifthub" | tr -d ' ')
+	if [ "$got" = "$3" ]; then pass=$((pass + 1)); else echo "CLKSHIFT $1: \$6000 = $got, expected $3"; fail=$((fail + 1)); fi
 }
 
 spin_case() {
