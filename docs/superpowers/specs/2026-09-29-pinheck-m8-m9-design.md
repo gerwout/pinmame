@@ -64,6 +64,13 @@ Measured by Plan 8a, for the simulator: the firmware times coil pulses in units 
 
 Playfield switches get keyboard keys. The cabinet keys follow PinMAME's usual layout: coin, start, both flippers, tilt, and Enter/Back/Menu/User.
 
+Established by Plan 8b:
+
+- **Numbers.** The coil numbers above are the documents' 0-based ones: PinMAME solenoids 18 (trough), 17 (autolauncher), 9 and 13 (scoops), 7 (up-post) and 6 (magnet). Domino's game definition lives in the simulator file, as for PinMAME's other full simulators.
+- **Coils as edges.** The simulator reads a coil as on when it was on at any time during the last frame (`coreGlobals.solenoids`, built by the board block), so pulses of 3–20 ms move the ball exactly once.
+- **Mechanics.** The shooter lane has a manual plunger; the firmware autolaunches only ball saves and multiball balls. The optos are the Center Ramp (95) and the Oven Ramp (96), whose handler energises the magnet. The orbit handlers raise the up-post: a ball meeting it comes back down its orbit. The firmware homes the Noid (servo 0, continuous rotation) by Noid Home (58); the target bank (servo 1) is up at 646 µs and down at 1,621 µs, and its switches register in both positions.
+- **Framework.** `sim_tSimData` gained an opt-in `autoBall`: while the selected ball is off the playfield, the keys move a ball on it, which multiball needs.
+
 ### 3.4 Verification
 
 - **Unit level:** `board` is tested with synthetic GPIO edges: lamp strobing at each brightness level, both shift-register chains bit by bit, WS2801 frames, servo pulses, and a switch-matrix scan in the firmware's order.
@@ -75,6 +82,8 @@ Playfield switches get keyboard keys. The cabinet keys follow PinMAME's usual la
 - **Scripted game:** a headless `-key_script` run inserts a coin, starts a game, plays a switch sequence, drains every ball, and completes match and high-score entry.
   - It asserts on the firmware's own UART1 debug output (`PLAYER:%d BALL:%d SCORE: %luK`, `[E11000]` mode dumps), on decoded display frames (Milestone 6), and on lamp and solenoid activity.
   - It stays in the suite as the regression test for every later change.
+  - Established by Plan 8b: `DOM_V006` formats `PLAYER:%d BALL:%d …` into the text it sends to the Propeller and `[E11000]` prints only an empty line, so the game's own record is the PIC32-to-Propeller link: `PINHECK_LINK_LOG` logs every packet (score, status, scrolling text, clip, high-score table). UART1 carries the firmware's mode prints (`pizzaDispatchModeStart[player]`, `COLLECTING JP??`, `MODES ARE ENDING`) and the high scores sent after the game.
+  - `PINHECK_RTC` seeds the DS1340 instead of host time; the firmware's random choices follow the clock, and with it fixed two runs of the scripted game give byte-identical link, board, UART1 and frame logs. The game (`tests/pinheck/game/pinmame_game.sh`: three balls, a multiball, `ACE` at the top of the high-score table, the match) plays 315 s of emulated time, about 50 minutes at today's speed.
 
 ## 4. Milestone 9: performance
 
@@ -90,7 +99,7 @@ Playfield switches get keyboard keys. The cabinet keys follow PinMAME's usual la
   4. Multi-threading only if the result stays deterministic.
 - **Proof for every stage:**
   - all existing suites pass, including the RTL and QEMU differential suites;
-  - a determinism check: the optimised build reproduces the reference build's UART1 log, display frames and audio byte for byte over a fixed firmware run.
+  - a determinism check: the optimised build reproduces the reference build's UART1 log, display frames and audio byte for byte over a fixed firmware run. The scripted game under `PINHECK_RTC` is that run: its link, board, UART1 and frame logs are already byte-identical between runs of one build.
 
 ## 5. Display look
 
