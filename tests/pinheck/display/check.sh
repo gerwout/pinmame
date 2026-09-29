@@ -10,9 +10,10 @@ CF="-O2 -std=c99 -Wall -Wextra -Werror -pedantic"
 mkdir -p $B
 fail=0
 cc -std=c89 -pedantic-errors -Wno-long-long -fsyntax-only $S/wpc/pinheck/display.c || fail=$((fail + 1))
-cc $CF -I$S/wpc/pinheck -o $B/display_test display_test.c $S/wpc/pinheck/display.c || exit 2
+SAN="-fsanitize=address,undefined -fno-sanitize-recover=all"
+cc $CF $SAN -I$S/wpc/pinheck -o $B/display_test display_test.c $S/wpc/pinheck/display.c || exit 2
 ./$B/display_test || fail=$((fail + 1))
-cc $CF -I$S/wpc/pinheck -o $B/lookdump lookdump.c $S/wpc/pinheck/display.c || exit 2
+cc $CF $SAN -I$S/wpc/pinheck -o $B/lookdump lookdump.c $S/wpc/pinheck/display.c || exit 2
 python3 look.py crosscheck ./$B/lookdump || fail=$((fail + 1))
 calls() { cc -E "$@" -I$S -I$S/wpc -I$S/unix -I$S/unix/sysdep $S/wpc/pinheck.c | grep -c 'pinheck_display_render(&disp_look'; }
 if [ "$(calls)" = 1 ] && [ "$(calls -DLIBPINMAME)" = 0 ]; then

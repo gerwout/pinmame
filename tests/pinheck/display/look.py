@@ -19,7 +19,7 @@ ROUND, SQUARE, HIGHREZ = 0, 1, 2
 SHAPES = ('ROUND', 'SQUARE', 'HIGHREZ')
 EXACT = {'shape': SQUARE, 'brightness': 255, 'position': 340, 'bar': 62}
 PROP_DEFAULT = '00 b1 01 54 00 00 00 ff 00 80 00 20 00 3e'   # the Propeller's own packet at start-up
-SAVED = '00 b1 01 55 00 00 00 af 00 80 00 20 00 00'          # at the next start-up: POSITION, BRIGHTNESS, BAR BRIGHT kept
+SAVED = '00 b1 01 55 00 01 00 af 00 80 00 20 00 00'          # at the next start-up: all four settings kept
 FPS = 60
 TOL = 7                   # 8 -> 5 bit -> 8 bit rounding of a 15 bpp screen
 
@@ -121,7 +121,7 @@ def key_plan():
     for _ in range(12):
         tap('RSHIFT', 30)                           # ... PIXEL SHAPE
     tap('F12', 36, snap=dict(st))                   # the start-up look
-    # every value; then one more of the stored three (175, 341, 0), with the shape back at ROUND
+    # every value; then one more of the stored three (175, 341, 0), with the shape back at ROUND; then SQUARE
     for item, n in (('shape', 3), ('brightness', 18), ('position', 202), ('bar', 33)):
         for _ in range(n):
             st = step(st, item)
@@ -132,6 +132,11 @@ def key_plan():
             else:
                 tap('0', 15, packet(st))
         tap('RSHIFT', 30)                           # the next item
+    for _ in range(4):
+        tap('LSHIFT', 30)                           # back to PIXEL SHAPE
+    st = step(st, 'shape')                          # SQUARE: the module stores it
+    tap('0', 24, packet(st))
+    tap('F12', 12, snap=dict(st))
     tap('7', 60)                                    # Back: leave MAIN SETTINGS, which stores the settings
     return ev, t
 
@@ -222,6 +227,9 @@ def verify(d):
         recent = [f for _, pic, _, f in read_log(os.path.join(d, 'frames3.bin')) if pic / 80e6 <= 1190 / FPS][-8:]
         if not any(matches(rows, render(st, f)) for f in recent):
             print('LOOK FAIL: after the restart the snapshot shows none of the last %d frames in the look %s' % (len(recent), name(st)))
+            fail += 1
+        elif any(matches(rows, render(dict(st, shape=ROUND), f)) for f in recent):
+            print('LOOK FAIL: after the restart the snapshot is ROUND, not the stored %s' % name(st))
             fail += 1
         else:
             print('look: after the restart %s' % name(st))

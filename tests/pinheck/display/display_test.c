@@ -148,7 +148,9 @@ static void latch_clock_and_undriven(void)
 }
 
 static const uint8_t cfg_prop[14] = { 0x00, 0xb1, 0x01, 0x54, 0x00, 0x00, 0x00, 0xff, 0x00, 0x80, 0x00, 0x20, 0x00, 0x3e };
-static uint8_t frame[DISPLAY_FRAME], img[DISPLAY_LOOK_W * DISPLAY_LOOK_H * 3 + 16];
+/* guard bytes after the frame: a read past it shows as white, not as black */
+static uint8_t framebuf[DISPLAY_FRAME + 256], img[DISPLAY_LOOK_W * DISPLAY_LOOK_H * 3 + 16];
+#define frame framebuf
 
 static int is(int x, int y, int r, int g, int b)
 {
@@ -166,6 +168,7 @@ static void draw(int shape, int brightness, int position, int bar)
 	lk.position = position;
 	lk.bar = bar;
 	memset(img, 0xA5, sizeof(img));
+	memset(framebuf + DISPLAY_FRAME, 0xFF, sizeof(framebuf) - DISPLAY_FRAME);
 	pinheck_display_render(&lk, frame, img);
 }
 
