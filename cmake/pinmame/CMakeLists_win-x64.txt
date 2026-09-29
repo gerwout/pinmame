@@ -463,6 +463,8 @@ add_executable(pinmame WIN32
    src/wpc/pinheck.c
    src/wpc/pinheck.h
    src/wpc/pinheckgames.c
+   src/wpc/pinheck/display.c
+   src/wpc/pinheck/display.h
    src/cpu/p8x32a/p8x32a.c
    src/cpu/p8x32a/p8x32a.h
    src/wpc/pinheck/eeprom.c

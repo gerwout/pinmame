@@ -7,6 +7,7 @@
 #include "pinheck/bootldr.h"
 #include "pinheck/sd.h"
 #include "pinheck/zipsrc.h"
+#include "pinheck/display.h"
 #include "pinheck.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -196,10 +197,88 @@ static void pinheck_tick(int param)
 	}
 }
 
+static display disp;
+static uint8_t disp_shown[DISPLAY_FRAME], disp_cfg[DISPLAY_CFG_MAX];
+static int disp_cfg_n, disp_opened;
+static FILE *disp_log;
+static UINT32 disp_rgb32[256];
+static UINT16 disp_rgb15[256];
+
+static void pinheck_disp_frame(void *ctx, const uint8_t *frame, uint64_t t)
+{
+	uint8_t stamp[20];
+	uint64_t pic = pic32cpu_soc()->cpu.cycles;
+	uint32_t at = 0xFFFFFFFFu, a;
+	int k;
+	(void)ctx;
+	memcpy(disp_shown, frame, DISPLAY_FRAME);
+	if (!disp_log) return;
+	for (a = 0; a + DISPLAY_FRAME <= 0x8000; a++)
+		if (prop.chip.hub[a] == frame[0] && !memcmp(prop.chip.hub + a, frame, DISPLAY_FRAME)) { at = a; break; }
+	for (k = 0; k < 8; k++) stamp[k] = (uint8_t)(t >> (8 * k));
+	for (k = 0; k < 8; k++) stamp[8 + k] = (uint8_t)(pic >> (8 * k));
+	for (k = 0; k < 4; k++) stamp[16 + k] = (uint8_t)(at >> (8 * k));
+	fwrite(stamp, 1, 20, disp_log);
+	fwrite(frame, 1, DISPLAY_FRAME, disp_log);
+}
+
+static void pinheck_disp_config(void *ctx, const uint8_t *bytes, int n, uint64_t t)
+{
+	char msg[16 + 3 * DISPLAY_CFG_MAX];
+	int k, len;
+	(void)ctx; (void)t;
+	if (n == disp_cfg_n && !memcmp(bytes, disp_cfg, (size_t)n)) return;
+	memcpy(disp_cfg, bytes, (size_t)n);
+	disp_cfg_n = n;
+	len = sprintf(msg, "display: config");
+	for (k = 0; k < n; k++) len += sprintf(msg + len, " %02x", bytes[k]);
+	pinheck_prop_log(NULL, msg);
+}
+
+static void pinheck_disp_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
+{
+	(void)ctx;
+	display_pins(&disp, t, out, dir);
+}
+
+static void pinheck_disp_init(void)
+{
+	const char *path = getenv("PINHECK_FRAME_LOG");
+	int v;
+	for (v = 0; v < 256; v++) {
+		int r = ((v >> 5) & 7) * 255 / 7, g = ((v >> 2) & 7) * 255 / 7, b = (v & 3) * 255 / 3;
+		disp_rgb32[v] = MAKE_RGB(r, g, b);
+		disp_rgb15[v] = (UINT16)(((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3));
+	}
+	if (disp_log) fclose(disp_log);
+	disp_log = path ? fopen(path, disp_opened ? "ab" : "wb") : NULL;
+	disp_opened = 1;
+	prop_set_pins(&prop, pinheck_disp_pins, NULL);
+}
+
+static void pinheck_disp_reset(void)
+{
+	display_init(&disp, NULL, pinheck_disp_frame, pinheck_disp_config, pinheck_prop_log);
+	memset(disp_shown, 0, sizeof(disp_shown));
+	disp_cfg_n = 0;
+}
+
+static void pinheck_disp_stop(void)
+{
+	if (disp_log) fclose(disp_log);
+	disp_log = NULL;
+}
+
 PINMAME_VIDEO_UPDATE(pinheck_video)
 {
-	(void)layout;
-	fillbitmap(bitmap, 0, cliprect);
+	int x, y;
+	(void)layout; (void)cliprect;
+	for (y = 0; y < DISPLAY_H && y < bitmap->height; y++)
+		for (x = 0; x < DISPLAY_W && x < bitmap->width; x++) {
+			const uint8_t v = disp_shown[y * DISPLAY_W + x];
+			if (bitmap->depth == 32) ((UINT32 *)bitmap->line[y])[x] = disp_rgb32[v];
+			else ((UINT16 *)bitmap->line[y])[x] = disp_rgb15[v];
+		}
 }
 
 static INTERRUPT_GEN(pinheck_vblank)
@@ -237,6 +316,7 @@ static MACHINE_INIT(pinheck)
 	boot_init(&boot, memory_region(PINHECK_CPUREGION), memory_region_length(PINHECK_CPUREGION), pinheck_boot_tx, NULL);
 	boot_set_log(&boot, pinheck_prop_log, NULL);
 	pinheck_open_card();
+	pinheck_disp_init();
 	pic32cpu_set_board(&board);
 }
 
@@ -246,6 +326,7 @@ static MACHINE_RESET(pinheck)
 	if (locals.idle) return;
 	prop_reset(&prop, 0);
 	boot_reset(&boot, 0);
+	pinheck_disp_reset();
 	cat24m01_init(&u13, u13mem, 0);
 	ds1340_init(&rtc, pinheck_local_now(), PINHECK_CLOCK);
 	locals.rtc_at = 0;
@@ -270,6 +351,7 @@ static MACHINE_STOP(pinheck)
 	if (locals.have_vol) vfat_free(&vol);
 	if (locals.have_zip) zipsrc_close(&zip);
 	locals.have_vol = locals.have_zip = 0;
+	pinheck_disp_stop();
 }
 
 static MEMORY_READ32_START(pinheck_readmem)
