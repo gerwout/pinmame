@@ -257,10 +257,34 @@ static void pinheck_uart_tx(void *ctx, int uart, uint8_t byte, uint64_t cycle)
 	if (uart == 1 && locals.uart1) fputc(byte, locals.uart1);
 }
 
+/* test log (PINHECK_LINK_LOG): every PIC32-to-Propeller packet, 16 bytes shifted LSB first, data sampled on the rising clock */
+static FILE *link_log;
+static struct { int clk, nbits; uint64_t last, gap; uint8_t b[16]; } lnk;
+
+static void pinheck_link_bit(uint32_t drv, uint64_t cycle)
+{
+	int clk = (drv & RF12) != 0, i;
+	if (clk && !lnk.clk) {
+		if (lnk.nbits && cycle - lnk.last > lnk.gap) lnk.gap = cycle - lnk.last;
+		if (drv & RF5) lnk.b[lnk.nbits >> 3] |= (uint8_t)(1u << (lnk.nbits & 7));
+		else lnk.b[lnk.nbits >> 3] &= (uint8_t)~(1u << (lnk.nbits & 7));
+		lnk.last = cycle;
+		if (++lnk.nbits == 128) {
+			fprintf(link_log, "%.6f", cycle / (double)PINHECK_CLOCK);
+			for (i = 0; i < 16; i++) fprintf(link_log, " %02x", lnk.b[i]);
+			fprintf(link_log, " gap %llu\n", (unsigned long long)lnk.gap);
+			lnk.nbits = 0;
+			lnk.gap = 0;
+		}
+	}
+	lnk.clk = clk;
+}
+
 static void pinheck_port_write(void *ctx, int port, uint32_t lat, uint32_t tris, uint64_t cycle)
 {
 	uint32_t drv = lat & ~tris;
 	(void)ctx;
+	if (port == PIC32MX_PORTF && link_log) pinheck_link_bit(drv, cycle);
 	if (port == PIC32MX_PORTF)
 		prop_pic_pins(&prop, cycle, (drv & RF12 ? 1u << 25 : 0) | (drv & RF5 ? 1u << 26 : 0));
 	pinheck_board_port(&brd, port, lat, tris, cycle);
@@ -637,6 +661,7 @@ static MACHINE_INIT(pinheck)
 	pinheck_open_card();
 	pinheck_disp_init();
 	pinheck_brd_init();
+	if (!link_log && getenv("PINHECK_LINK_LOG")) link_log = fopen(getenv("PINHECK_LINK_LOG"), "w");
 	pic32cpu_set_board(&board);
 }
 
@@ -648,7 +673,8 @@ static MACHINE_RESET(pinheck)
 	boot_reset(&boot, 0);
 	pinheck_disp_reset();
 	cat24m01_init(&u13, u13mem, 0);
-	ds1340_init(&rtc, pinheck_local_now(), PINHECK_CLOCK);
+	/* test hook: PINHECK_RTC (seconds since 1970, local time) starts the clock there, so a run is repeatable */
+	ds1340_init(&rtc, getenv("PINHECK_RTC") ? strtoll(getenv("PINHECK_RTC"), NULL, 10) : pinheck_local_now(), PINHECK_CLOCK);
 	locals.rtc_at = 0;
 	locals.send = getenv("PINHECK_UART1_SEND");
 	locals.send_at = (uint64_t)((at ? atof(at) : 0.0) * PINHECK_CLOCK);
