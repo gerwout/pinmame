@@ -950,6 +950,9 @@
     <ClCompile Include="..\src\wpc\pinheck\zipsrc.c">
       <Filter>Source Files\PinMAME</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\wpc\pinheck\display.c">
+      <Filter>Source Files\PinMAME</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\wpc\pinheckgames.c">
       <Filter>Source Files\PinMAME</Filter>
     </ClCompile>

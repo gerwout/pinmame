@@ -94,6 +94,7 @@ static void pins_out(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 		int mosi = (dir & PIN_DI) ? (out & PIN_DI) != 0 : 1;
 		p->sd_do = p->sd(p->sd_ctx, cs, sclk, mosi) != 0;
 	}
+	if (p->pins) p->pins(p->pins_ctx, t, out, dir);
 }
 
 static void clkset(void *ctx, uint64_t t, uint8_t cfg)
@@ -169,6 +170,12 @@ void prop_set_tx(pinheck_prop *p, prop_tx_fn fn, void *ctx)
 	p->tx = fn;
 	p->tx_ctx = ctx;
 	p->tx_level = 1;
+}
+
+void prop_set_pins(pinheck_prop *p, prop_pins_fn fn, void *ctx)
+{
+	p->pins = fn;
+	p->pins_ctx = ctx;
 }
 
 void prop_reset(pinheck_prop *p, uint64_t pic_cycle)
