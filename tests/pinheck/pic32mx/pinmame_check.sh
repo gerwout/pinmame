@@ -33,4 +33,5 @@ done
 grep -aq "PROPELLER SYNC CHECK\.*OK" $B/uart2.log || { echo "PINMAME FAIL: launch 2 sync check did not pass"; fail=1; }
 [ -s $B/nvram/dominos.nv ] || { echo "PINMAME FAIL: no NVRAM written"; fail=1; }
 if [ $fail -ne 0 ]; then cat -v $B/uart2.log | grep -av "EEPROM\|Checksum\|Timeout\|Read OK\|Write\|Exchanging" | tail -20; exit 1; fi
+./romset_check.sh || exit 1
 echo "pinmame: ok"

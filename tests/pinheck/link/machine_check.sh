@@ -19,7 +19,8 @@ done
 awk '/=== BOOT 1 ===/{f=1;next} /=== BOOT 2 ===/{f=0} f' $B/fresh.txt | grep -aq "PROPELLER SYNC CHECK" || { echo "MACHINE FAIL: the application did not start after the update"; fail=$((fail + 1)); }
 awk '/=== BOOT 1 ===/{f=1;next} /=== BOOT 2 ===/{f=0} f' $B/fresh.txt | grep -aq "CHECK\.*OK" && { echo "MACHINE FAIL: the Propeller served the link during its update"; fail=$((fail + 1)); }
 t1=$(sed -n 's/^boot 1: first UART1 byte at //p' $B/fresh.err | tr -d s)
-awk -v t="$t1" 'BEGIN { exit !(t >= 135.0) }' || { echo "MACHINE FAIL: the application printed at ${t1}s, before the update released it"; fail=$((fail + 1)); }
+r1=$(sed -n 's/^boot 1: bootloader released the application at //p' $B/fresh.err | tr -d s)
+awk -v t="$t1" -v r="$r1" 'BEGIN { exit !(r != "" && r > 100 && t >= r) }' || { echo "MACHINE FAIL: the application printed at ${t1}s, before the update released it (release ${r1:-none}s)"; fail=$((fail + 1)); }
 for n in 2 3; do
 	t=$(sed -n "s/^boot $n: first UART1 byte at //p" $B/fresh.err | tr -d s)
 	awk -v t="$t" 'BEGIN { exit !(t >= 3.25 && t < 3.35) }' || { echo "MACHINE FAIL: boot $n printed at ${t}s, not 0.3 s after the 3 s window"; fail=$((fail + 1)); }

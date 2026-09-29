@@ -190,8 +190,51 @@ static void reset_redrives_idle(void)
 	CHECK(ntx == before + 1 && tx_l[ntx - 1] == 1 && tx_t[ntx - 1] == now + 5);
 }
 
+static uint64_t signon_reply_at(uint64_t slice, uint64_t *last_start)
+{
+	uint64_t et[80], t0, t;
+	uint8_t el[80], f[7] = { 0x1B, 0x01, 0x00, 0x01, 0x0E, 0x01, 0x00 };
+	int i, k, n = 0, next = 0, level = 1, first;
+	start();
+	for (i = 0; i < 6; i++) f[6] ^= f[i];
+	t0 = t = now + 5000;
+	for (i = 0; i < 7; i++) {
+		*last_start = t;
+		for (k = 0; k < 10; k++) {
+			int bit = k == 0 ? 0 : k == 9 ? 1 : f[i] >> (k - 1) & 1;
+			if (bit != level) { level = bit; et[n] = t; el[n++] = (uint8_t)bit; }
+			t += HOST_BIT;
+		}
+	}
+	(void)t0;
+	first = ntx;
+	while (now < t + 40000000u) {
+		uint64_t h = boot_hold(&b, now), step = h < slice ? h : slice;
+		if (!step) step = slice;
+		while (next < n && et[next] <= now + step) { boot_rx(&b, et[next], el[next]); next++; }
+		now += step;
+		boot_advance(&b, now);
+		for (k = first; k < ntx; k++) if (tx_l[k] == 0) return tx_t[k];
+	}
+	return 0;
+}
+
+static void reply_timing_independent_of_step(void)
+{
+	static const uint64_t slices[3] = { 1000, 16000, 64000 };
+	uint64_t last, at;
+	int i;
+	for (i = 0; i < 3; i++) {
+		at = signon_reply_at(slices[i], &last);
+		CHECK(at == last + BOOT_BIT * 10u + BOOT_LATENCY);
+		if (at != last + BOOT_BIT * 10u + BOOT_LATENCY)
+			printf("  slice %llu: reply %llu cycles after the last byte's stop bit\n", (unsigned long long)slices[i], (unsigned long long)(at - last - BOOT_BIT * 10u));
+	}
+}
+
 int main(void)
 {
+	reply_timing_independent_of_step();
 	window_without_host();
 	sign_on_holds();
 	program_verify_leave();

@@ -1,4 +1,5 @@
 #include "driver.h"
+#include <ctype.h>
 #include "core.h"
 #include "cpu/pic32mx/pic32mxcpu.h"
 #include "pinheck/prop.h"
@@ -34,7 +35,7 @@ static struct {
 	const char *send;
 	uint64_t send_at, rtc_at;
 	double reset_at;
-	int have_zip, have_vol;
+	int have_zip, have_vol, idle;
 	uint32_t logged[PINHECK_LOG_MAX];
 	int nlogged;
 } locals;
@@ -106,6 +107,33 @@ static uint64_t pinheck_hold(void *ctx, uint64_t cycle)
 	return boot_hold(&boot, cycle);
 }
 
+static void pinheck_warn(const char *msg)
+{
+	fprintf(stderr, "%s\n", msg);
+	logerror("%s\n", msg);
+}
+
+static int pinheck_starts(const char *n, const char *p)
+{
+	while (*p) if (toupper((unsigned char)*n++) != *p++) return 0;
+	return 1;
+}
+
+static void pinheck_check_card(const vfat_source *s)
+{
+	char msg[160];
+	int i, dmd = 0, sfx = 0;
+	for (i = 0; i < s->count; i++) {
+		const char *n = s->name(s->ctx, i);
+		if (pinheck_starts(n, "DMD/")) dmd = 1;
+		if (pinheck_starts(n, "SFX/")) sfx = 1;
+	}
+	if (dmd && sfx) return;
+	sprintf(msg, "pinheck: the SD card from %.16s.zip has no %s%s%s; display and sound stay blank", Machine->gamedrv->name,
+	        dmd ? "" : "DMD/", !dmd && !sfx ? " and no " : "", sfx ? "" : "SFX/");
+	pinheck_warn(msg);
+}
+
 static void pinheck_open_card(void)
 {
 	char path[1024];
@@ -116,8 +144,13 @@ static void pinheck_open_card(void)
 		sprintf(path, "%.1000s/%.16s.zip", osd_get_path(FILETYPE_ROM, i), Machine->gamedrv->name);
 		if (zipsrc_open(&zip, path, PINHECK_ZIP_CACHE) == 0) locals.have_zip = 1;
 	}
-	if (!locals.have_zip) { logerror("pinheck: no %s.zip on the ROM path, no SD card\n", Machine->gamedrv->name); return; }
-	if (vfat_init(&vol, zipsrc_source(&zip)) != 0) { logerror("pinheck: cannot build the SD volume\n"); return; }
+	if (!locals.have_zip) {
+		sprintf(path, "pinheck: no %.16s.zip on the ROM path, the SD card is empty", Machine->gamedrv->name);
+		pinheck_warn(path);
+		return;
+	}
+	pinheck_check_card(zipsrc_source(&zip));
+	if (vfat_init(&vol, zipsrc_source(&zip)) != 0) { pinheck_warn("pinheck: cannot build the SD volume"); return; }
 	locals.have_vol = 1;
 	dev.ctx = NULL;
 	dev.sectors = vfat_sectors(&vol);
@@ -148,6 +181,7 @@ static void pinheck_tick(int param)
 {
 	pic32mx *soc = pic32cpu_soc();
 	(void)param;
+	if (locals.idle) return;
 	prop_catch_up(&prop, soc->cpu.cycles);
 	if (locals.reset_at > 0.0 && timer_get_time() >= locals.reset_at) {
 		locals.reset_at = 0.0;
@@ -173,6 +207,11 @@ static INTERRUPT_GEN(pinheck_vblank)
 	core_updateSw(0);
 }
 
+static int pinheck_system_only(void)
+{
+	return !memory_region(PINHECK_CPUREGION) || !memory_region(PINHECK_PROPREGION);
+}
+
 static MACHINE_INIT(pinheck)
 {
 	pic32mx_board board = { NULL, pinheck_port_write, pinheck_port_read, pinheck_uart_tx, pinheck_i2c_pins, pinheck_unmapped, pinheck_exception, pinheck_hold };
@@ -185,6 +224,12 @@ static MACHINE_INIT(pinheck)
 	if (plog && (locals.proplog = fopen(plog, opened ? "a" : "w")) != NULL) setvbuf(locals.proplog, NULL, _IONBF, 0);
 	opened = 1;
 	locals.reset_at = !reset_done && getenv("PINHECK_RESET_AT") ? atof(getenv("PINHECK_RESET_AT")) : 0.0;
+	if (pinheck_system_only()) {
+		locals.idle = 1;
+		fprintf(stderr, "pinheck: '%s' is the pinHeck system set, not a game; run a game such as dominos\n", Machine->gamedrv->name);
+		logerror("pinheck: '%s' is the pinHeck system set, not a game\n", Machine->gamedrv->name);
+		return;
+	}
 	memcpy(propmem, memory_region(PINHECK_PROPREGION), 0x8000);
 	prop_init(&prop, memory_region(PINHECK_BIOSREGION), propmem);
 	prop_set_log(&prop, pinheck_prop_log, NULL);
@@ -198,6 +243,7 @@ static MACHINE_INIT(pinheck)
 static MACHINE_RESET(pinheck)
 {
 	const char *at = getenv("PINHECK_UART1_SEND_AT");
+	if (locals.idle) return;
 	prop_reset(&prop, 0);
 	boot_reset(&boot, 0);
 	cat24m01_init(&u13, u13mem, 0);
@@ -210,6 +256,7 @@ static MACHINE_RESET(pinheck)
 static NVRAM_HANDLER(pinheck)
 {
 	const int first = !read_or_write && !file;
+	if (locals.idle) return;
 	core_nvram(file, read_or_write, u13mem, sizeof(u13mem), 0xFF);
 	core_nvram(file, read_or_write, propmem + 0x8000, sizeof(propmem) - 0x8000, 0xFF);
 	if (first && getenv("PINHECK_INSERVICE")) pinheck_in_service(propmem, core_gameData->hw.gameSpecific1);

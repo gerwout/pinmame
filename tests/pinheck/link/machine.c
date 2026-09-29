@@ -170,6 +170,7 @@ int main(int argc, char **argv)
 		}
 		printf("\n");
 		if (verbose) fprintf(stderr, "boot %d: first UART1 byte at %.3fs\n", b, first_tx ? (double)(first_tx - boot_at) / 80e6 : -1.0);
+		if (verbose && boot.app_at) fprintf(stderr, "boot %d: bootloader released the application at %.3fs\n", b, (double)(boot.app_at - boot_at) / 80e6);
 	}
 	fflush(stdout);
 	if (verbose) {

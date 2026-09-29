@@ -1,4 +1,5 @@
 #include "zipsrc.h"
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zlib.h>
@@ -84,6 +85,31 @@ static int zs_read(void *ctx, int i, uint32_t off, uint8_t *buf, uint32_t len)
 	return 0;
 }
 
+static int is_media_dir(const char *n, size_t len)
+{
+	return len == 3 && ((toupper((unsigned char)n[0]) == 'D' && toupper((unsigned char)n[1]) == 'M' && toupper((unsigned char)n[2]) == 'D') ||
+	                    (toupper((unsigned char)n[0]) == 'S' && toupper((unsigned char)n[1]) == 'F' && toupper((unsigned char)n[2]) == 'X'));
+}
+
+/* a zip made from a folder keeps everything under one top-level folder; present its contents at the root */
+static void strip_common_folder(zipsrc *z)
+{
+	const char *slash;
+	size_t len;
+	int i, k;
+	if (z->count < 1 || (slash = strchr(z->e[0].name, '/')) == NULL) return;
+	len = (size_t)(slash - z->e[0].name) + 1;
+	if (is_media_dir(z->e[0].name, len - 1)) return;
+	for (i = 0; i < z->count; i++)
+		if (strncmp(z->e[i].name, z->e[0].name, len)) return;
+	for (i = 0, k = 0; i < z->count; i++) {
+		memmove(z->e[i].name, z->e[i].name + len, strlen(z->e[i].name + len) + 1);
+		if (!z->e[i].name[0]) { free(z->e[i].name); continue; }
+		z->e[k++] = z->e[i];
+	}
+	z->count = k;
+}
+
 int zipsrc_open(zipsrc *z, const char *zip_path, uint32_t cache_bytes)
 {
 	uint8_t tail[65557], *p, *cd = NULL;
@@ -132,6 +158,7 @@ int zipsrc_open(zipsrc *z, const char *zip_path, uint32_t cache_bytes)
 		k++;
 	}
 	z->count = k;
+	strip_common_folder(z);
 	free(cd);
 	z->src.ctx = z;
 	z->src.count = z->count;
