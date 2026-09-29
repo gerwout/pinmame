@@ -70,7 +70,7 @@ static void pins_out(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 	(void)ctx;
 	eebits = 0x10000000u | (uint32_t)cat24m01_update(&ee, scl, sda) << 29;
 	sdbit = (uint32_t)sd_update(&sd, (dir >> 3 & 1) ? (int)(out >> 3 & 1) : 1, (dir >> 1 & 1) ? (int)(out >> 1 & 1) : 0, (dir >> 2 & 1) ? (int)(out >> 2 & 1) : 1);
-	display_pins(&disp, t, out, dir);
+	pinheck_display_pins(&disp, t, out, dir);
 }
 
 static int sd_read(void *ctx, uint32_t lba, uint8_t *buf) { (void)ctx; return vfat_read(&vf, lba, buf); }
@@ -114,7 +114,7 @@ int main(int argc, char **argv)
 	dev.sectors = vfat_sectors(&vf);
 	dev.read = sd_read;
 	sd_init(&sd, &dev);
-	display_init(&disp, NULL, on_frame, on_config, on_log);
+	pinheck_display_init(&disp, NULL, on_frame, on_config, on_log);
 	for (t = 4095; t < cycles; t += 4096) p8x32a_run_until(&chip, t);
 	if (frames) {
 		for (y = 0; y < DISPLAY_H; y++) {

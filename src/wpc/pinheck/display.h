@@ -33,8 +33,8 @@ typedef struct display {
 	int logged_bits, logged_frame, logged_mixed, logged_cfg;
 } display;
 
-void display_init(display *d, void *ctx, display_frame_fn on_frame, display_config_fn on_config, display_log_fn log);
-void display_pins(display *d, uint64_t t, uint32_t out, uint32_t dir);
+void pinheck_display_init(display *d, void *ctx, display_frame_fn on_frame, display_config_fn on_config, display_log_fn log);
+void pinheck_display_pins(display *d, uint64_t t, uint32_t out, uint32_t dir);
 
 #ifdef __cplusplus
 }

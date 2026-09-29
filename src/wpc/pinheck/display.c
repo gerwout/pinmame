@@ -38,7 +38,7 @@ static void latch(display *d, uint64_t t, int cfg)
 	d->nbits = 0;
 }
 
-void display_init(display *d, void *ctx, display_frame_fn on_frame, display_config_fn on_config, display_log_fn log)
+void pinheck_display_init(display *d, void *ctx, display_frame_fn on_frame, display_config_fn on_config, display_log_fn log)
 {
 	memset(d, 0, sizeof(*d));
 	d->ctx = ctx;
@@ -47,7 +47,7 @@ void display_init(display *d, void *ctx, display_frame_fn on_frame, display_conf
 	d->log = log;
 }
 
-void display_pins(display *d, uint64_t t, uint32_t out, uint32_t dir)
+void pinheck_display_pins(display *d, uint64_t t, uint32_t out, uint32_t dir)
 {
 	uint32_t now = out & dir & PINS, old = d->level;
 

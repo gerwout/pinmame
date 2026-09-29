@@ -243,7 +243,7 @@ static void pinheck_disp_config(void *ctx, const uint8_t *bytes, int n, uint64_t
 static void pinheck_disp_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 {
 	(void)ctx;
-	display_pins(&disp, t, out, dir);
+	pinheck_display_pins(&disp, t, out, dir);
 }
 
 static void pinheck_disp_init(void)
@@ -263,7 +263,7 @@ static void pinheck_disp_init(void)
 
 static void pinheck_disp_reset(void)
 {
-	display_init(&disp, NULL, pinheck_disp_frame, pinheck_disp_config, pinheck_prop_log);
+	pinheck_display_init(&disp, NULL, pinheck_disp_frame, pinheck_disp_config, pinheck_prop_log);
 	memset(disp_shown, 0, sizeof(disp_shown));
 	disp_cfg_n = 0;
 }

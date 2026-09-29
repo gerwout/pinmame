@@ -19,7 +19,7 @@ static void on_log(void *ctx, const char *m) { (void)ctx; strncpy(last_log, m, s
 static void set(uint32_t mask, int on)
 {
 	pins = on ? pins | mask : pins & ~mask;
-	display_pins(&d, ++now, pins, 0xFFFFFFFFu);
+	pinheck_display_pins(&d, ++now, pins, 0xFFFFFFFFu);
 }
 
 static void byte(unsigned v)
@@ -47,7 +47,7 @@ static void strobe(void)
 
 static void reset(void)
 {
-	display_init(&d, NULL, on_frame, on_config, on_log);
+	pinheck_display_init(&d, NULL, on_frame, on_config, on_log);
 	pins = 0;
 	frames = configs = cfg_n = logs = 0;
 	last_log[0] = 0;
@@ -129,8 +129,8 @@ static void latch_clock_and_undriven(void)
 {
 	int i;
 	reset();
-	display_pins(&d, ++now, DISPLAY_P20 | DISPLAY_P22, 0);
-	display_pins(&d, ++now, 0, DISPLAY_P20 | DISPLAY_P21 | DISPLAY_P22);
+	pinheck_display_pins(&d, ++now, DISPLAY_P20 | DISPLAY_P22, 0);
+	pinheck_display_pins(&d, ++now, 0, DISPLAY_P20 | DISPLAY_P21 | DISPLAY_P22);
 	for (i = 0; i < DISPLAY_FRAME; i++) byte(0x66);
 	set(DISPLAY_P20, 1);
 	set(DISPLAY_P21, 1);
@@ -140,8 +140,8 @@ static void latch_clock_and_undriven(void)
 	CHECK(frames == 1 && logs == 0);
 	for (i = 0; i < DISPLAY_FRAME; i++) {
 		byte(0x77);
-		display_pins(&d, ++now, pins | DISPLAY_P21 | DISPLAY_P22, DISPLAY_P20 | DISPLAY_P17);
-		display_pins(&d, ++now, pins, 0xFFFFFFFFu);
+		pinheck_display_pins(&d, ++now, pins | DISPLAY_P21 | DISPLAY_P22, DISPLAY_P20 | DISPLAY_P17);
+		pinheck_display_pins(&d, ++now, pins, 0xFFFFFFFFu);
 	}
 	strobe();
 	CHECK(frames == 2 && last_frame[0] == 0x77 && logs == 0);
