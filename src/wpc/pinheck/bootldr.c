@@ -212,9 +212,14 @@ void boot_advance(pic32_boot *b, uint64_t now)
 
 uint64_t boot_hold(const pic32_boot *b, uint64_t now)
 {
-	uint64_t end;
+	uint64_t end, byte = now + BOOT_BIT * 9u + BOOT_BIT / 2u;
+	int k;
 	if (b->state == BOOT_APP) return 0;
+	/* never step past a byte's decode point, so replies keep their exact latency */
+	for (k = 0; k < b->nedge; k++)
+		if (!b->edge_l[k] && b->edge_t[k] >= b->scan_from) { byte = b->edge_t[k] + BOOT_BIT * 9u + BOOT_BIT / 2u; break; }
 	end = b->state == BOOT_WAIT ? b->window_end : b->app_at ? b->app_at : now + BOOT_POLL;
+	if (byte < end) end = byte;
 	if (end <= now) return 1;
 	return end - now < BOOT_POLL ? end - now : BOOT_POLL;
 }
