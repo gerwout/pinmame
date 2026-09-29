@@ -64,6 +64,7 @@ DRVLIBS += $(PINOBJ)/taito.o $(PINOBJ)/taitos.o
 DRVLIBS += $(PINOBJ)/gts1.o
 DRVLIBS += $(PINOBJ)/recel.o $(PINOBJ)/recelsnd.o
 DRVLIBS += $(PINOBJ)/pinheck.o
+DRVLIBS += $(PINOBJ)/pinheck/board.o
 DRVLIBS += $(PINOBJ)/pinheck/audio.o
 DRVLIBS += $(PINOBJ)/pinheck/display.o
 DRVLIBS += $(PINOBJ)/pinheck/sd.o $(PINOBJ)/pinheck/vfat.o $(PINOBJ)/pinheck/zipsrc.o

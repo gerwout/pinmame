@@ -31,6 +31,12 @@ static void wr(uint32_t va, uint32_t v)
 	soc.cpu.bus.write(soc.cpu.bus.ctx, va & 0x1FFFFFFFu, v, 4, &err);
 }
 
+static void wrs(uint32_t va, uint32_t v, int size)
+{
+	int err = 0;
+	soc.cpu.bus.write(soc.cpu.bus.ctx, va & 0x1FFFFFFFu, v, size, &err);
+}
+
 static void put(uint32_t off, uint32_t w)
 {
 	flash[off] = (uint8_t)w; flash[off + 1] = (uint8_t)(w >> 8); flash[off + 2] = (uint8_t)(w >> 16); flash[off + 3] = (uint8_t)(w >> 24);
@@ -64,10 +70,51 @@ static void port_set_clr_inv(void)
 static void port_input_mix(void)
 {
 	setup();
+	wr(0xBF809060u, 0xFFFF);
 	wr(0xBF886040u, 0x00F0);
 	wr(0xBF886060u, 0xFFFF);
 	rec.port_in = 0x0050;
 	CHECK(rd(0xBF886050u) == 0xFF5F);
+}
+
+static void port_b_analog(void)
+{
+	setup();
+	wr(0xBF886040u, 0xFFFF);
+	rec.port_in = 0x00FF;
+	CHECK(rd(0xBF886050u) == 0);
+	wr(0xBF809060u, 0x000F);
+	CHECK(rd(0xBF886050u) == 0x000F);
+	wr(0xBF886040u, 0x00FF);
+	wr(0xBF886060u, 0xFF00);
+	CHECK(rd(0xBF886050u) == 0xFF0F);
+}
+
+static void port_subword(void)
+{
+	setup();
+	wr(0xBF886040u, 0);
+	wr(0xBF886060u, 0xFF00);
+	wrs(0xBF886050u, 0x12, 1);
+	CHECK(rd(0xBF886060u) == 0xFF12);
+	wrs(0xBF886051u, 0x34, 1);
+	CHECK(rd(0xBF886060u) == 0x3412);
+	wrs(0xBF886052u, 0xABCD, 2);
+	CHECK(rd(0xBF886060u) == 0xABCD3412u);
+	CHECK(rec.port_last == PIC32MX_PORTB && rec.port_lat == 0xABCD3412u);
+}
+
+static void timer_subword(void)
+{
+	uint32_t t;
+	setup();
+	wr(0xBF800620u, 0xFFFF);
+	wr(0xBF800600u, 0x8000);
+	pic32mx_run(&soc, 0x1234);
+	t = rd(0xBF800610u);
+	CHECK(t > 0x100);
+	wrs(0xBF800611u, 0x56, 1);
+	CHECK(rd(0xBF800610u) == (0x5600u | (t & 0xFFu)));
 }
 
 static void timer_period(void)
@@ -188,6 +235,26 @@ static void i2c_timing_nack(void)
 	CHECK(!(rd(0xBF805310u) & (1u << 14)));
 }
 
+static void i2c_collision(void)
+{
+	setup();
+	wr(0xBF805340u, 10);
+	wr(0xBF805300u, 0x8000);
+	wr(0xBF805308u, 1u);
+	wr(0xBF805308u, 4u);
+	CHECK((rd(0xBF805300u) & 0x1Fu) == 1u);
+	CHECK(rd(0xBF805310u) & (1u << 7));
+	pic32mx_run(&soc, 30);
+	CHECK(!(rd(0xBF805300u) & 1u));
+	wr(0xBF805314u, 1u << 7);
+	wr(0xBF805308u, 4u);
+	wr(0xBF805350u, 0xA0);
+	CHECK(rd(0xBF805310u) & (1u << 7));
+	CHECK(!(rd(0xBF805310u) & (1u << 14)));
+	pic32mx_run(&soc, 30);
+	CHECK(!(rd(0xBF805300u) & 4u));
+}
+
 static void unmapped_sfr(void)
 {
 	setup();
@@ -224,20 +291,62 @@ static void board_hold(void)
 	CHECK(rec.exc_count > 0 && rec.exc_pc == 0x9D001000u);
 }
 
+static struct { int n, abort_at, seen[4]; uint64_t at[4]; } host;
+
+static void b_host_write(void *c, int port, uint32_t lat, uint32_t tris, uint64_t cy)
+{
+	(void)c; (void)port; (void)lat; (void)tris;
+	if (host.n < 4) { host.seen[host.n] = *soc.icount; host.at[host.n] = cy; }
+	if (++host.n == host.abort_at) *soc.icount = 0;
+}
+
+/* LATASET, LATACLR, loop: a port write every few cycles */
+static void host_setup(int *ic, int abort_at)
+{
+	setup();
+	put(0x1000, 0x3C08BF88u); put(0x1004, 0x34090001u); put(0x1008, 0xAD096028u);
+	put(0x100C, 0xAD096024u); put(0x1010, 0x1000FFFDu); put(0x1014, 0x00000000u);
+	soc.board.port_write = b_host_write;
+	soc.icount = ic;
+	memset(&host, 0, sizeof(host));
+	host.abort_at = abort_at;
+}
+
+/* The host's cycle counter is exact inside each board callback, and zeroing it there ends the run. */
+static void host_icount(void)
+{
+	int ic, ran, i;
+	host_setup(&ic, 0);
+	ic = 1000;
+	ran = pic32mx_run(&soc, 1000);
+	CHECK(host.n > 4 && ran >= 1000 && ic == 1000 - ran);
+	for (i = 0; i < 4; i++) CHECK(host.seen[i] == 1000 - (int)host.at[i]);
+	CHECK(host.seen[0] > host.seen[1] && host.seen[1] > host.seen[2]);
+	host_setup(&ic, 3);
+	ic = 5000;
+	ran = pic32mx_run(&soc, 5000);
+	CHECK(host.n == 3 && ic <= 0 && ran <= (int)host.at[2] + 4);
+}
+
 int main(void)
 {
 	port_set_clr_inv();
 	port_input_mix();
+	port_b_analog();
+	port_subword();
 	timer_period();
 	timer_prescale_pbdiv();
 	timer_t32();
+	timer_subword();
 	intc_priority();
 	core_timer_level();
 	uart_tx_rx();
 	i2c_timing_nack();
+	i2c_collision();
 	unmapped_sfr();
 	reserved_instruction();
 	board_hold();
+	host_icount();
 	printf("soc: %s\n", fails ? "FAIL" : "ok");
 	return fails != 0;
 }

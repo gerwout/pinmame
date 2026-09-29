@@ -9,6 +9,7 @@
 #include "pinheck/zipsrc.h"
 #include "pinheck/audio.h"
 #include "pinheck/display.h"
+#include "pinheck/board.h"
 #include "pinheck.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,12 +37,203 @@ static int reset_done, opened;
 static struct {
 	FILE *uart1, *proplog;
 	const char *send;
-	uint64_t send_at, rtc_at;
+	uint64_t send_at, send_gap, rtc_at;
 	double reset_at;
 	int have_zip, have_vol, idle;
 	uint32_t logged[PINHECK_LOG_MAX];
 	int nlogged;
 } locals;
+
+/* board I/O: lamps, coils, switches, GI, RGB and servos (board.c), numbered as in spec 4.5 */
+#define PINHECK_SOL_GI0 24  /* GI 0-7: solenoids 25-32 */
+#define PINHECK_SOL_GI8 40  /* GI 8-15: solenoids 37-44 through core.c's S11 layout */
+#define PINHECK_SOL_RGB 50  /* on-board RGB left R,G,B, right R,G,B: 51-56 */
+#define PINHECK_SOL_SRV 56  /* servos 0-4: 57-61 */
+#define PINHECK_SOL_EXT 61  /* external WS2801 LED 0 R,G,B: 62-64 */
+#define PINHECK_EXT_LEDS 1  /* the firmware drives one external LED */
+#define PINHECK_NSOLS   64
+#define PINHECK_LAMP_ST 64  /* start button lamp: lamp 91 */
+#define PINHECK_NLAMPS  72
+
+static pinheck_board brd;
+static FILE *brd_log;
+static int brd_opened, brd_rgb_extra;
+static UINT32 brd_sols_seen;
+static UINT16 brd_gi8_seen;
+static UINT8 brd_cust[PINHECK_NSOLS - PINHECK_SOL_RGB], brd_logged[PINHECK_NLAMPS + PINHECK_NSOLS];
+
+static uint8_t pinheck_brd_swcol(void *ctx, int col) { (void)ctx; return coreGlobals.swMatrix[col + 1]; }
+static uint16_t pinheck_brd_cab(void *ctx) { (void)ctx; return (uint16_t)(coreGlobals.swMatrix[0] | coreGlobals.swMatrix[9] << 8); }
+
+static void pinheck_brd_lamps(void *ctx, uint64_t t, uint8_t cols, uint8_t rows)
+{
+	(void)ctx;
+	core_write_pwm_output_lamp_matrix(CORE_MODOUT_LAMP0, cols, rows, 8);
+	if (brd_log) fprintf(brd_log, "%.9f L %02x %02x %llu\n", timer_get_time(), cols, rows, (unsigned long long)t);
+}
+
+static void pinheck_brd_sols(void *ctx, uint64_t t, uint32_t sols)
+{
+	int i;
+	(void)ctx;
+	for (i = 0; i < 3; i++) core_write_pwm_output_8b(CORE_MODOUT_SOL0 + 8 * i, (UINT8)(sols >> (8 * i)));
+	coreGlobals.pulsedSolState = (coreGlobals.pulsedSolState & 0xFF000000u) | sols;
+	brd_sols_seen |= sols;
+	if (brd_log) fprintf(brd_log, "%.9f S %06x %llu\n", timer_get_time(), (unsigned)sols, (unsigned long long)t);
+}
+
+static void pinheck_brd_gi(void *ctx, uint64_t t, uint16_t gi)
+{
+	(void)ctx;
+	core_write_pwm_output_8b(CORE_MODOUT_SOL0 + PINHECK_SOL_GI0, (UINT8)gi);
+	core_write_pwm_output_8b(CORE_MODOUT_SOL0 + PINHECK_SOL_GI8, (UINT8)(gi >> 8));
+	coreGlobals.pulsedSolState = (coreGlobals.pulsedSolState & 0x00FFFFFFu) | ((UINT32)(gi & 0xFF) << 24);
+	brd_sols_seen |= (UINT32)(gi & 0xFF) << 24;
+	brd_gi8_seen |= (UINT16)(gi & 0xFF00);
+	if (brd_log) fprintf(brd_log, "%.9f G %04x %llu\n", timer_get_time(), gi, (unsigned long long)t);
+}
+
+static void pinheck_brd_start(void *ctx, uint64_t t, int on)
+{
+	(void)ctx;
+	core_write_pwm_output(CORE_MODOUT_LAMP0 + PINHECK_LAMP_ST, 1, (UINT8)on);
+	if (on) coreGlobals.tmpLampMatrix[8] |= 1;
+	if (brd_log) fprintf(brd_log, "%.9f T %d %llu\n", timer_get_time(), on, (unsigned long long)t);
+}
+
+static void pinheck_brd_level(int idx, UINT8 v)
+{
+	brd_cust[idx - PINHECK_SOL_RGB] = v;
+	coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + idx].value = v / 255.0f;
+}
+
+static void pinheck_brd_rgb(void *ctx, uint64_t t, int chain, int led, uint8_t r, uint8_t g, uint8_t b)
+{
+	(void)ctx;
+	if (brd_log) fprintf(brd_log, "%.9f R %d %d %02x%02x%02x %llu\n", timer_get_time(), chain, led, r, g, b, (unsigned long long)t);
+	if ((chain == BOARD_RGB_ONBOARD && led < 2) || (chain == BOARD_RGB_EXTERNAL && led < PINHECK_EXT_LEDS)) {
+		int idx = chain == BOARD_RGB_ONBOARD ? PINHECK_SOL_RGB + 3 * led : PINHECK_SOL_EXT + 3 * led;
+		pinheck_brd_level(idx, r);
+		pinheck_brd_level(idx + 1, g);
+		pinheck_brd_level(idx + 2, b);
+	} else if (!brd_rgb_extra) {
+		brd_rgb_extra = 1;
+		logerror("pinheck: WS2801 chain %d carries LED %d, which has no output on this board\n", chain, led);
+	}
+}
+
+static void pinheck_brd_servo(void *ctx, uint64_t t, int servo, uint32_t pulse)
+{
+	double us = pulse / (PINHECK_CLOCK / 1e6), v = (us - 1000.0) / 1000.0;
+	(void)ctx;
+	if (brd_log) fprintf(brd_log, "%.9f V %d %.1f %llu\n", timer_get_time(), servo, us, (unsigned long long)t);
+	if (!pulse) return; /* no pulses: the servo holds its position */
+	if (v < 0.0) v = 0.0;
+	if (v > 1.0) v = 1.0;
+	pinheck_brd_level(PINHECK_SOL_SRV + servo, (UINT8)(v * 255.0 + 0.5));
+}
+
+/* switch n (0-63) is PinMAME (n/8+1)*10 + n%8+1, lamps likewise; cabinet inputs are columns 0 and 9 */
+static int pinheck_sw2m(int no) { return (no / 10) * 8 + no % 10 - 1; }
+static int pinheck_m2sw(int col, int row) { return col * 10 + row + 1; }
+
+int pinheck_getsol(int solNo)
+{
+	return solNo > PINHECK_SOL_RGB && solNo <= PINHECK_NSOLS ? brd_cust[solNo - 1 - PINHECK_SOL_RGB] : 0;
+}
+
+/* test log: PinMAME-numbered lamps and solenoids whose 0-255 level changed since the last frame */
+static void pinheck_brd_log_outputs(void)
+{
+	float sol[CORE_MODOUT_SOL_MAX];
+	char line[2048];
+	int i, n = 0;
+	core_update_pwm_lamps();
+	core_update_pwm_solenoids();
+	core_getAllPhysicSols(sol);
+	for (i = 0; i < PINHECK_NLAMPS + PINHECK_NSOLS; i++) {
+		float f = i < PINHECK_NLAMPS ? coreGlobals.physicOutputState[CORE_MODOUT_LAMP0 + i].value : sol[i - PINHECK_NLAMPS];
+		UINT8 v = f <= 0.0f ? 0 : f >= 1.0f ? 255 : (UINT8)(f * 255.0f + 0.5f);
+		if (v == brd_logged[i]) continue;
+		brd_logged[i] = v;
+		if (i < PINHECK_NLAMPS) n += sprintf(line + n, " L%d=%d", coreData->m2lamp(i / 8 + 1, i % 8), v);
+		else n += sprintf(line + n, " S%d=%d", i - PINHECK_NLAMPS + 1, v);
+	}
+	if (n) fprintf(brd_log, "%.9f P%s\n", timer_get_time(), line);
+}
+
+static void pinheck_brd_init(void)
+{
+	const char *path = getenv("PINHECK_OUT_LOG");
+	if (brd_log) fclose(brd_log);
+	brd_log = path ? fopen(path, brd_opened ? "a" : "w") : NULL;
+	brd_opened = 1;
+	options.usemodsol |= CORE_MODOUT_FORCE_ON;
+	coreGlobals.nLamps = PINHECK_NLAMPS;
+	coreGlobals.nSolenoids = PINHECK_NSOLS;
+	coreGlobals.nGI = 0;
+	/* a lamp is lit at most 2 of every 24 lamp-timer periods: 12x brings full strobe to 1.0 */
+	core_set_pwm_output_led_vfd(CORE_MODOUT_LAMP0, 64, 0, 12.0f);
+	core_set_pwm_output_type(CORE_MODOUT_LAMP0 + PINHECK_LAMP_ST, PINHECK_NLAMPS - 64, CORE_MODOUT_LED);
+	core_set_pwm_output_type(CORE_MODOUT_SOL0, BOARD_SOLS, CORE_MODOUT_SOL_2_STATE);
+	core_set_pwm_output_type(CORE_MODOUT_SOL0 + PINHECK_SOL_GI0, 8, CORE_MODOUT_LED);
+	core_set_pwm_output_type(CORE_MODOUT_SOL0 + PINHECK_SOL_GI8, 8, CORE_MODOUT_LED);
+	core_set_pwm_output_type(CORE_MODOUT_SOL0 + PINHECK_SOL_RGB, PINHECK_NSOLS - PINHECK_SOL_RGB, CORE_MODOUT_NONE);
+}
+
+/* PIC32 reset: every pin is an input again, so every output is off */
+static void pinheck_brd_reset(void)
+{
+	pinheck_board_io io = { NULL, pinheck_brd_swcol, pinheck_brd_cab, pinheck_brd_lamps, pinheck_brd_sols,
+	                        pinheck_brd_gi, pinheck_brd_start, pinheck_brd_rgb, pinheck_brd_servo };
+	int i;
+	pinheck_board_init(&brd, &io, PINHECK_CLOCK);
+	core_write_pwm_output_lamp_matrix(CORE_MODOUT_LAMP0, 0, 0, 8);
+	core_write_pwm_output(CORE_MODOUT_LAMP0 + PINHECK_LAMP_ST, 1, 0);
+	for (i = 0; i < 3; i++) core_write_pwm_output_8b(CORE_MODOUT_SOL0 + 8 * i, 0);
+	core_write_pwm_output_8b(CORE_MODOUT_SOL0 + PINHECK_SOL_GI0, 0);
+	core_write_pwm_output_8b(CORE_MODOUT_SOL0 + PINHECK_SOL_GI8, 0);
+	for (i = PINHECK_SOL_RGB; i < PINHECK_NSOLS; i++) pinheck_brd_level(i, 0);
+	coreGlobals.pulsedSolState = 0;
+	brd_rgb_extra = 0;
+	brd_sols_seen = 0;
+	brd_gi8_seen = 0;
+	coreGlobals.swMatrix[0] |= 1;
+}
+
+static void pinheck_brd_vblank(void)
+{
+	pinheck_board_tick(&brd, pic32cpu_soc()->cpu.cycles);
+	memcpy((void *)coreGlobals.lampMatrix, (void *)coreGlobals.tmpLampMatrix, 9);
+	memset((void *)coreGlobals.tmpLampMatrix, 0, 9);
+	coreGlobals.solenoids = brd_sols_seen | coreGlobals.pulsedSolState;
+	coreGlobals.solenoids2 = (coreGlobals.solenoids2 & ~0xFF00u) | brd_gi8_seen | (brd.gi & 0xFF00u);
+	brd_sols_seen = 0;
+	brd_gi8_seen = 0;
+	if (brd_log) pinheck_brd_log_outputs();
+}
+
+static void pinheck_brd_stop(void)
+{
+	if (brd_log) fclose(brd_log);
+	brd_log = NULL;
+}
+
+/* cabinet inputs: firmware cabinet switch n = PinMAME switch n (1-8), n+82 (9-15) */
+static SWITCH_UPDATE(pinheck)
+{
+	UINT8 c0;
+	if (!inports) return;
+	c0 = coreGlobals.swMatrix[0] & 0x0Cu;
+	if (!(inports[CORE_COREINPORT] & 0x0008)) c0 |= 0x01;
+	if (inports[CORE_COREINPORT] & 0x0040) c0 |= 0x02;
+	if (inports[CORE_COREINPORT] & 0x0010) c0 |= 0x10;
+	if (inports[CORE_COREINPORT] & 0x0020) c0 |= 0x20;
+	if (inports[CORE_COREINPORT] & 0x0002) c0 |= 0x40;
+	if (inports[CORE_COREINPORT] & 0x0001) c0 |= 0x80;
+	coreGlobals.swMatrix[0] = c0;
+	coreGlobals.swMatrix[9] = (coreGlobals.swMatrix[9] & ~0x08u) | (inports[CORE_COREINPORT] & 0x0004 ? 0x08u : 0);
+}
 
 static void pinheck_uart_tx(void *ctx, int uart, uint8_t byte, uint64_t cycle)
 {
@@ -55,13 +247,15 @@ static void pinheck_port_write(void *ctx, int port, uint32_t lat, uint32_t tris,
 	(void)ctx;
 	if (port == PIC32MX_PORTF)
 		prop_pic_pins(&prop, cycle, (drv & RF12 ? 1u << 25 : 0) | (drv & RF5 ? 1u << 26 : 0));
+	pinheck_board_port(&brd, port, lat, tris, cycle);
 }
 
 static uint32_t pinheck_port_read(void *ctx, int port, uint64_t cycle)
 {
+	uint32_t v = pinheck_board_read(&brd, port, cycle);
 	(void)ctx;
-	if (port != PIC32MX_PORTF) return 0xFFFFu;
-	return (0xFFFFu & ~RF13) | (prop_p24(&prop, cycle) ? RF13 : 0);
+	if (port != PIC32MX_PORTF) return v;
+	return (v & ~RF13) | (prop_p24(&prop, cycle) ? RF13 : 0);
 }
 
 static int pinheck_i2c_pins(void *ctx, int module, int scl, int sda, uint64_t cycle)
@@ -193,7 +387,7 @@ static void pinheck_tick(int param)
 		return;
 	}
 	if (locals.send && *locals.send == '~' && soc->cpu.cycles >= locals.send_at) {
-		locals.send_at = soc->cpu.cycles + PINHECK_CLOCK;
+		locals.send_at += locals.send_gap;
 		locals.send++;
 	}
 	if (locals.send && *locals.send && soc->cpu.cycles >= locals.send_at) {
@@ -293,6 +487,7 @@ static INTERRUPT_GEN(pinheck_vblank)
 {
 	/* the system set refuses to run: leave its on-screen message up, then stop with an error */
 	if (locals.idle && timer_get_time() >= PINHECK_REFUSE_SECS) mame_schedule_error_exit();
+	if (!locals.idle) pinheck_brd_vblank();
 	core_updateSw(0);
 }
 
@@ -425,6 +620,7 @@ static MACHINE_INIT(pinheck)
 	boot_set_log(&boot, pinheck_prop_log, NULL);
 	pinheck_open_card();
 	pinheck_disp_init();
+	pinheck_brd_init();
 	pic32cpu_set_board(&board);
 }
 
@@ -440,6 +636,9 @@ static MACHINE_RESET(pinheck)
 	locals.rtc_at = 0;
 	locals.send = getenv("PINHECK_UART1_SEND");
 	locals.send_at = (uint64_t)((at ? atof(at) : 0.0) * PINHECK_CLOCK);
+	at = getenv("PINHECK_UART1_SEND_GAP");
+	locals.send_gap = (uint64_t)((at ? atof(at) : 1.0) * PINHECK_CLOCK);
+	pinheck_brd_reset();
 }
 
 static NVRAM_HANDLER(pinheck)
@@ -460,6 +659,7 @@ static MACHINE_STOP(pinheck)
 	if (locals.have_zip) zipsrc_close(&zip);
 	locals.have_vol = locals.have_zip = 0;
 	pinheck_disp_stop();
+	pinheck_brd_stop();
 }
 
 static MEMORY_READ32_START(pinheck_readmem)
@@ -478,6 +678,9 @@ MACHINE_DRIVER_START(PINHECK)
 	MDRV_CPU_VBLANK_INT(pinheck_vblank, 1)
 	MDRV_TIMER_ADD(pinheck_tick, 1000)
 	MDRV_NVRAM_HANDLER(pinheck)
+	MDRV_SWITCH_UPDATE(pinheck)
+	MDRV_SWITCH_CONV(pinheck_sw2m, pinheck_m2sw)
+	MDRV_LAMP_CONV(pinheck_sw2m, pinheck_m2sw)
 	MDRV_SOUND_ADD(CUSTOM, pinheck_sndInt)
 	MDRV_SOUND_ATTRIBUTES(SOUND_SUPPORTS_STEREO)
 	MDRV_VIDEO_ATTRIBUTES(VIDEO_TYPE_RASTER | VIDEO_RGB_DIRECT)

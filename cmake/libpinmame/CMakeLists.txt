@@ -576,6 +576,8 @@ set(PINMAME_SOURCES
    src/wpc/pinheck.c
    src/wpc/pinheck.h
    src/wpc/pinheckgames.c
+   src/wpc/pinheck/board.c
+   src/wpc/pinheck/board.h
    src/wpc/pinheck/audio.c
    src/wpc/pinheck/audio.h
    src/wpc/pinheck/display.c

@@ -58,6 +58,8 @@ typedef struct pic32mx {
 	uint64_t vec_count[PIC32MX_VECTORS];
 	uint64_t exc_count;
 	uint8_t logged[PIC32MX_SFR_SIZE / 16];
+	int *icount;      /* host cycle counter, kept current across board callbacks; NULL = none */
+	uint64_t run_end; /* cycle at which the current pic32mx_run ends */
 } pic32mx;
 
 void pic32mx_init(pic32mx *p, const pic32mx_board *board, const uint8_t *flash, uint32_t flash_size);

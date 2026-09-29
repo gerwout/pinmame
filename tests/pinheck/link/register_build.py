@@ -18,6 +18,8 @@ GROUPS = [
      'DRVLIBS += $(PINOBJ)/pinheck/audio.o\n'),
     (['src/wpc/pinheck/display.c', 'src/wpc/pinheck/display.h'],
      'DRVLIBS += $(PINOBJ)/pinheck/display.o\n'),
+    (['src/wpc/pinheck/board.c', 'src/wpc/pinheck/board.h'],
+     'DRVLIBS += $(PINOBJ)/pinheck/board.o\n'),
 ]
 changed = []
 

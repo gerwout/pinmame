@@ -47,6 +47,17 @@ Shift-register chains share `CAB_CLK`:
 - 2× 74HC165 (`CAB_LAT`, serial out on `CAB_SWITCH_IN`): 16 cabinet inputs. U12 carries DOOR, USER_0, R_FLIP, L_FLIP, BACK, ENTER, COIN, TILT on D0–D7 and feeds U11's SER. U11 carries AUX_0, AUX_1, AUX_2, ST_BU, AUX_3–AUX_6.
 - 2× 74HC595 (`CAB_GI_OUT` data, `!DATA_LAT` latch): 16 GI/flasher outputs `GI_0..15` to TIP102s.
 
+Verified from the board schematic and `DOM_V006.PRG` (Plan 8a):
+
+- **Pins.** `PIC_SOL_0..23` = RC2, RC3, RE5, RF3, RE6, RE7, RE8, RC14, RE9, RC4, RA2, RA0, RA1, RA4, RA5, RC13, RG1, RG0, RA6, RA7, RG14, RG12, RG13, RA9. Lamp columns RB0–RB7, rows RB8–RB15. Switch columns RD8–RD15, rows RD0–RD7. `CAB_CLK` RE0, `CAB_LAT` RG8, `CAB_SWITCH_IN` RF0, `CAB_GI_OUT` RG7, `RGB_DATA`/`RGB_CLK` RE1/RE2, `EXT_RGB_DATA`/`EXT_RGB_CLK` RG6/RC1, `SERVO_0..4` RF1, RA10, RF4, RE3, RE4, `ST_LI_GATE` RA3 (high = lit).
+- **Coil watchdog.** Each IRL530 gate is `PIC_SOL_n` AND `WATCHDOG` (74HC08s). `WATCHDOG` is a CD74HC123 one-shot triggered by a falling `PIC_ENABLE` (RG15, 10 kΩ pull-down), 0.45 × 25 kΩ × 100 µF = 1.125 s, retriggered by the firmware's main loop.
+- **Lamps.** Column high (ULN2803 to TIP107) and row high (TIP102) light a lamp. A timer-2 interrupt every 10,001 cycles (125 µs) blanks `LATB` on its second tick and drives the next column on its third, so each column is lit for 2 of every 24 ticks; a lamp at brightness *b* (0–7) is lit in *b* of every 8 frames.
+- **Switches.** A timer-3 interrupt drives one column low per interrupt (`LATD = 0xFEFF << c`, columns 0–7 in order), reads `PORTD` and stores the inverted rows: a closed switch reads low on its row while its column is low.
+- **Cabinet chain.** Per bit the firmware outputs the next GI bit, pulses `CAB_CLK`, then reads `CAB_SWITCH_IN` (low = closed); after 16 bits it pulses `CAB_LAT` low (which also latches the 74HC595s through the inverter). Because each read follows a clock, firmware cabinet switch *n* (1–15) is chain input *n* − 1 (U12 D0 = switch 1, DOOR … U11 D6 = switch 15), switch 0 reads U12's unconnected serial input (open) and U11 D7 (`AUX_6`) is never read.
+- **GI chain.** The firmware shifts its 16-bit GI word least significant bit first, so word bit *n* lands in `GI_(15−n)`: the lamp test's `PLAYFIELD GI` values 1–128 are `GI_15`–`GI_8`, `BACKBOX GI` 0–7 are `GI_7`–`GI_0`.
+- **RGB.** On-board chain: U38 (first) drives the left cabinet RGB, U36 the right; 24 bits per LED, red first, MSB first on the rising clock, latched after 500 µs low. The external chain carries exactly one LED: the only writer, called at the top of `loop()`, sends 255, 255, 255 once (open item 3).
+- **Servos.** The chipKIT Servo library (timers 4/5, 20 ms frame) pulses 544 µs for 0° and 2,400 µs for 180°. The service menu drives the Noid on servo 0 and the target bank on servo 1 (1,631 µs).
+
 Other PIC32-side devices: 2× WS2801 on `RGB_DATA`/`RGB_CLK` driving six RGB MOSFETs (left and right cabinet RGB); an external WS2801 chain on `EXT_RGB_DATA`/`EXT_RGB_CLK`; a DS1340 RTC and a CAT24M01 on `I2C_SCL`/`I2C_SDA`; UART1 (`TX_PIC32`/`RX_PIC32`) as the service console.
 
 The Propeller's pins:
@@ -173,11 +184,13 @@ Interface:
 
 - **Board logic on PIC32 GPIO and shift chains**: lamp matrix, solenoids, switch matrix reads, the 74HC165 chain on `CAB_LAT`/`CAB_CLK`, the 74HC595 chain on `CAB_CLK`/`!DATA_LAT`, WS2801 decoding, servo pulse measurement.
 - **Numbering**, following the Domino's documents (0-based there, PinMAME's 1-based numbers here):
-  - Switch `n` (0–63) = column `n/8`, row `n%8` → PinMAME switch `(n/8+1)*10 + (n%8+1)`. The 16 cabinet inputs → custom columns 0 and 9.
+  - Switch `n` (0–63) = column `n/8`, row `n%8` → PinMAME switch `(n/8+1)*10 + (n%8+1)`. The 16 cabinet inputs → custom columns 0 and 9: firmware cabinet switch `n` is PinMAME switch `n` (1–8, U12 D0–D7) or `n + 82` (9–15, U11 D0–D6); U11 D7 (`AUX_6`, never read) is 98. The driver registers this numbering as its switch and lamp conversion (PinMAME's default is sequential).
   - Lamp `n` (0–63) = column `n/8`, row `n%8` → PinMAME lamp `(n/8+1)*10 + (n%8+1)`, modulated.
-  - Coils 0–23 → solenoids 1–24. GI/flasher 0–7 → solenoids 25–32. GI/flasher 8–15 → solenoids 37–44.
+  - Coils 0–23 → solenoids 1–24. GI/flasher 0–7 → solenoids 25–32. GI/flasher 8–15 → solenoids 37–44. GI/flasher numbers are the board's `GI_0..15` (74HC595 U3 Q0 … U5 Q7); `core.c` reports 37–44 for `GEN_PINHECK` as for System 11.
+  - Start button lamp (`ST_LI_GATE`) → lamp 91.
   - Onboard RGB (left R, G, B, right R, G, B) → custom solenoids 51–56.
-  - Servos 0–4 → custom solenoids 57–61, carrying the pulse width normalised over 1.0–2.0 ms.
+  - Servos 0–4 → custom solenoids 57–61, carrying the pulse width normalised over 1.0–2.0 ms (the firmware's 0° and 180° saturate at 0 and 255). When a servo's pulses stop for 60 ms the board reports it detached and the output holds its value.
+  - External WS2801 LED 0 (red, green, blue) → custom solenoids 62–64.
   - All of these are modulated outputs.
 - **Display**: a `CORE_VIDEO` layout of 128×32 with a custom renderer converting RGB332 to host colour, fed by the display module model (`display.c`, §5.5).
 - **Sound**: one stereo stream from the audio device (§5.4).
@@ -285,7 +298,7 @@ Each is resolved by analysis of the shipped firmware before the milestone that n
 
 1. **chipKIT logical pins → PIC32 port bits** (resolved by milestone 2; checked by `tests/pinheck/pic32mx/pins.py`). Logical 16 = RF5 = COMM_OUT (PIC32→Propeller data), 15 = RF12 = COMM_CLK_RX (clock, driven by the PIC32), 14 = RF13 = COMM_IN_TX (Propeller→PIC32 data). The link is a full-duplex, bit-banged exchange of 16 bytes, LSB first, byte 15 the command; the Propeller stages its reply from the previous packet. There is no Propeller→PIC32 UART: the firmware enables only UART1.
 2. **Display signalling on P16–P22** (resolved by milestone 6; checked by `tests/pinheck/display/`). Not the video generator: a clocked serial frame link, P22 clock, P21 data, P20 latch, P17 config (§5.5).
-3. **External WS2801 chain length** (needed by milestone 8). Read it from the firmware's RGB routines. The chain is exposed as further custom solenoids after 61, three per LED.
+3. **External WS2801 chain length** (resolved by Plan 8a). One LED: `DOM_V006.PRG` writes the external chain only from `0x9D02FFEC` (three bytes), called once at the top of `loop()` with 255, 255, 255. It is custom solenoids 62–64; a longer frame is logged once.
 4. **Mask ROM image** (needed by milestone 3). Fix the exact 32 KB image the `pinheck` BIOS set declares, and its CRC, from the Parallax release. Check how the interpreter region is stored against what the booter expects.
 
 ## 10. Out of scope

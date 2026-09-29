@@ -9,7 +9,7 @@ static core_tLCDLayout pinheck_disp[] = {
 
 #define INIT_PINHECK(name, balls, version) \
 PINHECK_INPUT_PORTS_START(name, balls) PINHECK_INPUT_PORTS_END \
-static core_tGameData name##GameData = { GEN_PINHECK, pinheck_disp, {0, 0, 0, 0, SNDBRD_NONE, 0, version} }; \
+static core_tGameData name##GameData = { GEN_PINHECK, pinheck_disp, {FLIP_SWNO(PINHECK_SWLFLIP, PINHECK_SWRFLIP), 0, 1, PINHECK_CUSTSOLS, SNDBRD_NONE, 0, version, 0, pinheck_getsol} }; \
 static void init_##name(void) { core_gameData = &name##GameData; }
 
 /*-------------------------------------------------------------------
