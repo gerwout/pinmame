@@ -99,7 +99,24 @@ This comes after Milestone 6 runs in game.
 - **Deriving the encoding:** capture the config packet for each value of `PIXEL SHAPE`, `BRIGHTNESS`, `POSITION` and `BAR BRIGHT`, by stepping the emulated service menu with `-key_script`, and derive each field.
 - **Rendering:** render the look (dot shape, brightness, offset) in the `CORE_VIDEO` renderer.
 - **Tests:** unit tests for the packet decoding, and golden images per setting.
-- **Caveat:** the real display module's pixel rendering is unknown, so the shape rendering is labelled an approximation.
+- **Caveat:** the real display module's pixel rendering is unknown, so the shape rendering is labelled an approximation. At 2×2 window pixels per dot, the dot shapes, the light between dots and the scale of `POSITION` are rulings of the display-look plan, not measurements of the module.
+
+Established by the display-look plan, from `DOM_V006.PRG` and a sweep of every value in the emulated service menu (`CHANGE: MAIN SETTINGS`):
+
+- **Packet.** Seven 16-bit words, most significant byte first:
+
+| Bytes | Word | Meaning | Values |
+|---|---|---|---|
+| 0–1 | 0 | not a menu setting | 177 in the Propeller's start-up packet, 250 in every packet the PIC32 has sent |
+| 2–3 | 1 | `POSITION` | 300–500 in steps of 1, 500 wraps to 300; start-up 340 |
+| 4–5 | 2 | `PIXEL SHAPE` | 0 `ROUND`, 1 `SQUARE`, 2 `HIGHREZ`; 0 on a blank EEPROM |
+| 6–7 | 3 | `BRIGHTNESS` | 175–255 in steps of 5, 255 wraps to 175; start-up 255 |
+| 8–9 | 4 | width | 128 |
+| 10–11 | 5 | height | 32 |
+| 12–13 | 6 | `BAR BRIGHT` | 0–62 in steps of 2, 62 wraps to 0; start-up 62 |
+
+- **When it is sent.** The Propeller sends its own packet at start-up. Each Enter on one of the four items steps the value and makes the PIC32 send the seven words (little-endian, plus a flag byte: 0, or 0x80 when Back leaves the menu) as link command 0x11; the Propeller passes the words on to the module at once, without the flag. After the menu is left with Back, a restart's start-up packet carries the new `POSITION`, `PIXEL SHAPE`, `BRIGHTNESS` and `BAR BRIGHT` (the Propeller keeps them in its EEPROM), with word 0 = 177.
+- **Rendering** (`display.c`; the `sdl3pinmame` and VPinMAME window, 256×64; libpinmame gets the frame as sent). `SQUARE` fills each dot's 2×2 cell: the exact pixels of Milestone 6. `ROUND` draws each dot as the top-left pixel of its cell and lights the three gap pixels with the mean of the dots around them times `BAR BRIGHT`/124. `HIGHREZ` is Scale2x. `BRIGHTNESS` b scales every colour by b/255. `POSITION` p moves the picture down by ⌊(p − 340)/4⌋ pixels inside the window, black where it leaves. A packet of another length, or whose words 4–5 are not 128 and 32, keeps the exact look.
 
 ## 6. Release
 

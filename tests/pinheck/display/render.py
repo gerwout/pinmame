@@ -11,6 +11,7 @@ import zlib
 
 sys.dont_write_bytecode = True  # no __pycache__ next to the tests
 from frames import FRAME, read_log  # noqa: E402
+from look import parse as parse_look, render as render_look  # noqa: E402
 
 W, H = 128, 32
 SCALE = 2
@@ -59,8 +60,10 @@ def near(p, q):
     return all(abs(a - b) <= TOL for a, b in zip(p, q))
 
 
-def frame_matches(rows, f):
-    return all(near(rows[y][x], rgb332(f[(y // SCALE) * W + x // SCALE])) for y in range(H * SCALE) for x in range(W * SCALE))
+def frame_matches(rows, f, look):
+    """the frame region shows f in the module's look (look.py; the exact look draws each dot SCALE x SCALE)"""
+    img = render_look(look, f)
+    return all(near(rows[y][x], img[y][x]) for y in range(H * SCALE) for x in range(W * SCALE))
 
 
 def main():
@@ -68,7 +71,9 @@ def main():
     ap.add_argument('png')
     ap.add_argument('log')
     ap.add_argument('--last', type=int, default=8, help='the snapshot must show one of the last N logged frames')
+    ap.add_argument('--config', help='the last config packet (hex bytes) before the snapshot; none = the exact look')
     a = ap.parse_args()
+    look, _ = parse_look(bytes.fromhex(a.config) if a.config else None)
     w, h, rows = read_png(a.png)
     fail = 0
     if (w, h) != (W * SCALE, SCREEN_H):
@@ -77,7 +82,7 @@ def main():
     if w < W * SCALE or h < H * SCALE:
         sys.exit('render: FAIL, the visible area cannot hold the scaled frame')
     frames = [f for _, _, _, f in read_log(a.log)][-a.last:]
-    hit = next((k for k in range(len(frames) - 1, -1, -1) if frame_matches(rows, frames[k])), None)
+    hit = next((k for k in range(len(frames) - 1, -1, -1) if frame_matches(rows, frames[k], look)), None)
     if hit is None:
         print('render: FAIL, the frame region shows none of the last %d decoded frames' % len(frames))
         fail = 1

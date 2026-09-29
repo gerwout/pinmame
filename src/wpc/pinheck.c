@@ -403,6 +403,9 @@ static int disp_cfg_n, disp_opened;
 static FILE *disp_log;
 static UINT32 disp_rgb32[256];
 static UINT16 disp_rgb15[256];
+static display_look disp_look;
+static uint8_t disp_img[DISPLAY_LOOK_W * DISPLAY_LOOK_H * 3];
+static int disp_dirty;
 
 static void pinheck_disp_frame(void *ctx, const uint8_t *frame, uint64_t t)
 {
@@ -412,6 +415,7 @@ static void pinheck_disp_frame(void *ctx, const uint8_t *frame, uint64_t t)
 	int k;
 	(void)ctx;
 	memcpy(disp_shown, frame, DISPLAY_FRAME);
+	disp_dirty = 1;
 	if (!disp_log) return;
 	for (a = 0; a + DISPLAY_FRAME <= 0x8000; a++)
 		if (prop.chip.hub[a] == frame[0] && !memcmp(prop.chip.hub + a, frame, DISPLAY_FRAME)) { at = a; break; }
@@ -433,6 +437,8 @@ static void pinheck_disp_config(void *ctx, const uint8_t *bytes, int n, uint64_t
 	len = sprintf(msg, "display: config");
 	for (k = 0; k < n; k++) len += sprintf(msg + len, " %02x", bytes[k]);
 	pinheck_prop_log(NULL, msg);
+	if (!pinheck_display_look(&disp_look, bytes, n)) pinheck_prop_log(NULL, "display: unknown config packet, exact pixels");
+	disp_dirty = 1;
 }
 
 static void pinheck_disp_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
@@ -461,6 +467,8 @@ static void pinheck_disp_reset(void)
 	pinheck_display_init(&disp, NULL, pinheck_disp_frame, pinheck_disp_config, pinheck_prop_log);
 	memset(disp_shown, 0, sizeof(disp_shown));
 	disp_cfg_n = 0;
+	pinheck_display_look(&disp_look, NULL, 0);
+	disp_dirty = 1;
 }
 
 static void pinheck_disp_stop(void)
@@ -471,16 +479,28 @@ static void pinheck_disp_stop(void)
 
 PINMAME_VIDEO_UPDATE(pinheck_video)
 {
-	const int s = PINHECK_VIDEO_SCALE, x0 = layout->left, y0 = layout->top;
+	const int x0 = layout->left, y0 = layout->top;
 	int x, y;
 	/* the core's visible area is larger than the panel: clear it so nothing stale shows */
 	fillbitmap(bitmap, get_black_pen(), cliprect);
-	for (y = 0; y < DISPLAY_H * s && y0 + y < bitmap->height; y++)
-		for (x = 0; x < DISPLAY_W * s && x0 + x < bitmap->width; x++) {
-			const uint8_t v = disp_shown[(y / s) * DISPLAY_W + x / s];
+#if !defined(LIBPINMAME) && PINHECK_VIDEO_SCALE == 2
+	/* the module's look (dot shape, brightness, position); libpinmame hosts get the frame as sent */
+	if (disp_dirty) pinheck_display_render(&disp_look, disp_shown, disp_img);
+	disp_dirty = 0;
+	for (y = 0; y < DISPLAY_LOOK_H && y0 + y < bitmap->height; y++)
+		for (x = 0; x < DISPLAY_LOOK_W && x0 + x < bitmap->width; x++) {
+			const uint8_t *p = disp_img + (y * DISPLAY_LOOK_W + x) * 3;
+			if (bitmap->depth == 32) ((UINT32 *)bitmap->line[y0 + y])[x0 + x] = MAKE_RGB(p[0], p[1], p[2]);
+			else ((UINT16 *)bitmap->line[y0 + y])[x0 + x] = (UINT16)(((p[0] >> 3) << 10) | ((p[1] >> 3) << 5) | (p[2] >> 3));
+		}
+#else
+	for (y = 0; y < DISPLAY_H * PINHECK_VIDEO_SCALE && y0 + y < bitmap->height; y++)
+		for (x = 0; x < DISPLAY_W * PINHECK_VIDEO_SCALE && x0 + x < bitmap->width; x++) {
+			const uint8_t v = disp_shown[(y / PINHECK_VIDEO_SCALE) * DISPLAY_W + x / PINHECK_VIDEO_SCALE];
 			if (bitmap->depth == 32) ((UINT32 *)bitmap->line[y0 + y])[x0 + x] = disp_rgb32[v];
 			else ((UINT16 *)bitmap->line[y0 + y])[x0 + x] = disp_rgb15[v];
 		}
+#endif
 }
 
 static INTERRUPT_GEN(pinheck_vblank)

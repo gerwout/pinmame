@@ -147,6 +147,130 @@ static void latch_clock_and_undriven(void)
 	CHECK(frames == 2 && last_frame[0] == 0x77 && logs == 0);
 }
 
+static const uint8_t cfg_prop[14] = { 0x00, 0xb1, 0x01, 0x54, 0x00, 0x00, 0x00, 0xff, 0x00, 0x80, 0x00, 0x20, 0x00, 0x3e };
+/* guard bytes after the frame: a read past it shows as white, not as black */
+static uint8_t framebuf[DISPLAY_FRAME + 256], img[DISPLAY_LOOK_W * DISPLAY_LOOK_H * 3 + 16];
+#define frame framebuf
+
+static int is(int x, int y, int r, int g, int b)
+{
+	const uint8_t *p = img + (y * DISPLAY_LOOK_W + x) * 3;
+	if (p[0] == r && p[1] == g && p[2] == b) return 1;
+	printf("  pixel (%d,%d) = %d,%d,%d, want %d,%d,%d\n", x, y, p[0], p[1], p[2], r, g, b);
+	return 0;
+}
+
+static void draw(int shape, int brightness, int position, int bar)
+{
+	display_look lk;
+	lk.shape = shape;
+	lk.brightness = brightness;
+	lk.position = position;
+	lk.bar = bar;
+	memset(img, 0xA5, sizeof(img));
+	memset(framebuf + DISPLAY_FRAME, 0xFF, sizeof(framebuf) - DISPLAY_FRAME);
+	pinheck_display_render(&lk, frame, img);
+}
+
+static void look_decode(void)
+{
+	static const uint8_t pic[14] = { 0x00, 0xfa, 0x01, 0xf4, 0x00, 0x02, 0x00, 0xaf, 0x00, 0x80, 0x00, 0x20, 0x00, 0x00 };
+	uint8_t odd[14];
+	display_look lk;
+	CHECK(pinheck_display_look(&lk, cfg_prop, 14) == 1);
+	CHECK(lk.shape == DISPLAY_ROUND && lk.position == 340 && lk.brightness == 255 && lk.bar == 62);
+	CHECK(pinheck_display_look(&lk, pic, 14) == 1);
+	CHECK(lk.shape == DISPLAY_HIGHREZ && lk.position == 500 && lk.brightness == 175 && lk.bar == 0);
+	CHECK(pinheck_display_look(&lk, cfg_prop, 13) == 0);
+	CHECK(lk.shape == DISPLAY_SQUARE && lk.position == 340 && lk.brightness == 255 && lk.bar == 62);
+	memcpy(odd, pic, 14);
+	odd[8] = 0x01;
+	CHECK(pinheck_display_look(&lk, odd, 14) == 0 && lk.shape == DISPLAY_SQUARE && lk.brightness == 255);
+	CHECK(pinheck_display_look(&lk, NULL, 0) == 0 && lk.shape == DISPLAY_SQUARE);
+	memcpy(odd, pic, 14);
+	odd[2] = odd[3] = 0; odd[5] = 3; odd[6] = 2; odd[13] = 64;
+	CHECK(pinheck_display_look(&lk, odd, 14) == 1);
+	CHECK(lk.shape == DISPLAY_SQUARE && lk.position == 0 && lk.brightness == 255 && lk.bar == 62);
+}
+
+static void look_square(void)
+{
+	int i, x, y, ok = 1;
+	for (i = 0; i < DISPLAY_FRAME; i++) frame[i] = (uint8_t)(i * 7 + 1);
+	frame[0] = 0xFF; frame[1] = 0xE0; frame[2] = 0x1C; frame[3] = 0x03; frame[4] = 0x49;
+	draw(DISPLAY_SQUARE, 255, 340, 62);
+	CHECK(is(0, 0, 255, 255, 255) && is(1, 1, 255, 255, 255) && is(2, 0, 255, 0, 0) && is(4, 1, 0, 255, 0));
+	CHECK(is(7, 0, 0, 0, 255) && is(8, 0, 72, 72, 85) && is(9, 1, 72, 72, 85));
+	for (y = 0; y < DISPLAY_LOOK_H; y++)
+		for (x = 0; x < DISPLAY_LOOK_W; x++) {
+			const uint8_t v = frame[(y / 2) * DISPLAY_W + x / 2], *p = img + (y * DISPLAY_LOOK_W + x) * 3;
+			ok &= p[0] == ((v >> 5) & 7) * 255 / 7 && p[1] == ((v >> 2) & 7) * 255 / 7 && p[2] == (v & 3) * 255 / 3;
+		}
+	CHECK(ok);
+	CHECK(img[sizeof(img) - 16] == 0xA5);
+}
+
+static void look_round(void)
+{
+	memset(frame, 0, sizeof(frame));
+	frame[5 * DISPLAY_W + 10] = 0xFF;
+	frame[DISPLAY_FRAME - 1] = 0xE0;
+	draw(DISPLAY_ROUND, 255, 340, 62);
+	CHECK(is(20, 10, 255, 255, 255) && is(21, 10, 63, 63, 63) && is(20, 11, 63, 63, 63) && is(21, 11, 31, 31, 31));
+	CHECK(is(19, 10, 63, 63, 63) && is(19, 9, 31, 31, 31) && is(22, 10, 0, 0, 0) && is(18, 10, 0, 0, 0));
+	CHECK(is(254, 62, 255, 0, 0) && is(255, 62, 63, 0, 0) && is(254, 63, 63, 0, 0) && is(255, 63, 31, 0, 0));
+	draw(DISPLAY_ROUND, 255, 340, 0);
+	CHECK(is(20, 10, 255, 255, 255) && is(21, 10, 0, 0, 0) && is(21, 11, 0, 0, 0) && is(19, 9, 0, 0, 0));
+	CHECK(img[sizeof(img) - 16] == 0xA5);
+}
+
+static void look_highrez(void)
+{
+	memset(frame, 0, sizeof(frame));
+	frame[1] = 0xFF;
+	frame[DISPLAY_W] = 0xFF;
+	draw(DISPLAY_HIGHREZ, 255, 340, 62);
+	CHECK(is(0, 0, 0, 0, 0) && is(1, 0, 0, 0, 0) && is(0, 1, 0, 0, 0) && is(1, 1, 255, 255, 255));
+	CHECK(is(2, 0, 255, 255, 255) && is(3, 1, 255, 255, 255) && is(0, 2, 255, 255, 255) && is(1, 3, 255, 255, 255));
+	CHECK(is(2, 2, 255, 255, 255) && is(3, 2, 0, 0, 0) && is(2, 3, 0, 0, 0) && is(3, 3, 0, 0, 0));
+	memset(frame, 0x49, sizeof(frame));
+	draw(DISPLAY_HIGHREZ, 255, 340, 62);
+	CHECK(is(0, 0, 72, 72, 85) && is(255, 63, 72, 72, 85) && is(101, 30, 72, 72, 85));
+}
+
+static void look_brightness(void)
+{
+	memset(frame, 0, sizeof(frame));
+	frame[0] = 0xFF;
+	frame[1] = 0x49;
+	draw(DISPLAY_SQUARE, 175, 340, 62);
+	CHECK(is(0, 0, 175, 175, 175) && is(1, 1, 175, 175, 175) && is(2, 0, 49, 49, 58));
+	draw(DISPLAY_ROUND, 175, 340, 62);
+	CHECK(is(0, 0, 175, 175, 175) && is(1, 0, 55, 55, 58));
+}
+
+static void look_position(void)
+{
+	int x, ok = 1;
+	memset(frame, 0, sizeof(frame));
+	memset(frame, 0xFF, DISPLAY_W);
+	draw(DISPLAY_SQUARE, 255, 344, 62);
+	CHECK(is(0, 0, 0, 0, 0) && is(0, 1, 255, 255, 255) && is(255, 2, 255, 255, 255) && is(0, 3, 0, 0, 0));
+	draw(DISPLAY_SQUARE, 255, 343, 62);
+	CHECK(is(0, 0, 255, 255, 255) && is(0, 1, 255, 255, 255) && is(0, 2, 0, 0, 0));
+	draw(DISPLAY_SQUARE, 255, 339, 62);
+	CHECK(is(0, 0, 255, 255, 255) && is(0, 1, 0, 0, 0) && is(0, 63, 0, 0, 0));
+	draw(DISPLAY_SQUARE, 255, 500, 62);
+	CHECK(is(0, 39, 0, 0, 0) && is(0, 40, 255, 255, 255) && is(0, 41, 255, 255, 255) && is(0, 42, 0, 0, 0));
+	CHECK(img[sizeof(img) - 16] == 0xA5);
+	draw(DISPLAY_SQUARE, 255, 300, 62);
+	for (x = 0; x < DISPLAY_LOOK_W * DISPLAY_LOOK_H * 3; x++) ok &= img[x] == 0;
+	CHECK(ok);
+	draw(DISPLAY_SQUARE, 255, 65535, 62);
+	for (x = 0; x < DISPLAY_LOOK_W * DISPLAY_LOOK_H * 3; x++) ok &= img[x] == 0;
+	CHECK(ok && img[sizeof(img) - 16] == 0xA5);
+}
+
 int main(void)
 {
 	frame_and_bit_order();
@@ -154,6 +278,12 @@ int main(void)
 	short_and_long_frames();
 	partial_byte_and_mode_change();
 	latch_clock_and_undriven();
+	look_decode();
+	look_square();
+	look_round();
+	look_highrez();
+	look_brightness();
+	look_position();
 	printf("display: %s\n", fails ? "FAIL" : "ok");
 	return fails != 0;
 }
