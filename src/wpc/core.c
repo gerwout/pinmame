@@ -2249,7 +2249,7 @@ int core_getSol(int solNo) {
   if (solNo <= 28)
     return coreGlobals.nSolenoids && (options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_SOLENOIDS | CORE_MODOUT_ENABLE_MODSOL | CORE_MODOUT_FORCE_ON)) ? saturatedByte(coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + solNo - 1].value) : coreGlobals.solenoids & CORE_SOLBIT(solNo);
   else if (solNo <= 32) { // 29-32
-    if (core_gameData->gen & GEN_ALLS11)
+    if (core_gameData->gen & (GEN_ALLS11 | GEN_PINHECK))
       return coreGlobals.nSolenoids && (options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_SOLENOIDS | CORE_MODOUT_ENABLE_MODSOL | CORE_MODOUT_FORCE_ON)) ? saturatedByte(coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + solNo - 1].value) : coreGlobals.solenoids & CORE_SOLBIT(solNo);
     else if (core_gameData->gen & GEN_ALLWPC) // Remap WPC GameOn/J111 GPIO (hacky)
       return coreGlobals.solenoids2 & (1<<(solNo-29+8));
@@ -2278,7 +2278,7 @@ int core_getSol(int solNo) {
       else
         return coreGlobals.solenoids & (1<<((solNo - 13)|4));
     }
-    if (core_gameData->gen & GEN_ALLS11)
+    if (core_gameData->gen & (GEN_ALLS11 | GEN_PINHECK))
       return coreGlobals.nSolenoids && (options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_SOLENOIDS | CORE_MODOUT_ENABLE_MODSOL | CORE_MODOUT_FORCE_ON)) ? saturatedByte(coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + 32 + solNo - 37 + 8].value) : coreGlobals.solenoids2 & (1<<(solNo - 37 + 8));
   }
   else if (solNo <= 48) { // 45-48 Lower flippers
@@ -2334,7 +2334,7 @@ UINT64 core_getAllSol(void) {
      sol |= (((UINT64)(coreGlobals.solenoids2 & 0x10)) << 28);
   else if (core_gameData->gen & GEN_ALLWS) // 33..36 various aux board outputs
      sol |= ((UINT64)(coreGlobals.solenoids2 & 0x00f0)) << 28;
-  if (core_gameData->gen & (GEN_ALLS11 | GEN_SAM | GEN_SPA)) // 37-44 S11, SAM extra
+  if (core_gameData->gen & (GEN_ALLS11 | GEN_SAM | GEN_SPA | GEN_PINHECK)) // 37-44 S11, SAM extra, pinHeck GI 8-15
      sol |= ((UINT64)(coreGlobals.solenoids2 & 0xff00)) << 28;
   { // 45-48 flipper solenoids (hold coil is set if either coil is set)
     UINT8 lFlip = (coreGlobals.solenoids2 & (CORE_LRFLIPSOLBITS|CORE_LLFLIPSOLBITS));
@@ -2393,7 +2393,7 @@ void core_getAllPhysicSols(float* const state)
       state[i    ] = coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + i].value;
       state[i + 4] = coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + i].value;
     }
-  else if (core_gameData->gen & (GEN_ALLS11 | GEN_SAM | GEN_SPA)) // 37-44 S11, SAM extra
+  else if (core_gameData->gen & (GEN_ALLS11 | GEN_SAM | GEN_SPA | GEN_PINHECK)) // 37-44 S11, SAM extra, pinHeck GI 8-15
     for (int i = 40; i < 48; i++)
       state[i - 4] = coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + i].value;
   /*-- 45..48 lower flipper solenoids --*/
