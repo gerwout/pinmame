@@ -44,11 +44,13 @@ rtl_case() {
 	compile "$1" "$o" || { fail=$((fail + 1)); return; }
 	python3 mkrom.py "$o.binary" "$o.rom" "$o.ram"
 	$P1RTL -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args -dump "$o.rtlhub" > "$o.rtl"
-	./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args $3 -dump "$o.ourhub" > "$o.our" 2> "$o.log"
+	sleeps=$(sed -n "s/^' EXPECT-SLEEPS: //p" "$1")
+	./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args $3 ${sleeps:+-sleeps} -dump "$o.ourhub" > "$o.our" 2> "$o.log"
 	if cmp -s "$o.rtl" "$o.our" && cmp -s "$o.rtlhub" "$o.ourhub"; then pass=$((pass + 1))
 	else echo "RTL MISMATCH $1"; diff "$o.rtl" "$o.our" | head -6; fail=$((fail + 1)); fi
 	exp=$(sed -n "s/^' EXPECT-LOG: //p" "$1")
 	if [ -n "$exp" ] && ! grep -qF "$exp" "$o.log"; then echo "LOG MISSING $1: $exp"; fail=$((fail + 1)); fi
+	if [ -n "$sleeps" ] && ! grep -qxF "p8run: $sleeps idle-loop sleeps" "$o.log"; then echo "SLEEPS $1: $(grep -F idle-loop "$o.log"), expected $sleeps"; fail=$((fail + 1)); fi
 }
 
 spin_case() {

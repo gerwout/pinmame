@@ -11,7 +11,7 @@
 static p8x32a chip;
 static cat24m01 ee;
 static uint8_t eemem[0x20000];
-static int have_ee, have_sd, notrace;
+static int have_ee, have_sd, notrace, sleeps;
 static sd_card sd;
 static vfat vf;
 static zipsrc zs;
@@ -201,7 +201,7 @@ static uint64_t halted(void)
 
 int main(int argc, char **argv)
 {
-	p8x32a_bus bus = { NULL, pins_in, pins_next, pins_out, cog_start, clkset, logmsg, ctr_state };
+	p8x32a_bus bus = { NULL, pins_in, pins_next, pins_out, cog_start, clkset, logmsg, ctr_state, ~0x30000001u };
 	const char *rom = NULL, *ram = NULL, *eep = NULL, *dump = NULL;
 	unsigned long long limit = 1000000, t, end, quantum = 4096;
 	int halt = 0, i;
@@ -217,6 +217,7 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "-stop") && i + 2 < argc) { stop_cog = atoi(argv[i + 1]); stop_ptr = (uint32_t)strtoul(argv[i + 2], NULL, 16); i += 2; }
 		else if (!strcmp(argv[i], "-halt")) halt = 1;
 		else if (!strcmp(argv[i], "-notrace")) notrace = 1;
+		else if (!strcmp(argv[i], "-sleeps")) sleeps = 1;
 		else if (!strcmp(argv[i], "-ctrlog") && i + 1 < argc) { if (!(ctrlog = fopen(argv[++i], "w"))) { perror(argv[i]); return 2; } }
 		else if (!strcmp(argv[i], "-uart") && i + 2 < argc) {
 			uint64_t t0 = strtoull(argv[i + 1], NULL, 0);
@@ -244,7 +245,7 @@ int main(int argc, char **argv)
 		}
 		else if (!strcmp(argv[i], "-quantum") && i + 1 < argc) quantum = strtoull(argv[++i], NULL, 0);
 		else if (!strcmp(argv[i], "-extat") && i + 2 < argc && nat < 8192) { at_t[nat] = strtoull(argv[i + 1], NULL, 0); at_v[nat++] = (uint32_t)strtoul(argv[i + 2], NULL, 16); i += 2; }
-		else { fprintf(stderr, "usage: p8run -rom f [-ram f] [-eeprom f] [-ext hex] [-cycles n] [-stop cog ptrhex] [-halt] [-quantum n] [-sd romset.zip] [-notrace] [-ctrlog f] [-uart cycle hexbytes] [-extat cycle hex]... [-dump f]\n"); return 2; }
+		else { fprintf(stderr, "usage: p8run -rom f [-ram f] [-eeprom f] [-ext hex] [-cycles n] [-stop cog ptrhex] [-halt] [-quantum n] [-sd romset.zip] [-notrace] [-sleeps] [-ctrlog f] [-uart cycle hexbytes] [-extat cycle hex]... [-dump f]\n"); return 2; }
 	}
 	if (!rom) { fprintf(stderr, "p8run: -rom is required\n"); return 2; }
 	p8x32a_init(&chip, &bus);
@@ -274,6 +275,7 @@ int main(int argc, char **argv)
 			if (evs[k].t < end) printf("%s\n", evs[k].line);
 	}
 	printf("E %llu\n", end);
+	if (sleeps) fprintf(stderr, "p8run: %llu idle-loop sleeps\n", (unsigned long long)chip.sleeps);
 	if (dump) {
 		FILE *f = fopen(dump, "wb");
 		if (!f) { perror(dump); return 2; }

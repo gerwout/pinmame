@@ -161,6 +161,7 @@ void prop_init(pinheck_prop *p, const uint8_t *rom32k, uint8_t *eemem)
 	bus.clkset = clkset;
 	bus.log = logmsg;
 	bus.ctr_state = ctr_state;
+	bus.pure_in = ~(PIN_DO | PIN_SDA); /* SD DO and EEPROM SDA answer inside pins_out */
 	p8x32a_init(&p->chip, &bus);
 	memcpy(p->chip.hub + 0x8000, rom32k, 0x8000);
 	p->eemem = eemem;
