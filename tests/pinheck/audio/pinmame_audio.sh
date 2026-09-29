@@ -6,7 +6,7 @@ SDL3PINMAME=$(realpath "$SDL3PINMAME") || exit 2
 PINHECK_UPDATE_DIR=$(realpath "$PINHECK_UPDATE_DIR") || exit 2
 P8X32A_ROM=$(realpath "$P8X32A_ROM") || exit 2
 [ -n "$PINHECK_ZIP" ] && { PINHECK_ZIP=$(realpath "$PINHECK_ZIP") || exit 2; }
-SFX=${PINHECK_SFX:-ATD}
+SFX=${PINHECK_SFX:-IR0}
 cd "$(dirname "$0")" || exit 2
 fail=0
 
@@ -25,7 +25,7 @@ check_rate() {
 	run $1
 	(cd $B && PINHECK_INSERVICE=1 PINHECK_RESET_AT=10 PINHECK_UART1_LOG=$PWD/uart.log PINHECK_PROP_LOG=$PWD/prop.log PINHECK_WAV=$PWD/capture.wav \
 		PINHECK_SND_LAG=$PWD/lag.log PINHECK_UART1_SEND_AT=11.5 PINHECK_UART1_SEND="[F00Z00]~~~[F00$SFX]" timeout 3000 "$SDL3PINMAME" dominos -rompath roms -nvram_directory nvram \
-		-headless -frames_to_run 1740 -skip_gamewarnings -nothrottle -samplefreq $1 -fakesound > run.out 2>&1) || { echo "AUDIO FAIL ($1 Hz): PinMAME exited $?"; tail -5 $B/run.out; fail=1; return; }
+		-headless -frames_to_run 1860 -skip_gamewarnings -nothrottle -samplefreq $1 -fakesound > run.out 2>&1) || { echo "AUDIO FAIL ($1 Hz): PinMAME exited $?"; tail -5 $B/run.out; fail=1; return; }
 	grep -aq "PROPELLER SYNC CHECK\.*OK" $B/uart.log || { echo "AUDIO FAIL ($1 Hz): no sync check"; fail=1; }
 	grep -aqF "Playing SFX" $B/uart.log || { echo "AUDIO FAIL ($1 Hz): firmware did not echo Playing SFX"; fail=1; }
 	grep -aqF "not modelled" $B/prop.log && { echo "AUDIO FAIL ($1 Hz): unmodelled audio path:"; grep -aF "not modelled" $B/prop.log; fail=1; }
