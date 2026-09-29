@@ -51,6 +51,7 @@
 
 extern PINMAME_VIDEO_UPDATE(pinheck_video);
 extern int pinheck_getsol(int solNo);
+extern int pinheck_servo(int servo);
 extern MACHINE_DRIVER_EXTERN(PINHECK);
 #define gl_mPINHECK PINHECK
 

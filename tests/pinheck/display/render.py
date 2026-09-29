@@ -3,7 +3,8 @@
 the visible area is SCALE x the 128x32 frame wide and the full screen high, the frame is
 drawn SCALE x SCALE at the top left, and everything else is black apart from the core's
 lamp/switch/solenoid panel, which starts 3 rows under the display and uses only the core's
-own pens, never an RGB332 frame colour."""
+own pens, never an RGB332 frame colour, and a game simulator's ball list and plunger bar to its
+right (from x = 130, in white: sim.c's sim_draw), which are not judged."""
 import argparse
 import struct
 import sys
@@ -16,6 +17,7 @@ W, H = 128, 32
 SCALE = 2
 SCREEN_H = 256            # CORE_SCREENY: standalone PinMAME shows the full screen height
 TOL = 7                   # 8 -> 5 bit -> 8 bit rounding of a 15 bpp screen
+SIM_X = 128               # the simulator's plunger bar starts at x = 130, its ball list at 160
 
 
 def read_png(path):
@@ -89,7 +91,7 @@ def main():
     panel = H * SCALE + 3
     bad = [(x, y) for y in range(min(h, panel)) for x in range(w)
            if not (y < H * SCALE and x < W * SCALE) and not near(rows[y][x], (0, 0, 0))]
-    pens = set(rows[y][x] for y in range(panel, h) for x in range(w)) - {(0, 0, 0)}
+    pens = set(rows[y][x] for y in range(panel, h) for x in range(min(w, SIM_X))) - {(0, 0, 0)}
     shown = [tuple((c >> 3) << 3 | c >> 5 for c in rgb332(v)) for v in range(1, 256)]  # as a 15 bpp screen shows them
     frame_pens = [p for p in pens if any(all(abs(a - b) <= 1 for a, b in zip(p, q)) for q in shown)]
     if bad:

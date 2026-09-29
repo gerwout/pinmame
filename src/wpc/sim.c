@@ -53,6 +53,9 @@ void sim_run(int *inports, int firstGameInport, int useSimKeys, int noOfBalls) {
     if (inports[CORE_SIMINPORT] & SIM_PREVKEY) locals.currBall -= 1;
     if (locals.currBall < 0)                     locals.currBall = noOfBalls -1;
     if (locals.currBall >= noOfBalls)            locals.currBall = 0;
+    if (simData->autoBall && locals.balls[locals.currBall].state != stFree)
+      for (ii = 0; ii < noOfBalls; ii++)
+        if (locals.balls[ii].state == stFree) { locals.currBall = ii; break; }
   locals.balls[locals.currBall].current = TRUE;
 
   /* update spinners running */

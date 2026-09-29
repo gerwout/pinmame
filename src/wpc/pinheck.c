@@ -61,6 +61,8 @@ static int brd_opened, brd_rgb_extra;
 static UINT32 brd_sols_seen;
 static UINT16 brd_gi8_seen;
 static UINT8 brd_cust[PINHECK_NSOLS - PINHECK_SOL_RGB], brd_logged[PINHECK_NLAMPS + PINHECK_NSOLS];
+static int brd_servo_us[BOARD_SERVOS];
+static UINT8 brd_sw_logged[10];
 
 static uint8_t pinheck_brd_swcol(void *ctx, int col) { (void)ctx; return coreGlobals.swMatrix[col + 1]; }
 static uint16_t pinheck_brd_cab(void *ctx) { (void)ctx; return (uint16_t)(coreGlobals.swMatrix[0] | coreGlobals.swMatrix[9] << 8); }
@@ -127,6 +129,7 @@ static void pinheck_brd_servo(void *ctx, uint64_t t, int servo, uint32_t pulse)
 	double us = pulse / (PINHECK_CLOCK / 1e6), v = (us - 1000.0) / 1000.0;
 	(void)ctx;
 	if (brd_log) fprintf(brd_log, "%.9f V %d %.1f %llu\n", timer_get_time(), servo, us, (unsigned long long)t);
+	brd_servo_us[servo] = pulse ? (int)(us + 0.5) : 0;
 	if (!pulse) return; /* no pulses: the servo holds its position */
 	if (v < 0.0) v = 0.0;
 	if (v > 1.0) v = 1.0;
@@ -136,6 +139,12 @@ static void pinheck_brd_servo(void *ctx, uint64_t t, int servo, uint32_t pulse)
 /* switch n (0-63) is PinMAME (n/8+1)*10 + n%8+1, lamps likewise; cabinet inputs are columns 0 and 9 */
 static int pinheck_sw2m(int no) { return (no / 10) * 8 + no % 10 - 1; }
 static int pinheck_m2sw(int col, int row) { return col * 10 + row + 1; }
+
+/* last pulse width of servo 0-4 in microseconds, 0 while it gets no pulses (for the playfield simulator) */
+int pinheck_servo(int servo)
+{
+	return servo >= 0 && servo < BOARD_SERVOS ? brd_servo_us[servo] : 0;
+}
 
 int pinheck_getsol(int solNo)
 {
@@ -160,6 +169,12 @@ static void pinheck_brd_log_outputs(void)
 		else n += sprintf(line + n, " S%d=%d", i - PINHECK_NLAMPS + 1, v);
 	}
 	if (n) fprintf(brd_log, "%.9f P%s\n", timer_get_time(), line);
+	/* switches (PinMAME numbers) that changed since the last frame, e.g. by the simulator */
+	for (n = 0, i = 0; i < 80; i++)
+		if (((coreGlobals.swMatrix[i / 8] ^ brd_sw_logged[i / 8]) >> (i % 8)) & 1)
+			n += sprintf(line + n, " %d=%d", coreData->m2sw(i / 8, i % 8), (coreGlobals.swMatrix[i / 8] >> (i % 8)) & 1);
+	memcpy(brd_sw_logged, (void *)coreGlobals.swMatrix, sizeof(brd_sw_logged));
+	if (n) fprintf(brd_log, "%.9f W%s\n", timer_get_time(), line);
 }
 
 static void pinheck_brd_init(void)
@@ -194,6 +209,7 @@ static void pinheck_brd_reset(void)
 	core_write_pwm_output_8b(CORE_MODOUT_SOL0 + PINHECK_SOL_GI0, 0);
 	core_write_pwm_output_8b(CORE_MODOUT_SOL0 + PINHECK_SOL_GI8, 0);
 	for (i = PINHECK_SOL_RGB; i < PINHECK_NSOLS; i++) pinheck_brd_level(i, 0);
+	memset(brd_servo_us, 0, sizeof(brd_servo_us));
 	coreGlobals.pulsedSolState = 0;
 	brd_rgb_extra = 0;
 	brd_sols_seen = 0;
