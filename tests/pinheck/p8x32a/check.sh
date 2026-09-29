@@ -26,6 +26,11 @@ if [ -f dasm_test.c ]; then
 	$CC -I$CORE -o $B/dasm_test dasm_test.c $CORE/p8x32adasm.c || exit 2
 	./$B/dasm_test || fail=$((fail + 1))
 fi
+$CC -I$CORE -o $B/snap_test snap_test.c && ./$B/snap_test || fail=$((fail + 1))
+if [ -f alu_test.c ]; then
+	$CC -I$CORE -o $B/alu_test alu_test.c || exit 2
+	./$B/alu_test || fail=$((fail + 1))
+fi
 for t in "$OPENSPIN" "$SPINSIM" "$P1RTL"; do
 	[ -x "$t" ] || { echo "missing $t: run tools.sh first"; exit 2; }
 done
@@ -40,11 +45,19 @@ rtl_case() {
 	compile "$1" "$o" || { fail=$((fail + 1)); return; }
 	python3 mkrom.py "$o.binary" "$o.rom" "$o.ram"
 	$P1RTL -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args -dump "$o.rtlhub" > "$o.rtl"
-	./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args $3 -dump "$o.ourhub" > "$o.our" 2> "$o.log"
+	sleeps=$(sed -n "s/^' EXPECT-SLEEPS: //p" "$1")
+	./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args $3 ${sleeps:+-sleeps} -dump "$o.ourhub" > "$o.our" 2> "$o.log"
 	if cmp -s "$o.rtl" "$o.our" && cmp -s "$o.rtlhub" "$o.ourhub"; then pass=$((pass + 1))
 	else echo "RTL MISMATCH $1"; diff "$o.rtl" "$o.our" | head -6; fail=$((fail + 1)); fi
 	exp=$(sed -n "s/^' EXPECT-LOG: //p" "$1")
 	if [ -n "$exp" ] && ! grep -qF "$exp" "$o.log"; then echo "LOG MISSING $1: $exp"; fail=$((fail + 1)); fi
+	if [ -n "$sleeps" ] && ! grep -qxF "p8run: $sleeps idle-loop sleeps" "$o.log"; then echo "SLEEPS $1: $(grep -F idle-loop "$o.log"), expected $sleeps"; fail=$((fail + 1)); fi
+	# EXPECT-CLKSHIFT: d v = with CLKSET moving queued edges d cycles earlier, the long at $6000 is v
+	set -- "$1" $(sed -n "s/^' EXPECT-CLKSHIFT: //p" "$1")
+	[ $# -eq 3 ] || return
+	./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args -clkshift "$2" -dump "$o.shifthub" > /dev/null 2>&1
+	got=$(od -An -tu4 -j 24576 -N 4 "$o.shifthub" | tr -d ' ')
+	if [ "$got" = "$3" ]; then pass=$((pass + 1)); else echo "CLKSHIFT $1: \$6000 = $got, expected $3"; fail=$((fail + 1)); fi
 }
 
 spin_case() {
@@ -61,6 +74,7 @@ spin_case() {
 
 for f in chip/*.spin isa/*.spin; do [ -e "$f" ] && rtl_case "$f" $B/rtl; done
 mkdir -p $B/rtl-q && rtl_case chip/waitext.spin $B/rtl-q "-quantum 1000"
+rtl_case chip/idle_ina.spin $B/rtl-q "-quantum 1000"
 if [ -f gen.py ]; then
 	rm -rf $B/rtl/rand $B/spin/rand
 	python3 gen.py --out $B/rtl/rand --count "$SEEDS" --hubflags
