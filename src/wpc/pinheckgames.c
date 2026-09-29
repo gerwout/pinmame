@@ -4,7 +4,7 @@
 #include "pinheck.h"
 
 static core_tLCDLayout pinheck_disp[] = {
-  {0, 0, 32, 128, CORE_VIDEO, (genf *)pinheck_video, NULL}, {0}
+  {0, 0, PINHECK_VIDEO_H, PINHECK_VIDEO_W, CORE_VIDEO, (genf *)pinheck_video, NULL}, {0}
 };
 
 #define INIT_PINHECK(name, balls, version) \

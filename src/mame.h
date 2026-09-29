@@ -332,6 +332,9 @@ void update_video_and_audio(void);
 /* (this calls draw_screen and update_video_and_audio) */
 int updatescreen(void);
 
+/* end the session at the next frame and make run_game() return an error, for a set that refuses to run */
+void mame_schedule_error_exit(void);
+
 
 
 /* ----- miscellaneous bits & pieces ----- */

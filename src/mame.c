@@ -155,6 +155,7 @@ void *record;	/* for -record */
 void *playback; /* for -playback */
 int mame_debug; /* !0 when -debug option is specified */
 int bailing;	/* set to 1 if the startup is aborted to prevent multiple error messages */
+static int error_exit;	/* set by mame_schedule_error_exit() */
 
 /* the active machine */
 static struct RunningMachine active_machine;
@@ -324,6 +325,7 @@ int run_game(int game)
 
 	/* here's the meat of it all */
 	bailing = 0;
+	error_exit = 0;
 
 	/* let the OSD layer start up first */
 	if (osd_init())
@@ -344,7 +346,7 @@ int run_game(int game)
 			if (run_machine())
 				bail_and_print("Unable to start machine emulation");
 			else
-				err = 0;
+				err = error_exit;
 
 			/* shutdown the local machine */
 			shutdown_machine();
@@ -1278,12 +1280,19 @@ static void recompute_fps(int skipped_it)
 	operations
 -------------------------------------------------*/
 
+void mame_schedule_error_exit(void)
+{
+	error_exit = 1;
+}
+
 int updatescreen(void)
 {
 #ifdef REMOTE_DEBUG
 	if (remote_debug_should_quit())
 		return 1;
 #endif
+	if (error_exit)
+		return 1;
 	/* update sound */
 	sound_update();
 
