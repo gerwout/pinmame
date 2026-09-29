@@ -12,6 +12,8 @@ fail=0
 cc -std=c89 -pedantic-errors -Wno-long-long -fsyntax-only $S/wpc/pinheck/display.c || fail=$((fail + 1))
 cc $CF -I$S/wpc/pinheck -o $B/display_test display_test.c $S/wpc/pinheck/display.c || exit 2
 ./$B/display_test || fail=$((fail + 1))
+cc $CF -I$S/wpc/pinheck -o $B/lookdump lookdump.c $S/wpc/pinheck/display.c || exit 2
+python3 look.py crosscheck ./$B/lookdump || fail=$((fail + 1))
 if [ "$PINHECK_SKIP_FIRMWARE" != 1 ] && [ -n "$PINHECK_UPDATE_DIR" ] && [ -n "$P8X32A_ROM" ]; then
 	zip=$PINHECK_ZIP
 	if [ -z "$zip" ]; then

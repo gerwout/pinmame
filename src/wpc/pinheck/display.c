@@ -66,3 +66,84 @@ void pinheck_display_pins(display *d, uint64_t t, uint32_t out, uint32_t dir)
 		d->nbits++;
 	}
 }
+
+static int word(const uint8_t *b, int i)
+{
+	return b[2 * i] << 8 | b[2 * i + 1];
+}
+
+/* 7 big-endian words: ?, POSITION, PIXEL SHAPE, BRIGHTNESS, width, height, BAR BRIGHT.
+   Anything else keeps the exact look (square dots, as sent) and returns 0. */
+int pinheck_display_look(display_look *look, const uint8_t *cfg, int n)
+{
+	look->shape = DISPLAY_SQUARE;
+	look->brightness = 255;
+	look->position = 340;
+	look->bar = 62;
+	if (!cfg || n != 14 || word(cfg, 4) != DISPLAY_W || word(cfg, 5) != DISPLAY_H) return 0;
+	look->position = word(cfg, 1);
+	look->shape = word(cfg, 2) <= DISPLAY_HIGHREZ ? word(cfg, 2) : DISPLAY_SQUARE;
+	look->brightness = word(cfg, 3) < 255 ? word(cfg, 3) : 255;
+	look->bar = word(cfg, 6) < 62 ? word(cfg, 6) : 62;
+	return 1;
+}
+
+static void rgb332(uint8_t v, int *c)
+{
+	c[0] = ((v >> 5) & 7) * 255 / 7;
+	c[1] = ((v >> 2) & 7) * 255 / 7;
+	c[2] = (v & 3) * 255 / 3;
+}
+
+/* adds dot (x, y)'s colour to c; outside the frame is black */
+static void add_dot(const uint8_t *f, int x, int y, int *c)
+{
+	int d[3];
+	if (x >= DISPLAY_W || y >= DISPLAY_H) return;
+	rgb332(f[y * DISPLAY_W + x], d);
+	c[0] += d[0];
+	c[1] += d[1];
+	c[2] += d[2];
+}
+
+/* Scale2x: sub-pixel (sx, sy) of dot (x, y), neighbours clamped at the edges */
+static uint8_t scale2x(const uint8_t *f, int x, int y, int sx, int sy)
+{
+	uint8_t p = f[y * DISPLAY_W + x];
+	uint8_t up = y > 0 ? f[(y - 1) * DISPLAY_W + x] : p, down = y < DISPLAY_H - 1 ? f[(y + 1) * DISPLAY_W + x] : p;
+	uint8_t left = x > 0 ? f[y * DISPLAY_W + x - 1] : p, right = x < DISPLAY_W - 1 ? f[y * DISPLAY_W + x + 1] : p;
+	uint8_t v = sy ? down : up, h = sx ? right : left, v2 = sy ? up : down, h2 = sx ? left : right;
+	return v == h && h != v2 && v != h2 ? v : p;
+}
+
+/* frame (128x32 RGB332) -> rgb (256x64, 3 bytes per pixel) in the look */
+void pinheck_display_render(const display_look *look, const uint8_t *frame, uint8_t *rgb)
+{
+	int x, y, k, dy = look->position - 340;
+	dy = dy >= 0 ? dy / 4 : -((3 - dy) / 4);
+	memset(rgb, 0, DISPLAY_LOOK_W * DISPLAY_LOOK_H * 3);
+	for (y = 0; y < DISPLAY_LOOK_H; y++) {
+		const int dotY = y >> 1, sy = y & 1;
+		uint8_t *out;
+		if (y + dy < 0 || y + dy >= DISPLAY_LOOK_H) continue;
+		out = rgb + (y + dy) * DISPLAY_LOOK_W * 3;
+		for (x = 0; x < DISPLAY_LOOK_W; x++) {
+			const int dotX = x >> 1, sx = x & 1;
+			int c[3] = { 0, 0, 0 };
+			if (look->shape == DISPLAY_HIGHREZ)
+				rgb332(scale2x(frame, dotX, dotY, sx, sy), c);
+			else if (look->shape == DISPLAY_SQUARE || !(sx | sy))
+				add_dot(frame, dotX, dotY, c);
+			else {
+				/* a gap between round dots: the mean of the dots around it, times bar / 124 */
+				const int m = (1 + sx) * (1 + sy);
+				add_dot(frame, dotX, dotY, c);
+				if (sx) add_dot(frame, dotX + 1, dotY, c);
+				if (sy) add_dot(frame, dotX, dotY + 1, c);
+				if (sx && sy) add_dot(frame, dotX + 1, dotY + 1, c);
+				for (k = 0; k < 3; k++) c[k] = c[k] * look->bar / (124 * m);
+			}
+			for (k = 0; k < 3; k++) *out++ = (uint8_t)(c[k] * look->brightness / 255);
+		}
+	}
+}
