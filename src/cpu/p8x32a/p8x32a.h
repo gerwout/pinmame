@@ -51,6 +51,8 @@ typedef struct p8x32a {
 	uint32_t last_out, last_dir;
 	uint32_t logged;
 	int stop;
+	int ctr_ok;
+	uint64_t ctr_from, ctr_nt;
 } p8x32a;
 
 void p8x32a_init(p8x32a *p, const p8x32a_bus *bus);

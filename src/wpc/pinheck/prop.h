@@ -18,7 +18,7 @@ typedef void (*prop_tx_fn)(void *ctx, uint64_t pic_cycle, int level);
 typedef void (*prop_ctr_fn)(void *ctx, uint64_t t, int cog, int ctr, uint32_t ctr_reg, uint32_t frq);
 typedef void (*prop_pins_fn)(void *ctx, uint64_t prop_cycle, uint32_t out, uint32_t dir);
 
-typedef struct prop_edge { uint64_t pic; uint32_t pins; } prop_edge;
+typedef struct prop_edge { uint64_t pic, prop; uint32_t pins; } prop_edge; /* prop = pic in Propeller cycles */
 typedef struct prop_seg { uint64_t pic0, prop0; uint32_t num, den; } prop_seg;
 
 typedef struct pinheck_prop {

@@ -26,6 +26,10 @@ if [ -f dasm_test.c ]; then
 	$CC -I$CORE -o $B/dasm_test dasm_test.c $CORE/p8x32adasm.c || exit 2
 	./$B/dasm_test || fail=$((fail + 1))
 fi
+if [ -f alu_test.c ]; then
+	$CC -I$CORE -o $B/alu_test alu_test.c || exit 2
+	./$B/alu_test || fail=$((fail + 1))
+fi
 for t in "$OPENSPIN" "$SPINSIM" "$P1RTL"; do
 	[ -x "$t" ] || { echo "missing $t: run tools.sh first"; exit 2; }
 done

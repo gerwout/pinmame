@@ -39,6 +39,16 @@ static uint64_t to_pic(const pinheck_prop *p, uint64_t t)
 	return s->pic0 + ((t - s->prop0) * s->den + s->num - 1) / s->num;
 }
 
+/* the clock segments changed: convert the queued edges again */
+static void retime(pinheck_prop *p)
+{
+	int k;
+	for (k = 0; k < p->count; k++) {
+		prop_edge *e = &p->edge[(p->head + k) % PROP_EDGES];
+		e->prop = to_prop(p, e->pic);
+	}
+}
+
 static void add_seg(pinheck_prop *p, uint64_t t, uint8_t cfg)
 {
 	uint64_t a = to_pic(p, t);
@@ -51,6 +61,7 @@ static void add_seg(pinheck_prop *p, uint64_t t, uint8_t cfg)
 	p->seg[p->nseg].num = rate_num[cfg & 7];
 	p->seg[p->nseg].den = rate_den[cfg & 7];
 	p->nseg++;
+	retime(p);
 }
 
 static uint32_t pins_in(void *ctx, uint64_t t)
@@ -60,7 +71,7 @@ static uint32_t pins_in(void *ctx, uint64_t t)
 	int k;
 	for (k = 0; k < p->count; k++) {
 		const prop_edge *e = &p->edge[(p->head + k) % PROP_EDGES];
-		if (to_prop(p, e->pic) > t) break;
+		if (e->prop > t) break;
 		v = e->pins;
 	}
 	return v | p->ee_bits | (p->sd_do ? PIN_DO : 0) | PIN_CS | PIN_PGM;
@@ -71,7 +82,7 @@ static uint64_t pins_next(void *ctx, uint64_t t)
 	pinheck_prop *p = (pinheck_prop *)ctx;
 	int k;
 	for (k = 0; k < p->count; k++) {
-		uint64_t e = to_prop(p, p->edge[(p->head + k) % PROP_EDGES].pic);
+		uint64_t e = p->edge[(p->head + k) % PROP_EDGES].prop;
 		if (e > t) return e;
 	}
 	return P8X32A_NEVER;
@@ -135,6 +146,7 @@ static void restart(pinheck_prop *p, uint64_t t)
 	p->ee_bits = PIN_SCL | PIN_SDA;
 	p->sd_do = 1;
 	p->reset_pending = 0;
+	retime(p);
 }
 
 void prop_init(pinheck_prop *p, const uint8_t *rom32k, uint8_t *eemem)
@@ -201,6 +213,7 @@ void prop_reset(pinheck_prop *p, uint64_t pic_cycle)
 	p->base_pins = p->last_pins = 0;
 	restart(p, p->chip.now);
 	p->seg[0].pic0 = pic_cycle;
+	retime(p);
 }
 
 uint64_t prop_time(const pinheck_prop *p, uint64_t pic_cycle)
@@ -216,7 +229,7 @@ void prop_catch_up(pinheck_prop *p, uint64_t pic_cycle)
 		p8x32a_run_until(&p->chip, t - 1);
 		if (p->reset_pending) restart(p, p->chip.now);
 	}
-	while (p->count && to_prop(p, p->edge[p->head].pic) <= p->chip.now) {
+	while (p->count && p->edge[p->head].prop <= p->chip.now) {
 		p->base_pins = p->edge[p->head].pins;
 		p->head = (p->head + 1) % PROP_EDGES;
 		p->count--;
@@ -231,6 +244,7 @@ void prop_pic_pins(pinheck_prop *p, uint64_t pic_cycle, uint32_t pins)
 	if (p->count == PROP_EDGES) prop_catch_up(p, pic_cycle);
 	p->edge[(p->head + p->count) % PROP_EDGES].pic = pic_cycle;
 	p->edge[(p->head + p->count) % PROP_EDGES].pins = pins;
+	p->edge[(p->head + p->count) % PROP_EDGES].prop = to_prop(p, pic_cycle);
 	p->count++;
 	p->last_pins = pins;
 }

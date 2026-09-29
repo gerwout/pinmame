@@ -106,13 +106,18 @@ static uint64_t ctr_toggle(const p8x32a_cog *c, int k, uint64_t t)
 	return nco_toggle(c->ctr[k], c->frq[k], c->phs[k], c->phs_t[k], t);
 }
 
-static uint64_t ctr_next(const p8x32a *p, uint64_t t)
+/* the next counter pin change after t; cached until a counter changes or t reaches it */
+static uint64_t ctr_next(p8x32a *p, uint64_t t)
 {
 	uint64_t nt = P8X32A_NEVER, e;
 	int n, k;
+	if (p->ctr_ok && t >= p->ctr_from && t < p->ctr_nt) return p->ctr_nt;
 	for (n = 0; n < 8; n++)
 		for (k = 0; k < 2; k++)
 			if ((e = ctr_toggle(&p->cog[n], k, t)) < nt) nt = e;
+	p->ctr_ok = 1;
+	p->ctr_from = t;
+	p->ctr_nt = nt;
 	return nt;
 }
 
@@ -123,6 +128,7 @@ uint32_t p8x32a_pins(p8x32a *p, uint64_t t, uint32_t *dir)
 	for (n = 0; n < 8; n++) {
 		p8x32a_cog *c = &p->cog[n];
 		uint32_t dd = regval(&c->dira, t);
+		if (!dd) continue;
 		d |= dd;
 		o |= (regval(&c->outa, t) | ctr_pins(c, 0, t) | ctr_pins(c, 1, t)) & dd;
 	}
@@ -151,13 +157,13 @@ static void flush(p8x32a *p, uint64_t t)
 	if (t > p->flushed) p->flushed = t;
 }
 
+/* after flush(t) the pins at t are the last flushed state */
 static uint32_t ina(p8x32a *p, uint64_t t)
 {
-	uint32_t dir, out, ext;
+	uint32_t ext;
 	flush(p, t);
-	out = p8x32a_pins(p, t, &dir);
 	ext = p->bus.pins_in ? p->bus.pins_in(p->bus.ctx, t) : 0;
-	return (dir & out) | (~dir & ext);
+	return (p->last_dir & p->last_out) | (~p->last_dir & ext);
 }
 
 static uint32_t cnt(const p8x32a *p, uint64_t t) { return (uint32_t)(t - p->cnt_base); }
@@ -190,6 +196,7 @@ static void ctr_check(p8x32a *p, uint32_t ctr)
 static void ctr_save(p8x32a *p, p8x32a_cog *c, int k, uint64_t e)
 {
 	flush(p, p->now);
+	p->ctr_ok = 0;
 	c->ctr_old[k] = c->ctr[k];
 	c->frq_old[k] = c->frq[k];
 	c->phs_old[k] = c->phs[k];
@@ -238,10 +245,11 @@ static uint32_t sread(p8x32a *p, int n, unsigned a, uint64_t t)
 
 static uint32_t bitrev(uint32_t x)
 {
-	uint32_t r = 0;
-	int k;
-	for (k = 0; k < 32; k++) r |= ((x >> k) & 1u) << (31 - k);
-	return r;
+	x = (x >> 1 & 0x55555555u) | (x & 0x55555555u) << 1;
+	x = (x >> 2 & 0x33333333u) | (x & 0x33333333u) << 2;
+	x = (x >> 4 & 0x0F0F0F0Fu) | (x & 0x0F0F0F0Fu) << 4;
+	x = (x >> 8 & 0x00FF00FFu) | (x & 0x00FF00FFu) << 8;
+	return x >> 16 | x << 16;
 }
 
 static int parity(uint32_t x)
@@ -250,89 +258,121 @@ static int parity(uint32_t x)
 	return (int)(x & 1);
 }
 
+/* the P1 ALU: hub ops (group 0), rotates (1), logic (2-3) and adder (4-7) results with their C and write flags */
 static uint32_t alu(unsigned i, uint32_t s, uint32_t d, unsigned pc, int run, int ci, int zi,
                     uint32_t bus_q, int bus_c, int *wr, int *co, int *zo)
 {
-	uint32_t r, dr = bitrev(d), rot_r, lo, fill, log_r, add_d, add_s, add_r, sum_lo;
-	unsigned sh = s & 31, ls;
-	int rot_c, log_c, add_sub, add_ci, add_co, add_cm, add_cs, add_c, cin, c30, b31;
-	uint64_t rot;
-	static const unsigned ads_sel[4] = { 0, 1, 2, 3 };
+	unsigned g = (i >> 3) & 7;
+	uint32_t r, log_r = s;
 
-	switch (i & 7) {
-	case 0: fill = d & 0x7FFFFFFFu; break;
-	case 1: fill = dr & 0x7FFFFFFFu; break;
-	case 4: case 5: fill = ci ? 0x7FFFFFFFu : 0; break;
-	case 6: fill = (d >> 31) ? 0x7FFFFFFFu : 0; break;
-	default: fill = 0; break;
-	}
-	lo = (i & 1) ? dr : d;
-	rot = (((uint64_t)fill << 32) | lo) >> sh;
-	rot_r = (((i >> 1) & 3) != 3 && (i & 1)) ? bitrev((uint32_t)rot) : (uint32_t)rot;
-	rot_c = (((i >> 1) & 3) != 3 && (i & 1)) ? (int)(dr & 1) : (int)(d & 1);
-
-	if (i & 4) ls = ((unsigned)(((i & 2) ? zi : ci) ^ (int)(i & 1))) << 1;
-	else ls = (((i >> 1) & 1) << 1) | (unsigned)!(((i >> 1) ^ i) & 1);
-	if (i & 8) {
-		switch (ls) {
-		case 0: log_r = d & ~s; break;
-		case 1: log_r = d & s; break;
-		case 2: log_r = d | s; break;
-		default: log_r = d ^ s; break;
+	*wr = 1;
+	if (g == 0) {
+		r = (run || (pc >> 4) != 31) ? bus_q : 0;
+		*co = bus_c;
+	} else if (g == 1) {
+		uint32_t dr = (i & 1) ? bitrev(d) : 0, fill;
+		uint64_t rot;
+		switch (i & 7) {
+		case 0: fill = d & 0x7FFFFFFFu; break;
+		case 1: fill = dr & 0x7FFFFFFFu; break;
+		case 4: case 5: fill = ci ? 0x7FFFFFFFu : 0; break;
+		case 6: fill = (d >> 31) ? 0x7FFFFFFFu : 0; break;
+		default: fill = 0; break;
 		}
-	} else if (i & 4) {
-		switch (i & 3) {
-		case 0: log_r = (d & 0xFFFFFE00u) | (s & 511); break;
-		case 1: log_r = (d & 0xFFFC01FFu) | ((s & 511) << 9); break;
-		case 2: log_r = ((s & 511) << 23) | (d & 0x007FFFFFu); break;
-		default: log_r = (d & 0xFFFFFE00u) | (pc & 511); break;
+		rot = (((uint64_t)fill << 32) | ((i & 1) ? dr : d)) >> (s & 31);
+		r = (((i >> 1) & 3) != 3 && (i & 1)) ? bitrev((uint32_t)rot) : (uint32_t)rot;
+		*co = (((i >> 1) & 3) != 3 && (i & 1)) ? (int)(dr & 1) : (int)(d & 1);
+	} else {
+		if (g <= 3) {
+			if (i & 8) {
+				unsigned ls = (i & 4) ? ((unsigned)(((i & 2) ? zi : ci) ^ (int)(i & 1))) << 1
+				                      : (((i >> 1) & 1) << 1) | (unsigned)!(((i >> 1) ^ i) & 1);
+				switch (ls) {
+				case 0: log_r = d & ~s; break;
+				case 1: log_r = d & s; break;
+				case 2: log_r = d | s; break;
+				default: log_r = d ^ s; break;
+				}
+			} else if (i & 4) {
+				switch (i & 3) {
+				case 0: log_r = (d & 0xFFFFFE00u) | (s & 511); break;
+				case 1: log_r = (d & 0xFFFC01FFu) | ((s & 511) << 9); break;
+				case 2: log_r = ((s & 511) << 23) | (d & 0x007FFFFFu); break;
+				default: log_r = (d & 0xFFFFFE00u) | (pc & 511); break;
+				}
+			}
 		}
-	} else
-		log_r = s;
-	log_c = parity(log_r);
-
-	(void)ads_sel;
-	if (((i >> 4) & 3) == 2) {
-		int ads[4];
-		ads[0] = 0; ads[1] = (int)(s >> 31); ads[2] = ci; ads[3] = zi;
-		add_sub = ads[(i >> 1) & 3] ^ (int)(i & 1);
-	} else if (i == 0x32 || i == 0x34 || i == 0x36 || (i >> 2) == 0xF)
-		add_sub = 0;
-	else
-		add_sub = 1;
-	add_ci = ((((i >> 3) & 7) == 6 && ((i & 7) == 1 || (i & 2))) && ci) || (((i >> 3) & 3) == 3 && (i & 3) == 1);
-	add_d = (((i >> 3) & 3) == 1) ? 0 : d;
-	add_s = ((i & 31) == 0x19 || ((i >> 1) & 15) == 0xD) ? 0xFFFFFFFFu : add_sub ? ~s : s;
-	cin = add_ci ^ add_sub;
-	sum_lo = (add_d & 0x7FFFFFFFu) + (add_s & 0x7FFFFFFFu) + (uint32_t)cin;
-	c30 = (int)(sum_lo >> 31);
-	b31 = (int)(add_d >> 31) + (int)(add_s >> 31) + c30;
-	add_r = (sum_lo & 0x7FFFFFFFu) | ((uint32_t)(b31 & 1) << 31);
-	add_co = b31 >> 1;
-	add_cm = c30;
-	add_cs = add_co ^ (int)(add_d >> 31) ^ (int)(add_s >> 31);
-	if (i == 0x38) add_c = add_co;
-	else if (((i >> 3) & 7) == 5) add_c = (int)(s >> 31);
-	else if ((i & 0x20) && ((i >> 2) & 3) == 1) add_c = add_co ^ add_cm;
-	else if (((i >> 1) & 15) == 8) add_c = add_cs;
-	else add_c = add_co ^ add_sub;
-
-	if ((i >> 2) == 4) *wr = (int)(i & 1) ^ ((i & 2) ? !add_co : add_cs);
-	else if (i == 0x38) *wr = add_co;
-	else *wr = 1;
-
-	if (i & 0x20) r = add_r;
-	else if (i & 0x10) r = log_r;
-	else if (i & 8) r = rot_r;
-	else r = (run || (pc >> 4) != 31) ? bus_q : 0;
-
-	switch ((i >> 3) & 7) {
-	case 0: *co = bus_c; break;
-	case 1: *co = rot_c; break;
-	case 3: *co = log_c; break;
-	default: *co = add_c; break;
+		if (g == 3) {
+			r = log_r;
+			*co = parity(log_r);
+		} else {
+			uint32_t add_d, add_s, sum_lo, add_r;
+			int add_sub, add_ci, add_co, add_cm, add_cs, add_c, cin, c30, b31;
+			if (g == 4 || g == 5) {
+				int ads[4];
+				ads[0] = 0; ads[1] = (int)(s >> 31); ads[2] = ci; ads[3] = zi;
+				add_sub = ads[(i >> 1) & 3] ^ (int)(i & 1);
+			} else if (i == 0x32 || i == 0x34 || i == 0x36 || (i >> 2) == 0xF)
+				add_sub = 0;
+			else
+				add_sub = 1;
+			add_ci = ((g == 6 && ((i & 7) == 1 || (i & 2))) && ci) || (((i >> 3) & 3) == 3 && (i & 3) == 1);
+			add_d = (((i >> 3) & 3) == 1) ? 0 : d;
+			add_s = ((i & 31) == 0x19 || ((i >> 1) & 15) == 0xD) ? 0xFFFFFFFFu : add_sub ? ~s : s;
+			cin = add_ci ^ add_sub;
+			sum_lo = (add_d & 0x7FFFFFFFu) + (add_s & 0x7FFFFFFFu) + (uint32_t)cin;
+			c30 = (int)(sum_lo >> 31);
+			b31 = (int)(add_d >> 31) + (int)(add_s >> 31) + c30;
+			add_r = (sum_lo & 0x7FFFFFFFu) | ((uint32_t)(b31 & 1) << 31);
+			add_co = b31 >> 1;
+			add_cm = c30;
+			add_cs = add_co ^ (int)(add_d >> 31) ^ (int)(add_s >> 31);
+			if (i == 0x38) add_c = add_co;
+			else if (g == 5) add_c = (int)(s >> 31);
+			else if ((i & 0x20) && ((i >> 2) & 3) == 1) add_c = add_co ^ add_cm;
+			else if (((i >> 1) & 15) == 8) add_c = add_cs;
+			else add_c = add_co ^ add_sub;
+			if ((i >> 2) == 4) *wr = (int)(i & 1) ^ ((i & 2) ? !add_co : add_cs);
+			else if (i == 0x38) *wr = add_co;
+			r = (i & 0x20) ? add_r : log_r;
+			*co = add_c;
+		}
 	}
-	*zo = !r && (zi || !(((i >> 3) & 7) == 6 && ((i & 7) == 1 || (i & 2))));
+	*zo = !r && (zi || !(g == 6 && ((i & 7) == 1 || (i & 2))));
+	return r;
+}
+
+static uint32_t ror32(uint32_t x, unsigned n) { return n ? x >> n | x << (32 - n) : x; }
+
+/* the common ALU ops of a running cog (not hub ops); the others go to alu() */
+static uint32_t alu_run(unsigned i, uint32_t s, uint32_t d, unsigned pc, int ci, int zi, int bus_c, int *wr, int *co, int *zo)
+{
+	uint32_t r;
+	unsigned sh = s & 31;
+	*wr = 1;
+	switch (i) {
+	case 0x08: r = ror32(d, sh); *co = (int)(d & 1); break;
+	case 0x09: r = ror32(d, (32 - sh) & 31); *co = (int)(d >> 31); break;
+	case 0x0A: r = d >> sh; *co = (int)(d & 1); break;
+	case 0x0B: r = d << sh; *co = (int)(d >> 31); break;
+	case 0x14: r = (d & 0xFFFFFE00u) | (s & 511); *co = d < s; break;
+	case 0x15: r = (d & 0xFFFC01FFu) | ((s & 511) << 9); *co = d < s; break;
+	case 0x17: r = (d & 0xFFFFFE00u) | (pc & 511); *co = d < s; break;
+	case 0x18: r = d & s; *co = parity(r); break;
+	case 0x19: r = d & ~s; *co = parity(r); break;
+	case 0x1A: r = d | s; *co = parity(r); break;
+	case 0x1B: r = d ^ s; *co = parity(r); break;
+	case 0x1C: r = ci ? d | s : d & ~s; *co = parity(r); break;
+	case 0x1D: r = ci ? d & ~s : d | s; *co = parity(r); break;
+	case 0x1E: r = zi ? d | s : d & ~s; *co = parity(r); break;
+	case 0x1F: r = zi ? d & ~s : d | s; *co = parity(r); break;
+	case 0x20: r = d + s; *co = r < d; break;
+	case 0x21: r = d - s; *co = d < s; break;
+	case 0x28: r = s; *co = (int)(s >> 31); break;
+	case 0x39: r = d - 1; *co = !d; break;
+	default: return alu(i, s, d, pc, 1, ci, zi, 0, bus_c, wr, co, zo);
+	}
+	*zo = !r;
 	return r;
 }
 
@@ -545,6 +585,66 @@ static void restart(p8x32a *p, int n)
 	exec(p, n);
 }
 
+/* an instruction that neither reads nor writes anything another cog or the pins can see */
+static int local(const p8x32a_cog *c)
+{
+	uint32_t i = c->ix;
+	unsigned op = OP(i);
+	if (!c->run || op <= 3 || op >= 0x3C) return 0;
+	if (!FIM(i) && SRC(i) == 0x1F2) return 0;
+	return !(FWR(i) && DST(i) >= 0x1F0);
+}
+
+/* exec + complete for local instructions of cog n, kept in locals, until one is not local or t is passed */
+static void run_local(p8x32a *p, int n, uint64_t t)
+{
+	p8x32a_cog *c = &p->cog[n];
+	uint64_t t2 = c->ev_t;
+	uint32_t ix = c->ix;
+	unsigned pc = c->p;
+	int cf = c->c, zf = c->z, cancel = c->cancel, idled = 0;
+
+	while (t2 <= t) {
+		uint32_t i = ix, s, d, r, nix;
+		unsigned op = OP(i), px, a;
+		int cond, jump, wr, co, zo, jc = 0;
+		if (op <= 3 || op >= 0x3C || (FWR(i) && DST(i) >= 0x1F0)) break;
+		if (FIM(i)) s = SRC(i);
+		else if ((a = SRC(i)) < 0x1F0) s = c->ram[a];
+		else if (a == 0x1F2) break;
+		else s = sread(p, n, a, t2);
+		cond = ((COND(i) >> ((cf << 1) | zf)) & 1) && !cancel;
+		d = c->ram[DST(i)];
+		jump = op == 0x17 || (op >= 0x39 && op <= 0x3B);
+		px = (cond && jump) ? (s & 511) : pc;
+		nix = c->ram[px];
+		if (t2 + 1 >= c->disable_at) { idled = 1; break; }
+		r = alu_run(op, s, d, pc, cf, zf, p->sys_c, &wr, &co, &zo);
+		if (cond) {
+			if (FWR(i) && wr) c->ram[DST(i)] = r;
+			if (FWC(i)) cf = co;
+			if (FWZ(i)) zf = zo;
+			if (op == 0x39) jc = !(d >> 1) && (d & 1);
+			else if (op == 0x3A) jc = !(d >> 1) && !(d & 1);
+			else if (op == 0x3B) jc = !(!(d >> 1) && !(d & 1));
+		}
+		if (!jc) pc = (px + 1) & 511;
+		cancel = jc || px == 511;
+		ix = nix;
+		t2 += 4;
+		if (t2 - 2 >= c->disable_at) { idled = 2; break; }
+	}
+	c->p = (uint16_t)pc;
+	c->ix = ix;
+	c->c = (uint8_t)cf;
+	c->z = (uint8_t)zf;
+	c->cancel = (uint8_t)cancel;
+	c->t0 = t2 - 2;
+	c->ev_t = t2;
+	c->ev = EV_EXEC;
+	if (idled) idle(p, n);
+}
+
 void p8x32a_run_until(p8x32a *p, uint64_t t)
 {
 	p->horizon = t;
@@ -570,6 +670,8 @@ void p8x32a_run_until(p8x32a *p, uint64_t t)
 			else complete(p, best, b->ev_t, 0, p->sys_c);
 			break;
 		}
+		/* local instructions run on ahead of the other cogs: their order against them is unobservable */
+		if (b->ev == EV_EXEC && b->ev_t <= t && local(b)) run_local(p, best, t);
 	}
 	flush(p, t);
 	p->now = t;
@@ -595,6 +697,7 @@ void p8x32a_reset(p8x32a *p, uint64_t t)
 	p->lock_e = p->lock_state = p->cfg = p->sys_q = p->sys_c = 0;
 	p->slot_base = t;
 	p->npend = 0;
+	p->ctr_ok = 0;
 	p->flushed = t;
 	p->last_out = p->last_dir = 0;
 	p->cog[0].ptr = 0x3E00;
