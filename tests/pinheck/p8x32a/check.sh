@@ -26,6 +26,7 @@ if [ -f dasm_test.c ]; then
 	$CC -I$CORE -o $B/dasm_test dasm_test.c $CORE/p8x32adasm.c || exit 2
 	./$B/dasm_test || fail=$((fail + 1))
 fi
+$CC -I$CORE -o $B/snap_test snap_test.c && ./$B/snap_test || fail=$((fail + 1))
 if [ -f alu_test.c ]; then
 	$CC -I$CORE -o $B/alu_test alu_test.c || exit 2
 	./$B/alu_test || fail=$((fail + 1))

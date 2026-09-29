@@ -31,7 +31,7 @@ typedef struct p8x32a_cog {
 	uint32_t ram[512];
 	uint32_t ptr, ix, nix, i, s, d;
 	uint16_t p, px;
-	uint8_t c, z, cancel, run, cond;
+	uint8_t c, z, cancel, run, cond, pad[3]; /* pad: snapshots are compared with memcmp */
 	int ev;
 	uint64_t ev_t, t0, latch, disable_at, restart_at;
 	p8x32a_reg outa, dira;
