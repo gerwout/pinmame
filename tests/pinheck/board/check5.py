@@ -86,6 +86,7 @@ def key_plan():
     tap('7', 1.0)                                   # back to RGB LIGHTING
     for i in range(5):
         tap('LSHIFT', 1.0)                          # back to SWITCH EDGE
+    tap('DEL', 0.5)                                 # simulator keys off: column/row keys reach the matrix
     tap('0', 1.5)                                   # SWITCH TEST
     for n in range(64):
         k = 'KEYCODE_%s KEYCODE_%s' % (COLS[n // 8], ROWS[n % 8])
@@ -221,6 +222,12 @@ def verify(d):
     check(lv[0] < 0.3 and lv[6] > 0.8 and all(b - a >= 0.04 for a, b in zip(lv, lv[1:])), 'brightness levels not 7 distinct rising steps')
     ev, _ = key_plan()
     wanted = set()
+    # the simulator's balls: [M17020] loaded one into the shooter lane, the solenoid test's PLUNGER launched it
+    # and its LOAD BALL loaded the next, so the shooter lane (0) and trough 1 (1) rest closed; Noid Home (39) may
+    t0 = min(t for t, k, hold, e in ev if e and e[0] == 'switch')
+    rest = [g for g in (grid(f) for tt, f in frames if t0 - 1.0 <= tt < t0 - 0.1) if g]
+    base = set(rest[-1][0]) if rest else set()
+    check(rest and base - {39} == {0, 1} and rest[-1][1] == (1,), 'switch test at rest shows %s, expected the shooter lane (0), trough 1 (1), maybe Noid Home (39), and the closed coin door' % (rest[-1:],))
     for i, (t, k, hold, e) in enumerate(ev):
         if not e:
             continue
@@ -253,8 +260,9 @@ def verify(d):
         elif e[0] == 'switch':
             got = [grid(f) for tt, f in frames if t + 0.12 <= tt < t1 + 0.2]
             got = [g for g in got if g]
-            check((e[1], e[2]) in got, 'switch test after %s: screens %s, expected %s' % (k, sorted(set(got)), (e[1], e[2])))
-            wanted.add((e[1], e[2]))
+            want = (tuple(sorted(base ^ set(e[1]))), e[2])
+            check(want in got, 'switch test after %s: screens %s, expected %s' % (k, sorted(set(got)), want))
+            wanted.add(want)
         elif e[0] == 'exit':
             after = [grid(f) for tt, f in frames if tt >= t + 0.1]
             check(after and after[-1] is None, 'Back did not leave the switch test')

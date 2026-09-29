@@ -136,6 +136,7 @@ PINGAMES += $(PINOBJ)/capgames.o
 PINGAMES += $(PINOBJ)/gts1games.o
 PINGAMES += $(PINOBJ)/recelgames.o
 PINGAMES += $(PINOBJ)/pinheckgames.o
+PINGAMES += $(PINOBJ)/sims/pinheck/dominos.o
 PINGAMES += $(PINOBJ)/alvggames.o
 PINGAMES += $(PINOBJ)/spinbgames.o
 PINGAMES += $(PINOBJ)/mrgamegames.o
@@ -304,6 +305,7 @@ OBJDIRS += $(PINOBJ)/sims/s7/full
 OBJDIRS += $(PINOBJ)/sims/se
 OBJDIRS += $(PINOBJ)/sims/se/prelim
 OBJDIRS += $(PINOBJ)/sims/sleic
+OBJDIRS += $(PINOBJ)/sims/pinheck
 
 $(OBJ)/allgames.a: $(PINGAMES)
 #

@@ -21,6 +21,10 @@ GROUPS = [
     (['src/wpc/pinheck/board.c', 'src/wpc/pinheck/board.h'],
      'DRVLIBS += $(PINOBJ)/pinheck/board.o\n'),
 ]
+# game definitions with a playfield simulator: (source, pinmame.mak line after pinheckgames.o)
+SIMS = [
+    ('src/wpc/sims/pinheck/dominos.c', 'PINGAMES += $(PINOBJ)/sims/pinheck/dominos.o\n'),
+]
 changed = []
 
 
@@ -68,6 +72,12 @@ for files, drvlibs in GROUPS:
     srcs += files
     edit('src/pinmame.mak', 'DRVLIBS += $(PINOBJ)/pinheck.o\n', drvlibs)
 edit('src/pinmame.mak', 'OBJDIRS += $(PINOBJ)\n', 'OBJDIRS += $(PINOBJ)/pinheck $(OBJ)/cpu/p8x32a\n')
+for path, pingames in SIMS:
+    if not os.path.exists(path):
+        continue
+    srcs.append(path)
+    edit('src/pinmame.mak', 'PINGAMES += $(PINOBJ)/pinheckgames.o\n', pingames)
+    edit('src/pinmame.mak', 'OBJDIRS += $(PINOBJ)/sims/se/prelim\n', 'OBJDIRS += $(PINOBJ)/sims/pinheck\n')
 
 for path in sorted(glob.glob('cmake/*/CMakeLists*.txt')):
     if 'src/wpc/pinheckgames.c' in open(path).read():

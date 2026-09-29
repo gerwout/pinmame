@@ -61,6 +61,8 @@ static int brd_opened, brd_rgb_extra;
 static UINT32 brd_sols_seen;
 static UINT16 brd_gi8_seen;
 static UINT8 brd_cust[PINHECK_NSOLS - PINHECK_SOL_RGB], brd_logged[PINHECK_NLAMPS + PINHECK_NSOLS];
+static int brd_servo_us[BOARD_SERVOS];
+static UINT8 brd_sw_logged[10], brd_lamps_logged[9];
 
 static uint8_t pinheck_brd_swcol(void *ctx, int col) { (void)ctx; return coreGlobals.swMatrix[col + 1]; }
 static uint16_t pinheck_brd_cab(void *ctx) { (void)ctx; return (uint16_t)(coreGlobals.swMatrix[0] | coreGlobals.swMatrix[9] << 8); }
@@ -127,6 +129,7 @@ static void pinheck_brd_servo(void *ctx, uint64_t t, int servo, uint32_t pulse)
 	double us = pulse / (PINHECK_CLOCK / 1e6), v = (us - 1000.0) / 1000.0;
 	(void)ctx;
 	if (brd_log) fprintf(brd_log, "%.9f V %d %.1f %llu\n", timer_get_time(), servo, us, (unsigned long long)t);
+	brd_servo_us[servo] = pulse ? (int)(us + 0.5) : 0;
 	if (!pulse) return; /* no pulses: the servo holds its position */
 	if (v < 0.0) v = 0.0;
 	if (v > 1.0) v = 1.0;
@@ -136,6 +139,12 @@ static void pinheck_brd_servo(void *ctx, uint64_t t, int servo, uint32_t pulse)
 /* switch n (0-63) is PinMAME (n/8+1)*10 + n%8+1, lamps likewise; cabinet inputs are columns 0 and 9 */
 static int pinheck_sw2m(int no) { return (no / 10) * 8 + no % 10 - 1; }
 static int pinheck_m2sw(int col, int row) { return col * 10 + row + 1; }
+
+/* last pulse width of servo 0-4 in microseconds, 0 while it gets no pulses (for the playfield simulator) */
+int pinheck_servo(int servo)
+{
+	return servo >= 0 && servo < BOARD_SERVOS ? brd_servo_us[servo] : 0;
+}
 
 int pinheck_getsol(int solNo)
 {
@@ -160,6 +169,18 @@ static void pinheck_brd_log_outputs(void)
 		else n += sprintf(line + n, " S%d=%d", i - PINHECK_NLAMPS + 1, v);
 	}
 	if (n) fprintf(brd_log, "%.9f P%s\n", timer_get_time(), line);
+	/* switches (PinMAME numbers) that changed since the last frame, e.g. by the simulator */
+	for (n = 0, i = 0; i < 80; i++)
+		if (((coreGlobals.swMatrix[i / 8] ^ brd_sw_logged[i / 8]) >> (i % 8)) & 1)
+			n += sprintf(line + n, " %d=%d", coreData->m2sw(i / 8, i % 8), (coreGlobals.swMatrix[i / 8] >> (i % 8)) & 1);
+	memcpy(brd_sw_logged, (void *)coreGlobals.swMatrix, sizeof(brd_sw_logged));
+	if (n) fprintf(brd_log, "%.9f W%s\n", timer_get_time(), line);
+	/* the binary lamp matrix (columns 1-8, then lamps 91-98) when it changed */
+	if (memcmp(brd_lamps_logged, (void *)coreGlobals.lampMatrix, 9)) {
+		memcpy(brd_lamps_logged, (void *)coreGlobals.lampMatrix, 9);
+		for (n = 0, i = 0; i < 9; i++) n += sprintf(line + n, "%02x", brd_lamps_logged[i]);
+		fprintf(brd_log, "%.9f B %s\n", timer_get_time(), line);
+	}
 }
 
 static void pinheck_brd_init(void)
@@ -194,6 +215,7 @@ static void pinheck_brd_reset(void)
 	core_write_pwm_output_8b(CORE_MODOUT_SOL0 + PINHECK_SOL_GI0, 0);
 	core_write_pwm_output_8b(CORE_MODOUT_SOL0 + PINHECK_SOL_GI8, 0);
 	for (i = PINHECK_SOL_RGB; i < PINHECK_NSOLS; i++) pinheck_brd_level(i, 0);
+	memset(brd_servo_us, 0, sizeof(brd_servo_us));
 	coreGlobals.pulsedSolState = 0;
 	brd_rgb_extra = 0;
 	brd_sols_seen = 0;
@@ -241,10 +263,34 @@ static void pinheck_uart_tx(void *ctx, int uart, uint8_t byte, uint64_t cycle)
 	if (uart == 1 && locals.uart1) fputc(byte, locals.uart1);
 }
 
+/* test log (PINHECK_LINK_LOG): every PIC32-to-Propeller packet, 16 bytes shifted LSB first, data sampled on the rising clock */
+static FILE *link_log;
+static struct { int clk, nbits; uint64_t last, gap; uint8_t b[16]; } lnk;
+
+static void pinheck_link_bit(uint32_t drv, uint64_t cycle)
+{
+	int clk = (drv & RF12) != 0, i;
+	if (clk && !lnk.clk) {
+		if (lnk.nbits && cycle - lnk.last > lnk.gap) lnk.gap = cycle - lnk.last;
+		if (drv & RF5) lnk.b[lnk.nbits >> 3] |= (uint8_t)(1u << (lnk.nbits & 7));
+		else lnk.b[lnk.nbits >> 3] &= (uint8_t)~(1u << (lnk.nbits & 7));
+		lnk.last = cycle;
+		if (++lnk.nbits == 128) {
+			fprintf(link_log, "%.6f", cycle / (double)PINHECK_CLOCK);
+			for (i = 0; i < 16; i++) fprintf(link_log, " %02x", lnk.b[i]);
+			fprintf(link_log, " gap %llu\n", (unsigned long long)lnk.gap);
+			lnk.nbits = 0;
+			lnk.gap = 0;
+		}
+	}
+	lnk.clk = clk;
+}
+
 static void pinheck_port_write(void *ctx, int port, uint32_t lat, uint32_t tris, uint64_t cycle)
 {
 	uint32_t drv = lat & ~tris;
 	(void)ctx;
+	if (port == PIC32MX_PORTF && link_log) pinheck_link_bit(drv, cycle);
 	if (port == PIC32MX_PORTF)
 		prop_pic_pins(&prop, cycle, (drv & RF12 ? 1u << 25 : 0) | (drv & RF5 ? 1u << 26 : 0));
 	pinheck_board_port(&brd, port, lat, tris, cycle);
@@ -641,6 +687,7 @@ static MACHINE_INIT(pinheck)
 	pinheck_open_card();
 	pinheck_disp_init();
 	pinheck_brd_init();
+	if (!link_log && getenv("PINHECK_LINK_LOG")) link_log = fopen(getenv("PINHECK_LINK_LOG"), "w");
 	pic32cpu_set_board(&board);
 }
 
@@ -652,7 +699,8 @@ static MACHINE_RESET(pinheck)
 	boot_reset(&boot, 0);
 	pinheck_disp_reset();
 	cat24m01_init(&u13, u13mem, 0);
-	ds1340_init(&rtc, pinheck_local_now(), PINHECK_CLOCK);
+	/* test hook: PINHECK_RTC (seconds since 1970, local time) starts the clock there, so a run is repeatable */
+	ds1340_init(&rtc, getenv("PINHECK_RTC") ? strtoll(getenv("PINHECK_RTC"), NULL, 10) : pinheck_local_now(), PINHECK_CLOCK);
 	locals.rtc_at = 0;
 	locals.send = getenv("PINHECK_UART1_SEND");
 	locals.send_at = (uint64_t)((at ? atof(at) : 0.0) * PINHECK_CLOCK);

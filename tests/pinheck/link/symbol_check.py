@@ -25,7 +25,7 @@ def defined(path):
 root = sys.argv[1] if len(sys.argv) > 1 else '.'
 ours = [p for p in glob.glob(root + '/src/cpu/mips32/*.c') + glob.glob(root + '/src/cpu/pic32mx/*.c')
         + glob.glob(root + '/src/cpu/p8x32a/*.c') + glob.glob(root + '/src/wpc/pinheck/*.c')
-        + glob.glob(root + '/src/wpc/pinheck*.c')]
+        + glob.glob(root + '/src/wpc/pinheck*.c') + glob.glob(root + '/src/wpc/sims/pinheck/*.c')]
 mine = {}
 for p in ours:
     for name in defined(p):
