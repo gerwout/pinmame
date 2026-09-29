@@ -307,7 +307,7 @@ static struct {
 
 static void pinheck_snd_ctr(void *ctx, uint64_t t, int cog, int ctr, uint32_t ctr_reg, uint32_t frq) { (void)ctx; audio_ctr(&snd, t, cog, ctr, ctr_reg, frq); }
 static void pinheck_snd_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir) { (void)ctx; audio_pins(&snd, t, out, dir); }
-static void pinheck_snd_log(void *ctx, const char *msg) { (void)ctx; logerror("pinheck: %s\n", msg); }
+static void pinheck_snd_log(void *ctx, const char *msg) { pinheck_prop_log(ctx, msg); }
 
 static void pinheck_wav_le(FILE *f, uint32_t v, int n)
 {
@@ -409,6 +409,12 @@ static MACHINE_INIT(pinheck)
 	prop_set_log(&prop, pinheck_prop_log, NULL);
 	prop_set_tx(&prop, pinheck_prop_tx, NULL);
 	if (sndl.started) prop_set_sound(&prop, pinheck_snd_ctr, pinheck_snd_pins, NULL);
+	if (sndl.started && getenv("PINHECK_SND_SELFTEST")) {
+		audio_pins(&snd, 0, 0, 1u << AUDIO_PIN_L);
+		audio_ctr(&snd, 0, 7, 0, (2u << 26) | AUDIO_PIN_L, 0);
+		audio_ctr(&snd, 0, 7, 0, 0, 0);
+		audio_pins(&snd, 0, 0, 0);
+	}
 	boot_init(&boot, memory_region(PINHECK_CPUREGION), memory_region_length(PINHECK_CPUREGION), pinheck_boot_tx, NULL);
 	boot_set_log(&boot, pinheck_prop_log, NULL);
 	pinheck_open_card();

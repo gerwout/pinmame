@@ -44,5 +44,10 @@ print('drift: clip starts at %.4f s (48000 Hz) and %.4f s (22050 Hz), %.2f ms ap
 sys.exit(0 if d <= 2.0 else 1)
 PY
 
+run selftest
+(cd $B && PINHECK_SND_SELFTEST=1 PINHECK_PROP_LOG=$PWD/prop.log timeout 600 "$SDL3PINMAME" dominos -rompath roms -nvram_directory nvram \
+	-headless -frames_to_run 30 -skip_gamewarnings -nothrottle -samplefreq 48000 -fakesound > run.out 2>&1) || { echo "AUDIO FAIL (selftest): PinMAME exited $?"; fail=1; }
+grep -aqF "audio: counter mode 2 on P15 not modelled" $B/prop.log || { echo "AUDIO FAIL: audio messages do not reach PINHECK_PROP_LOG"; fail=1; }
+
 [ $fail -eq 0 ] && echo "pinmame audio: ok"
 [ $fail -eq 0 ]
