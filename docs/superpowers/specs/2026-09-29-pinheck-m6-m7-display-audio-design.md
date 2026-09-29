@@ -24,7 +24,7 @@ The display is not driven by the Propeller's video generator. No `WAITVID` execu
 | P17 | DMD_11 | pulses once before a config packet |
 
 - **Frames:** each is exactly 4096 bytes, 128 × 32 pixels, one byte per pixel, RGB332. That's the same format as the `.VID` files. Decoded, the last frame of the probe reads "FLASHING TO: / CONNECT PIC32: FATAL / PLEASE RESTART", which is correct for a run without a PIC32.
-- **Config packet:** observed once, 14 bytes: `00 b1 01 54 00 00 00 ff 00 80 00 20 00 3e`. It contains 128 (`80`) and 32 (`20`), and presumably the service-menu display settings (`PIXEL SHAPE` SQUARE/HIGHREZ, `BRIGHTNESS`, `POSITION`, `BAR BRIGHT`). Its encoding is not yet known.
+- **Config packet:** observed once, 14 bytes: `00 b1 01 54 00 00 00 ff 00 80 00 20 00 3e`. It contains 128 (`80`) and 32 (`20`), and the service-menu display settings (`PIXEL SHAPE` ROUND/SQUARE/HIGHREZ, `BRIGHTNESS`, `POSITION`, `BAR BRIGHT`). The encoding is in the M8/M9 addendum §5.
 - **Firmware framebuffer:** the Propeller also keeps a readable 128×32 RGB332 framebuffer in hub RAM at about `$57EE`–`$67ED`, which Plan 5 recorded.
 
 ### 2.2 Audio
@@ -39,7 +39,7 @@ The display is not driven by the Propeller's video generator. No `WAITVID` execu
 | Target | standalone `sdl3pinmame` | user's target; YAGNI for VPX paths |
 | Display model | pin-level model of the receiving display module | exact; sits at the real hardware boundary; cheap |
 | Video generator | not used for the display; dropped from the display path | the firmware does not use it (§2.1) |
-| Display look | exact pixels; the config packet is decoded, logged and kept but not applied | the module's rendering of the settings is unknown; applying it is a later follow-up |
+| Display look | exact pixels; the config packet is decoded, logged and kept but not applied | the module's rendering of the settings is unknown; applied since the display-look plan (M8/M9 addendum §5) |
 | Audio model | exact time-weighted duty integration from a counter-state sink, plus a DC-blocking high-pass | spec §5.4; correct for any Propeller mixing rate |
 | Verification | offline, sample- and pixel-accurate | emulation runs below real time until Milestone 9 |
 
@@ -128,6 +128,6 @@ Plans 6 and 7 are written and executed in parallel once Plan 5 is merged.
 
 ## 8. Out of scope
 
-- Applying the config packet (display look): a later follow-up, once in-game packets per service-menu setting have been captured.
+- Applying the config packet (display look): done by the display-look plan (M8/M9 addendum §5).
 - Real-time audio quality: Milestone 9.
 - VPX, VPinMAME, libpinmame and external-DMD export.
