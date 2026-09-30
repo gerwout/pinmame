@@ -420,32 +420,40 @@ static uint32_t alu(unsigned i, uint32_t s, uint32_t d, unsigned pc, int run, in
 
 static uint32_t ror32(uint32_t x, unsigned n) { return n ? x >> n | x << (32 - n) : x; }
 
-/* the common ALU ops of a running cog (not hub ops); the others go to alu() */
-static uint32_t alu_run(unsigned i, uint32_t s, uint32_t d, unsigned pc, int ci, int zi, int bus_c, int *wr, int *co, int *zo)
+/* the common ALU ops of a running cog (not hub ops); the others go to alu(). wc = 0: *co need not be set */
+static uint32_t alu_run(unsigned i, uint32_t s, uint32_t d, unsigned pc, int ci, int zi, int bus_c, int wc, int *wr, int *co, int *zo)
 {
 	uint32_t r;
 	unsigned sh = s & 31;
 	*wr = 1;
+	*co = 0;
 	switch (i) {
 	case 0x08: r = ror32(d, sh); *co = (int)(d & 1); break;
 	case 0x09: r = ror32(d, (32 - sh) & 31); *co = (int)(d >> 31); break;
 	case 0x0A: r = d >> sh; *co = (int)(d & 1); break;
 	case 0x0B: r = d << sh; *co = (int)(d >> 31); break;
+	case 0x0C: r = sh ? d >> sh | (ci ? 0xFFFFFFFFu << (32 - sh) : 0) : d; *co = (int)(d & 1); break;
+	case 0x0D: r = sh ? d << sh | (ci ? 0xFFFFFFFFu >> (32 - sh) : 0) : d; *co = (int)(d >> 31); break;
+	case 0x0E: r = sh ? d >> sh | ((d >> 31) ? 0xFFFFFFFFu << (32 - sh) : 0) : d; *co = (int)(d & 1); break;
+	case 0x0F: r = bitrev(d) >> sh; *co = (int)(d & 1); break;
 	case 0x14: r = (d & 0xFFFFFE00u) | (s & 511); *co = d < s; break;
 	case 0x15: r = (d & 0xFFFC01FFu) | ((s & 511) << 9); *co = d < s; break;
+	case 0x16: r = ((s & 511) << 23) | (d & 0x007FFFFFu); *co = d < s; break;
 	case 0x17: r = (d & 0xFFFFFE00u) | (pc & 511); *co = d < s; break;
-	case 0x18: r = d & s; *co = parity(r); break;
-	case 0x19: r = d & ~s; *co = parity(r); break;
-	case 0x1A: r = d | s; *co = parity(r); break;
-	case 0x1B: r = d ^ s; *co = parity(r); break;
-	case 0x1C: r = ci ? d | s : d & ~s; *co = parity(r); break;
-	case 0x1D: r = ci ? d & ~s : d | s; *co = parity(r); break;
-	case 0x1E: r = zi ? d | s : d & ~s; *co = parity(r); break;
-	case 0x1F: r = zi ? d & ~s : d | s; *co = parity(r); break;
+	case 0x18: r = d & s; if (wc) *co = parity(r); break;
+	case 0x19: r = d & ~s; if (wc) *co = parity(r); break;
+	case 0x1A: r = d | s; if (wc) *co = parity(r); break;
+	case 0x1B: r = d ^ s; if (wc) *co = parity(r); break;
+	case 0x1C: r = ci ? d | s : d & ~s; if (wc) *co = parity(r); break;
+	case 0x1D: r = ci ? d & ~s : d | s; if (wc) *co = parity(r); break;
+	case 0x1E: r = zi ? d | s : d & ~s; if (wc) *co = parity(r); break;
+	case 0x1F: r = zi ? d & ~s : d | s; if (wc) *co = parity(r); break;
 	case 0x20: r = d + s; *co = r < d; break;
 	case 0x21: r = d - s; *co = d < s; break;
 	case 0x28: r = s; *co = (int)(s >> 31); break;
+	case 0x30: r = d - s; *co = (int32_t)d < (int32_t)s; break;
 	case 0x39: r = d - 1; *co = !d; break;
+	case 0x3A: case 0x3B: r = d; break;
 	default: return alu(i, s, d, pc, 1, ci, zi, 0, bus_c, wr, co, zo);
 	}
 	*zo = !r;
@@ -465,7 +473,7 @@ static void loop_notify(p8x32a *p, uint64_t t, uint32_t pins)
 {
 	int n;
 	for (n = 0; n < 8; n++)
-		if ((p->sleepers >> n & 1) && (pins & p->loop[n].wake) && t < p->cog[n].ev_t) p->cog[n].ev_t = t;
+		if ((p->sleepers >> n & 1) && (pins & p->loop[n].wake) && t < p->cog[n].ev_t) { p->cog[n].ev_t = t; p->sched_gen++; }
 }
 
 static void loop_hub_write(p8x32a *p, int writer, unsigned a, unsigned sz, uint64_t h)
@@ -475,7 +483,7 @@ static void loop_hub_write(p8x32a *p, int writer, unsigned a, unsigned sz, uint6
 		p8x32a_loop *l = &p->loop[n];
 		if (!(p->sleepers >> n & 1) || n == writer) continue;
 		for (k = 0; k < l->nhub; k++)
-			if (a < (unsigned)l->hub_a[k] + l->hub_n[k] && l->hub_a[k] < a + sz && h < p->cog[n].ev_t) p->cog[n].ev_t = h;
+			if (a < (unsigned)l->hub_a[k] + l->hub_n[k] && l->hub_a[k] < a + sz && h < p->cog[n].ev_t) { p->cog[n].ev_t = h; p->sched_gen++; }
 	}
 }
 
@@ -651,7 +659,14 @@ static void complete(p8x32a *p, int n, uint64_t m3, uint32_t q, int bus_c)
 	unsigned op = OP(i);
 	int wr, co, zo, jc = 0;
 
-	r = alu(op, c->s, c->d, c->p, c->run, c->c, c->z, q, bus_c, &wr, &co, &zo);
+	if (op <= 3) {
+		/* alu() for group 0: the hub result */
+		r = (c->run || (c->p >> 4) != 31) ? q : 0;
+		wr = 1;
+		co = bus_c;
+		zo = !r;
+	} else
+		r = alu(op, c->s, c->d, c->p, c->run, c->c, c->z, q, bus_c, &wr, &co, &zo);
 	if (c->cond) {
 		if (FWR(i)) {
 			if (wr && c->ram[DST(i)] != r) { c->ram[DST(i)] = r; p->loop[n].dirty = 1; }
@@ -706,6 +721,7 @@ static void sys(p8x32a *p, int n, uint64_t h)
 	uint8_t enc = (op & 4) ? p->lock_e : p->cog_e, bit;
 	int all = enc == 0xFF, old = 0;
 
+	p->sched_gen++;
 	while (newx < 7 && (enc >> newx & 1)) newx++;
 	num = ((op == 2 && (dc & 8)) || op == 4) ? newx : (dc & 7);
 	bit = (uint8_t)(1u << num);
@@ -870,66 +886,149 @@ static int local(const p8x32a_cog *c)
 	return !(FWR(i) && DST(i) >= 0x1F0);
 }
 
-/* exec + complete for local instructions of cog n, kept in locals, until one is not local or t is passed */
+/* a hub op or wait whose issue reads nothing shared: exec() for it may run ahead too */
+static int issue_local(const p8x32a_cog *c)
+{
+	uint32_t i = c->ix;
+	unsigned op = OP(i);
+	if (!c->run || (op > 3 && (op < 0x3C || op > 0x3E))) return 0;
+	return FIM(i) || SRC(i) < 0x1F0;
+}
+
+enum { K_NL, K_GEN, K_JMP, K_DJNZ, K_TJ, K_AND, K_ANDN, K_OR, K_XOR, K_ADD, K_SUB, K_MOV, K_SHL, K_SHR, K_MOVS, K_MOVD, K_MOVI };
+enum { F_IMM = 1, F_SPEC = 2, F_WR = 4, F_WC = 8, F_WZ = 16 };
+
+/* decode for run_local: K_NL for an instruction it does not run */
+static void dec_fill(p8x32a_dec *e, uint32_t i)
+{
+	unsigned op = OP(i);
+	static const uint8_t kinds[64] = {
+		K_NL, K_NL, K_NL, K_NL, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_SHR, K_SHL, K_GEN, K_GEN, K_GEN, K_GEN,
+		K_GEN, K_GEN, K_GEN, K_GEN, K_MOVS, K_MOVD, K_MOVI, K_JMP, K_AND, K_ANDN, K_OR, K_XOR, K_GEN, K_GEN, K_GEN, K_GEN,
+		K_ADD, K_SUB, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_MOV, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN,
+		K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_DJNZ, K_TJ, K_TJ, K_NL, K_NL, K_NL, K_NL
+	};
+	e->word = i;
+	e->src = (uint16_t)SRC(i);
+	e->dst = (uint16_t)DST(i);
+	e->cond = (uint8_t)COND(i);
+	e->kind = kinds[op];
+	e->fl = (uint8_t)((FIM(i) ? F_IMM : (SRC(i) >= 0x1F0 ? F_SPEC : 0)) | (FWR(i) ? F_WR : 0) | (FWC(i) ? F_WC : 0) | (FWZ(i) ? F_WZ : 0));
+	if ((FWR(i) && DST(i) >= 0x1F0) || (!FIM(i) && SRC(i) == 0x1F2)) e->kind = K_NL;
+}
+
+/* exec + complete for local instructions of cog n, kept in locals, until one is not local or t is passed.
+   fl holds Z (bit 0), C (bit 1) and cancel (bit 2); an instruction runs if bit fl of its condition mask is set. */
 static void run_local(p8x32a *p, int n, uint64_t t)
 {
 	p8x32a_cog *c = &p->cog[n];
 	p8x32a_loop *l = &p->loop[n];
-	uint64_t t2 = c->ev_t;
+	p8x32a_dec *dec = p->dec[n], *e;
+	uint32_t *ram = c->ram;
+	uint64_t t2 = c->ev_t, dis = c->disable_at, tl = dis < 2 ? 0 : dis - 2 < t ? dis - 2 : t;
 	uint32_t ix = c->ix;
-	unsigned pc = c->p;
-	int cf = c->c, zf = c->z, cancel = c->cancel, idled = 0;
+	unsigned pc = c->p, fl = (unsigned)(c->c << 1 | c->z) | (unsigned)c->cancel << 2, nins = 0;
+	int idled = 0;
 
-	while (t2 <= t) {
-		uint32_t i = ix, s, d, r, nix;
-		unsigned op = OP(i), px, a;
-		int cond, jump, wr, co, zo, jc = 0;
-		if (op <= 3 || op >= 0x3C || (FWR(i) && DST(i) >= 0x1F0)) break;
-		if (FIM(i)) s = SRC(i);
-		else if ((a = SRC(i)) < 0x1F0) s = c->ram[a];
-		else if (a == 0x1F2) break;
+	if (t2 > tl || dis < 2) goto limit;
+	for (;;) {
+		uint32_t s, d, r, nix;
+		unsigned px = pc, jc = 0;
+		e = &dec[(pc - 1) & 511];
+		if (e->word != ix) dec_fill(e, ix);
+		if (e->kind == K_NL) break;
+		if (e->fl & F_IMM) s = e->src;
+		else if (!(e->fl & F_SPEC)) s = ram[e->src];
 		else {
-			s = sread(p, n, a, t2);
-			if (a == 0x1F1 || a == 0x1FC || a == 0x1FD) l->dirty = 1;
+			s = sread(p, n, e->src, t2);
+			if (e->src == 0x1F1 || e->src == 0x1FC || e->src == 0x1FD) l->dirty = 1;
 		}
-		cond = ((COND(i) >> ((cf << 1) | zf)) & 1) && !cancel;
-		d = c->ram[DST(i)];
-		jump = op == 0x17 || (op >= 0x39 && op <= 0x3B);
-		px = (cond && jump) ? (s & 511) : pc;
-		nix = c->ram[px];
-		if (t2 + 1 >= c->disable_at) { idled = 1; break; }
-		r = alu_run(op, s, d, pc, cf, zf, p->sys_c, &wr, &co, &zo);
-		if (cond) {
-			if (FWR(i) && wr && c->ram[DST(i)] != r) { c->ram[DST(i)] = r; l->dirty = 1; }
-			if (FWC(i)) cf = co;
-			if (FWZ(i)) zf = zo;
-			if (op == 0x39) jc = !(d >> 1) && (d & 1);
-			else if (op == 0x3A) jc = !(d >> 1) && !(d & 1);
-			else if (op == 0x3B) jc = !(!(d >> 1) && !(d & 1));
-		}
-		l->nins++;
-		if (cond && !jc && jump && px < pc) {
-			loop_edge(p, n, px, t2 + 1);
-			if (l->state == LOOP_RECORD) {
-				c->i = i; c->s = s; c->d = d; c->px = (uint16_t)px; c->nix = nix; c->cond = (uint8_t)cond;
-				if (!jc) pc = (px + 1) & 511;
-				cancel = jc || px == 511;
-				ix = nix;
-				t2 += 4;
-				break;
+		if ((e->cond >> fl) & 1) {
+			unsigned co = 0, zo;
+			d = ram[e->dst];
+			switch (e->kind) {
+			case K_JMP: px = s & 511; r = (d & 0xFFFFFE00u) | (pc & 511); co = d < s; break;
+			case K_DJNZ: px = s & 511; r = d - 1; co = !d; jc = d == 1; break;
+			case K_AND: r = d & s; if (e->fl & F_WC) co = (unsigned)parity(r); break;
+			case K_ANDN: r = d & ~s; if (e->fl & F_WC) co = (unsigned)parity(r); break;
+			case K_OR: r = d | s; if (e->fl & F_WC) co = (unsigned)parity(r); break;
+			case K_XOR: r = d ^ s; if (e->fl & F_WC) co = (unsigned)parity(r); break;
+			case K_ADD: r = d + s; co = r < d; break;
+			case K_SUB: r = d - s; co = d < s; break;
+			case K_MOV: r = s; co = s >> 31; break;
+			case K_SHL: r = d << (s & 31); co = d >> 31; break;
+			case K_SHR: r = d >> (s & 31); co = d & 1; break;
+			case K_MOVS: r = (d & 0xFFFFFE00u) | (s & 511); co = d < s; break;
+			case K_MOVD: r = (d & 0xFFFC01FFu) | ((s & 511) << 9); co = d < s; break;
+			case K_MOVI: r = ((s & 511) << 23) | (d & 0x007FFFFFu); co = d < s; break;
+			default: {
+				int wr, ci, zi;
+				unsigned op = OP(ix);
+				if (e->kind == K_TJ) px = s & 511;
+				nix = ram[px];
+				r = alu_run(op, s, d, pc, (int)(fl >> 1 & 1), (int)(fl & 1), p->sys_c, (e->fl & F_WC) != 0, &wr, &ci, &zi);
+				co = (unsigned)ci;
+				zo = (unsigned)zi;
+				if (op == 0x3A) jc = !d;
+				else if (op == 0x3B) jc = d != 0;
+				if ((e->fl & F_WR) && wr && ram[e->dst] != r) { ram[e->dst] = r; l->dirty = 1; }
+				goto flags;
 			}
+			}
+			nix = ram[px];
+			zo = !r;
+			if ((e->fl & F_WR) && ram[e->dst] != r) { ram[e->dst] = r; l->dirty = 1; }
+		flags:
+			if (e->fl & F_WC) fl = (fl & ~2u) | co << 1;
+			if (e->fl & F_WZ) fl = (fl & ~1u) | zo;
+			nins++;
+			if (!jc && px < pc && e->kind >= K_JMP && e->kind <= K_TJ) {
+				l->nins = (uint16_t)(l->nins + nins);
+				nins = 0;
+				loop_edge(p, n, px, t2 + 1);
+				if (l->state == LOOP_RECORD) {
+					c->i = ix; c->s = s; c->d = d; c->px = (uint16_t)px; c->nix = nix; c->cond = 1;
+					pc = (px + 1) & 511;
+					fl = (fl & 3) | (px == 511) << 2;
+					ix = nix;
+					t2 += 4;
+					break;
+				}
+			}
+		} else {
+			nix = ram[px];
+			nins++;
 		}
 		if (!jc) pc = (px + 1) & 511;
-		cancel = jc || px == 511;
+		fl = (fl & 3) | (jc || px == 511) << 2;
 		ix = nix;
 		t2 += 4;
-		if (t2 - 2 >= c->disable_at) { idled = 2; break; }
+		if (t2 > tl) {
+			if (t2 - 2 >= dis) { idled = 1; break; }
+			goto limit;
+		}
 	}
+	goto out;
+limit:
+	/* t is passed, or the next instruction starts too late to run before the cog stops */
+	if (t2 <= t) {
+		e = &dec[(pc - 1) & 511];
+		if (e->word != ix) dec_fill(e, ix);
+		if (e->kind != K_NL) {
+			if ((e->fl & F_SPEC)) {
+				(void)sread(p, n, e->src, t2);
+				if (e->src == 0x1F1 || e->src == 0x1FC || e->src == 0x1FD) l->dirty = 1;
+			}
+			idled = 1;
+		}
+	}
+out:
+	l->nins = (uint16_t)(l->nins + nins);
 	c->p = (uint16_t)pc;
 	c->ix = ix;
-	c->c = (uint8_t)cf;
-	c->z = (uint8_t)zf;
-	c->cancel = (uint8_t)cancel;
+	c->c = (uint8_t)(fl >> 1 & 1);
+	c->z = (uint8_t)(fl & 1);
+	c->cancel = (uint8_t)(fl >> 2 & 1);
 	c->t0 = t2 - 2;
 	c->ev_t = t2;
 	c->ev = EV_EXEC;
@@ -940,16 +1039,25 @@ void p8x32a_run_until(p8x32a *p, uint64_t t)
 {
 	p->horizon = t;
 	for (;;) {
-		int n, best = -1;
+		int n, best;
+		uint64_t bk = P8X32A_NEVER, bk2 = P8X32A_NEVER;
+		unsigned gen;
 		p8x32a_cog *b;
+		/* the next event: earliest, then hub events, then the lowest cog; bk2 is the one after it */
 		for (n = 0; n < 8; n++) {
-			p8x32a_cog *c = &p->cog[n];
+			const p8x32a_cog *c = &p->cog[n];
+			uint64_t e = c->ev_t < ((uint64_t)1 << 59) ? c->ev_t : (uint64_t)1 << 59;
+			uint64_t k = e << 4 | (uint64_t)(c->ev != EV_HUB) << 3 | (uint64_t)n;
 			if (c->ev == EV_NONE) continue;
-			if (best < 0 || c->ev_t < p->cog[best].ev_t ||
-			    (c->ev_t == p->cog[best].ev_t && c->ev == EV_HUB && p->cog[best].ev != EV_HUB)) best = n;
+			if (k < bk) { bk2 = bk; bk = k; }
+			else if (k < bk2) bk2 = k;
 		}
-		if (best < 0 || p->cog[best].ev_t > t || p->stop) break;
+		if (bk == P8X32A_NEVER) break;
+		best = (int)(bk & 7);
+		if (p->cog[best].ev_t > t || p->stop) break;
 		b = &p->cog[best];
+		gen = p->sched_gen;
+	again:
 		p->now = b->ev_t;
 		switch (b->ev) {
 		case EV_HUB: do_hub(p, best); break;
@@ -964,10 +1072,15 @@ void p8x32a_run_until(p8x32a *p, uint64_t t)
 		}
 		if (p->loop[best].state == LOOP_RECORD) loop_post(p, best);
 		/* local instructions run on ahead of the other cogs: their order against them is unobservable */
-		while (b->ev == EV_EXEC && b->ev_t <= t && local(b)) {
-			if (p->loop[best].state == LOOP_RECORD) exec(p, best);
+		while (b->ev == EV_EXEC && b->ev_t <= t && (local(b) || issue_local(b))) {
+			if (p->loop[best].state == LOOP_RECORD || !local(b)) exec(p, best);
 			else run_local(p, best, t);
 			if (p->loop[best].state == LOOP_RECORD) loop_post(p, best);
+		}
+		/* while no other cog's next event has changed, this cog goes again if it is still the earliest */
+		if (gen == p->sched_gen && b->ev != EV_NONE && b->ev_t <= t && !p->stop) {
+			uint64_t e = b->ev_t < ((uint64_t)1 << 59) ? b->ev_t : (uint64_t)1 << 59;
+			if ((e << 4 | (uint64_t)(b->ev != EV_HUB) << 3 | (uint64_t)best) < bk2) goto again;
 		}
 	}
 	flush(p, t);
@@ -1010,7 +1123,9 @@ void p8x32a_reset(p8x32a *p, uint64_t t)
 
 void p8x32a_init(p8x32a *p, const p8x32a_bus *bus)
 {
+	int n;
 	memset(p, 0, sizeof(*p));
 	p->bus = *bus;
+	for (n = 0; n < 8 * 512; n++) dec_fill(&p->dec[0][0] + n, 0);
 	p8x32a_reset(p, 0);
 }

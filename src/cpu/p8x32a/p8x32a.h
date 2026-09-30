@@ -58,6 +58,13 @@ typedef struct p8x32a_loop {
 	unsigned char snap[P8X32A_PAT][P8X32A_SNAP];
 } p8x32a_loop;
 
+/* a decoded instruction word, valid while word matches the instruction being run */
+typedef struct p8x32a_dec {
+	uint32_t word;
+	uint16_t src, dst;
+	uint8_t kind, fl, cond, pad;
+} p8x32a_dec;
+
 typedef struct p8x32a {
 	p8x32a_bus bus;
 	uint8_t hub[65536];
@@ -78,8 +85,10 @@ typedef struct p8x32a {
 	uint32_t reg_out, reg_dir, cog_dir[8], nco_lvl[16];
 	uint64_t nco_from[16], nco_nt[16];
 	uint8_t sleepers;
+	unsigned sched_gen; /* counts changes one cog makes to another cog's next event */
 	uint64_t sleeps; /* idle loops entered */
 	p8x32a_loop loop[8];
+	p8x32a_dec dec[8][512];
 } p8x32a;
 
 void p8x32a_init(p8x32a *p, const p8x32a_bus *bus);

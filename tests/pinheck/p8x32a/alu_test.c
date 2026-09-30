@@ -133,7 +133,7 @@ int main(int argc, char **argv)
 		/* alu_run: a running cog's non-hub, non-wait ops, as the core calls it (no hub result) */
 		if (i < 4 || i >= 0x3C) continue;
 		r1 = ref_alu(i, s, d, pc, 1, ci, zi, 0, bc, &w1, &c1, &z1);
-		r2 = alu_run(i, s, d, pc, ci, zi, bc, &w2, &c2, &z2);
+		r2 = alu_run(i, s, d, pc, ci, zi, bc, 1, &w2, &c2, &z2);
 		if ((r1 != r2 || w1 != w2 || c1 != c2 || z1 != z2) && bad++ < 10)
 			printf("ALU FAIL: alu_run op %02x s %08x d %08x pc %03x c %d z %d: ref %08x w%d c%d z%d, got %08x w%d c%d z%d\n",
 			       i, (unsigned)s, (unsigned)d, pc, ci, zi, (unsigned)r1, w1, c1, z1, (unsigned)r2, w2, c2, z2);
