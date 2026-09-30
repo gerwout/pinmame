@@ -209,6 +209,35 @@ static void threaded(void)
 	CHECK(n > 0);
 }
 
+static int npins;
+
+static void count_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
+{
+	(void)ctx; (void)t; (void)out; (void)dir;
+	npins++;
+}
+
+/* the pins callback runs on a change of the pins in its mask (and once for the first change, which every device
+   sees); echo drives P24 only */
+static void pins_mask(void)
+{
+	const uint32_t masks[3] = { 0xFFFFFFFFu, 1u << 24, ~(1u << 24) };
+	int k, calls[3];
+	for (k = 0; k < 3; k++) {
+		uint64_t pic = 200000;
+		int b;
+		boot();
+		prop_set_pins(&p, count_pins, NULL);
+		if (k) prop_set_pins_mask(&p, masks[k]);
+		npins = 0;
+		prop_catch_up(&p, pic);
+		for (b = 0; b < BITS; b++) pulse(&pic, (b * 7 + 3) % 5 < 2);
+		prop_catch_up(&p, pic);
+		calls[k] = npins;
+	}
+	CHECK(calls[0] > 2 && calls[1] == calls[0] && calls[2] == 1);
+}
+
 static int load(const char *path, uint8_t *dst)
 {
 	FILE *f = fopen(path, "rb");
@@ -233,6 +262,7 @@ int main(int argc, char **argv)
 	reset_rebases(0);
 	clkset_reset_bit();
 	threaded();
+	pins_mask();
 	printf("prop: %s\n", fails ? "FAIL" : "ok");
 	return fails != 0;
 }

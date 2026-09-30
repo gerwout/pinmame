@@ -120,7 +120,7 @@ static void pins_out(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 		int mosi = (dir & PIN_DI) ? (out & PIN_DI) != 0 : 1;
 		p->sd_do = p->sd(p->sd_ctx, cs, sclk, mosi) != 0;
 	}
-	if (p->pins) p->pins(p->pins_ctx, t, out, dir);
+	if (p->pins && (ch & p->pins_mask)) p->pins(p->pins_ctx, t, out, dir);
 }
 
 static void ctr_state(void *ctx, uint64_t t, int cog, int ctr, uint32_t ctr_reg, uint32_t frq)
@@ -214,6 +214,13 @@ void prop_set_pins(pinheck_prop *p, prop_pins_fn fn, void *ctx)
 {
 	p->pins = fn;
 	p->pins_ctx = ctx;
+	p->pins_mask = 0xFFFFFFFFu;
+}
+
+void prop_set_pins_mask(pinheck_prop *p, uint32_t mask)
+{
+	p->pins_mask = mask;
+	p->po_ok = 0;
 }
 
 void prop_set_sound(pinheck_prop *p, prop_ctr_fn ctr, prop_pins_fn pins, void *ctx)

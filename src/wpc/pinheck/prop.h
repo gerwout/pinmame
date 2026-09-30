@@ -48,6 +48,7 @@ typedef struct pinheck_prop {
 	void *snd_ctx;
 	prop_pins_fn pins;
 	void *pins_ctx;
+	uint32_t pins_mask; /* pins calls fn only on a change of these (default all) */
 	prop_clock_fn clock; /* the PIC32 cycle now */
 	void *clock_ctx;
 	uint64_t stamp; /* the PIC32 cycle at which the running call was made */
@@ -60,6 +61,7 @@ void prop_set_log(pinheck_prop *p, prop_log_fn fn, void *ctx);
 void prop_set_tx(pinheck_prop *p, prop_tx_fn fn, void *ctx);
 void prop_set_sound(pinheck_prop *p, prop_ctr_fn ctr, prop_pins_fn pins, void *ctx);
 void prop_set_pins(pinheck_prop *p, prop_pins_fn fn, void *ctx);
+void prop_set_pins_mask(pinheck_prop *p, uint32_t mask);
 void prop_reset(pinheck_prop *p, uint64_t pic_cycle);
 void prop_pic_pins(pinheck_prop *p, uint64_t pic_cycle, uint32_t pins);
 void prop_catch_up(pinheck_prop *p, uint64_t pic_cycle);

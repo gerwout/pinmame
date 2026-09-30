@@ -9,6 +9,8 @@ extern "C" {
 #endif
 
 #define P8X32A_NEVER 0xFFFFFFFFFFFFFFFFull
+#define P8X32A_PEND_COG(n) (1u << (n))       /* pend_what: cog n's OUTA or DIRA */
+#define P8X32A_PEND_CTR(j) (1u << (8 + (j))) /* pend_what: counter j (2 * cog + 0 for A, 1 for B) */
 
 typedef struct p8x32a_bus {
 	void *ctx;
@@ -105,7 +107,7 @@ typedef struct p8x32a {
 	uint8_t cog_e, lock_e, lock_state, cfg, sys_q, sys_c;
 	uint64_t now, horizon, flushed, slot_base, cnt_base;
 	uint64_t pend[40];
-	uint32_t pend_pins[40];
+	uint32_t pend_pins[40], pend_what[40]; /* the pins a pending point may change, and the registers that change there */
 	int npend;
 	uint32_t last_out, last_dir;
 	uint32_t logged;
@@ -115,7 +117,7 @@ typedef struct p8x32a {
 	uint16_t nco_mask, nco_ok; /* counters (2 * cog + ctr) with an NCO mode now or before their last write; cached next changes */
 	uint8_t nco_n, nco_list[16];
 	int pins_ok; /* reg_out, reg_dir, cog_dir, nco_lvl hold the pins since the last change point */
-	uint32_t reg_out, reg_dir, cog_dir[8], nco_lvl[16];
+	uint32_t reg_out, reg_dir, cog_dir[8], cog_out[8], nco_lvl[16];
 	uint64_t nco_from[16], nco_nt[16];
 	uint8_t sleepers;
 	unsigned sched_gen; /* counts changes one cog makes to another cog's next event */

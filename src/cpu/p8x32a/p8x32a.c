@@ -49,27 +49,31 @@ static uint32_t regval(const p8x32a_reg *r, uint64_t t) { return t >= r->at ? r-
 static void loop_notify(p8x32a *p, uint64_t t, uint32_t pins);
 static void jit_write(p8x32a *p, int n, unsigned s, uint32_t old);
 
-/* a pin change at t; pins = the pins it may change */
-static void add_pending(p8x32a *p, uint64_t t, uint32_t pins)
+/* a pin change at t; pins = the pins it may change, what = the registers that change (P8X32A_PEND_COG(n): cog n's
+   OUTA or DIRA, P8X32A_PEND_CTR(j): counter j = 2 * cog + A/B) */
+static void add_pending(p8x32a *p, uint64_t t, uint32_t pins, uint32_t what)
 {
 	int k;
 	if (p->sleepers) loop_notify(p, t, pins);
-	p->pins_ok = 0;
 	for (k = 0; k < p->npend; k++)
-		if (p->pend[k] == t) { p->pend_pins[k] |= pins; return; }
-	if (p->npend < (int)(sizeof(p->pend) / sizeof(p->pend[0]))) { p->pend_pins[p->npend] = pins; p->pend[p->npend++] = t; }
+		if (p->pend[k] == t) { p->pend_pins[k] |= pins; p->pend_what[k] |= what; return; }
+	if (p->npend < (int)(sizeof(p->pend) / sizeof(p->pend[0]))) {
+		p->pend_pins[p->npend] = pins;
+		p->pend_what[p->npend] = what;
+		p->pend[p->npend++] = t;
+	}
 }
 
 static void flush(p8x32a *p, uint64_t t);
 
-static void regset(p8x32a *p, p8x32a_reg *r, uint32_t v, uint64_t at)
+static void regset(p8x32a *p, int n, p8x32a_reg *r, uint32_t v, uint64_t at)
 {
 	uint32_t pins = (r->cur ^ v) | (r->prev ^ v);
 	flush(p, p->now);
 	if (at > r->at) r->prev = r->cur;
 	r->cur = v;
 	r->at = at;
-	add_pending(p, at, pins);
+	add_pending(p, at, pins, P8X32A_PEND_COG(n));
 }
 
 static int nco(uint32_t ctr)
@@ -176,6 +180,31 @@ static uint32_t pins_nco(p8x32a *p, uint64_t t, int full)
 	return o;
 }
 
+/* pins_nco(p, when, 0) and the next ctr_next(p, when) in one pass: the counters that change at when flip and get
+   their next change; when is ctr_next(p->flushed), so every listed counter's next change is cached */
+static uint64_t nco_step(p8x32a *p, uint64_t when, uint32_t *out)
+{
+	uint32_t o = p->reg_out;
+	uint64_t nt = P8X32A_NEVER;
+	int k;
+	for (k = 0; k < p->nco_n; k++) {
+		int j = p->nco_list[k];
+		const p8x32a_cog *g = &p->cog[j >> 1];
+		if (p->nco_nt[j] == when) {
+			int c = j & 1;
+			p->nco_lvl[j] ^= nco_pins(when < g->ctr_at[c] ? g->ctr_old[c] : g->ctr[c]);
+			p->nco_nt[j] = ctr_toggle(g, c, when);
+			p->nco_from[j] = when;
+		}
+		o |= p->nco_lvl[j] & p->cog_dir[j >> 1];
+		if (p->nco_nt[j] < nt) nt = p->nco_nt[j];
+	}
+	p->ctr_from = when;
+	p->ctr_nt = nt;
+	*out = o;
+	return nt;
+}
+
 static void pins_regs(p8x32a *p, uint64_t t)
 {
 	int n;
@@ -184,11 +213,40 @@ static void pins_regs(p8x32a *p, uint64_t t)
 		const p8x32a_cog *c = &p->cog[n];
 		uint32_t dd = regval(&c->dira, t);
 		p->cog_dir[n] = dd;
-		if (!dd) continue;
+		p->cog_out[n] = dd ? regval(&c->outa, t) & dd : 0;
 		p->reg_dir |= dd;
-		p->reg_out |= regval(&c->outa, t) & dd;
+		p->reg_out |= p->cog_out[n];
 	}
 	p->pins_ok = 1;
+}
+
+/* a pending point at t where only the registers in what change (the others keep their state since the last one):
+   those cogs' OUTA and DIRA and those counters' levels are evaluated, the other counters flip if they change at t */
+static uint32_t pins_what(p8x32a *p, uint64_t t, uint32_t what)
+{
+	uint32_t o, d = 0;
+	int k, n;
+	o = 0;
+	for (n = 0; n < 8; n++) {
+		if (what >> n & 1) {
+			const p8x32a_cog *c = &p->cog[n];
+			uint32_t dd = regval(&c->dira, t);
+			p->cog_dir[n] = dd;
+			p->cog_out[n] = dd ? regval(&c->outa, t) & dd : 0;
+		}
+		d |= p->cog_dir[n];
+		o |= p->cog_out[n];
+	}
+	p->reg_out = o;
+	p->reg_dir = d;
+	for (k = 0; k < p->nco_n; k++) {
+		int j = p->nco_list[k], c = j & 1;
+		const p8x32a_cog *g = &p->cog[j >> 1];
+		if (what >> (8 + j) & 1) p->nco_lvl[j] = ctr_pins(g, c, t);
+		else if (p->nco_nt[j] == t) p->nco_lvl[j] ^= nco_pins(t < g->ctr_at[c] ? g->ctr_old[c] : g->ctr[c]);
+		o |= p->nco_lvl[j] & p->cog_dir[j >> 1];
+	}
+	return o;
 }
 
 static void flush(p8x32a *p, uint64_t t)
@@ -203,15 +261,34 @@ static void flush(p8x32a *p, uint64_t t)
 		if (when > t) break;
 		/* registers change only at pending points: between them only the counters move */
 		full = !p->pins_ok || (best >= 0 && p->pend[best] == when);
-		if (full) pins_regs(p, when);
-		out = pins_nco(p, when, full);
+		if (!full) {
+			/* NCO changes up to the next pending point or t */
+			uint64_t end = best >= 0 ? p->pend[best] : t + 1;
+			do {
+				uint64_t nt = nco_step(p, when, &out);
+				if (out != p->last_out && p->bus.pins_out) p->bus.pins_out(p->bus.ctx, when, out, p->last_dir);
+				p->last_out = out;
+				p->flushed = when;
+				when = nt;
+			} while (when < end);
+			continue;
+		}
+		if (p->pins_ok) {
+			uint32_t what = 0;
+			for (k = 0; k < p->npend; k++)
+				if (p->pend[k] == when) what |= p->pend_what[k];
+			out = pins_what(p, when, what);
+		} else {
+			pins_regs(p, when);
+			out = pins_nco(p, when, 1);
+		}
 		dir = p->reg_dir;
 		if ((out != p->last_out || dir != p->last_dir) && p->bus.pins_out) p->bus.pins_out(p->bus.ctx, when, out, dir);
 		p->last_out = out;
 		p->last_dir = dir;
 		if (when > p->flushed) p->flushed = when;
 		for (k = 0; k < p->npend; k++)
-			if (p->pend[k] == when) { --p->npend; p->pend[k] = p->pend[p->npend]; p->pend_pins[k] = p->pend_pins[p->npend]; k--; }
+			if (p->pend[k] == when) { --p->npend; p->pend[k] = p->pend[p->npend]; p->pend_pins[k] = p->pend_pins[p->npend]; p->pend_what[k] = p->pend_what[p->npend]; k--; }
 	}
 	if (t > p->flushed) p->flushed = t;
 }
@@ -254,25 +331,36 @@ static void ctr_check(p8x32a *p, uint32_t ctr)
 
 static void ctr_save(p8x32a *p, p8x32a_cog *c, int k, uint64_t e)
 {
+	int j = 2 * (int)(c - p->cog) + k;
 	flush(p, p->now);
-	p->ctr_ok = 0;
-	add_pending(p, e, nco_pins(c->ctr[k]));
+	if (c->ctr_at[k] <= p->flushed && (p->nco_ok >> j & 1)) {
+		/* the state in effect lasts until e: its cached next change stays, capped at e */
+		if (e < p->nco_nt[j]) p->nco_nt[j] = e;
+		if (e < p->ctr_nt) p->ctr_nt = e;
+	} else {
+		p->ctr_ok = 0;
+		p->nco_ok &= (uint16_t)~(1u << j);
+		/* a state that has not taken effect yet is replaced (a cog stopped right after a counter write): the pins
+		   are evaluated again */
+		if (c->ctr_at[k] > p->flushed) p->pins_ok = 0;
+	}
+	add_pending(p, e, nco_pins(c->ctr[k]), P8X32A_PEND_CTR(j));
 	c->ctr_old[k] = c->ctr[k];
 	c->frq_old[k] = c->frq[k];
 	c->phs_old[k] = c->phs[k];
 	c->phs_t_old[k] = c->phs_t[k];
 	c->ctr_at[k] = e;
-	p->nco_ok &= (uint16_t)~(1u << (2 * (c - p->cog) + k));
 }
 
 /* after a write to a counter: is it, or was it before the write, an NCO */
 static void ctr_mask(p8x32a *p, int n, int k)
 {
 	const p8x32a_cog *c = &p->cog[n];
-	uint16_t b = (uint16_t)(1u << (2 * n + k));
+	uint16_t b = (uint16_t)(1u << (2 * n + k)), m = p->nco_mask;
 	int j;
 	if (nco(c->ctr[k]) || nco(c->ctr_old[k])) p->nco_mask |= b;
 	else p->nco_mask &= (uint16_t)~b;
+	if (p->nco_mask == m) return;
 	p->nco_n = 0;
 	for (j = 0; j < 16; j++)
 		if (p->nco_mask >> j & 1) p->nco_list[p->nco_n++] = (uint8_t)j;
@@ -293,9 +381,9 @@ static void special_write(p8x32a *p, int n, unsigned a, uint32_t v, uint64_t m3)
 	uint64_t e = m3 + 1;
 	int k = a & 1;
 	switch (a) {
-	case 0x1F4: regset(p, &c->outa, v, e); break;
-	case 0x1F6: if (e < c->disable_at) regset(p, &c->dira, v, e); break;
-	case 0x1F8: case 0x1F9: ctr_save(p, c, k, e); ctr_rebase(c, k, e); c->ctr[k] = v; add_pending(p, e, nco_pins(v)); ctr_mask(p, n, k); ctr_check(p, v); ctr_notify(p, n, k, e); break;
+	case 0x1F4: regset(p, n, &c->outa, v, e); break;
+	case 0x1F6: if (e < c->disable_at) regset(p, n, &c->dira, v, e); break;
+	case 0x1F8: case 0x1F9: ctr_save(p, c, k, e); ctr_rebase(c, k, e); c->ctr[k] = v; add_pending(p, e, nco_pins(v), P8X32A_PEND_CTR(2 * n + k)); ctr_mask(p, n, k); ctr_check(p, v); ctr_notify(p, n, k, e); break;
 	case 0x1FA: case 0x1FB: ctr_save(p, c, k, e); ctr_rebase(c, k, e); c->frq[k] = v; ctr_notify(p, n, k, e); break;
 	case 0x1FC: case 0x1FD: ctr_save(p, c, k, e); c->phs[k] = v; c->phs_t[k] = e; break;
 	case 0x1FE: c->vcfg = v; break;
@@ -702,7 +790,7 @@ static void stop_cog(p8x32a *p, int n, uint64_t d)
 {
 	p8x32a_cog *c = &p->cog[n];
 	if (d < c->disable_at) c->disable_at = d;
-	regset(p, &c->dira, 0, d);
+	regset(p, n, &c->dira, 0, d);
 	ctr_save(p, c, 0, d);
 	ctr_save(p, c, 1, d);
 	ctr_rebase(c, 0, d);
@@ -1342,6 +1430,7 @@ void p8x32a_reset(p8x32a *p, uint64_t t)
 	p->ctr_ok = 0;
 	p->nco_mask = p->nco_ok = 0;
 	p->nco_n = 0;
+	memset(p->nco_lvl, 0, sizeof(p->nco_lvl));
 	p->pins_ok = 0;
 	p->sleepers = 0;
 	for (n = 0; n < 8; n++) loop_reset(&p->loop[n]);

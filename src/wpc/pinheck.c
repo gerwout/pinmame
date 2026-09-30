@@ -515,6 +515,7 @@ static void pinheck_disp_init(void)
 	disp_log = path ? fopen(path, disp_opened ? "ab" : "wb") : NULL;
 	disp_opened = 1;
 	prop_set_pins(&prop, pinheck_disp_pins, NULL);
+	prop_set_pins_mask(&prop, DISPLAY_P17 | DISPLAY_P20 | DISPLAY_P21 | DISPLAY_P22);
 }
 
 static void pinheck_disp_reset(void)
