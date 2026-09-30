@@ -8,6 +8,12 @@ S=../../../src
 B=build
 mkdir -p $B || exit 2
 fail=0
+scale() { cc -E -dM -x c "$@" -I$S -I$S/wpc -I$S/unix -I$S/unix/sysdep $S/wpc/pinheck.h | sed -n 's/^#define PINHECK_VIDEO_SCALE //p'; }
+if [ "$(scale)" = 2 ] && [ "$(scale -DLIBPINMAME)" = 1 ]; then
+	echo "scale: 2x2 dots in PinMAME and VPinMAME windows, the 128x32 panel as sent to libpinmame hosts"
+else
+	echo "SCALE FAIL: PINHECK_VIDEO_SCALE is $(scale) without LIBPINMAME and $(scale -DLIBPINMAME) with it"; fail=$((fail + 1))
+fi
 if [ -n "$LIBPINMAME" ] && [ -n "$PINMAME_ROMS" ]; then
 	c++ -std=c++20 -O1 -Wall -Wextra -Werror -I$S/libpinmame host.cpp "$LIBPINMAME" -Wl,-rpath,"$(dirname "$LIBPINMAME")" -pthread -o $B/host || exit 2
 	run() {

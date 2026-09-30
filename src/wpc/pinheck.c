@@ -139,8 +139,13 @@ static void pinheck_brd_servo(void *ctx, uint64_t t, int servo, uint32_t pulse)
 	pinheck_brd_level(PINHECK_SOL_SRV + servo, (UINT8)(v * 255.0 + 0.5));
 }
 
-/* switch n (0-63) is PinMAME (n/8+1)*10 + n%8+1, lamps likewise; cabinet inputs are columns 0 and 9 */
-static int pinheck_sw2m(int no) { return (no / 10) * 8 + no % 10 - 1; }
+/* switch n (0-63) is PinMAME (n/8+1)*10 + n%8+1, lamps likewise; cabinet inputs are columns 0 and 9.
+   A switch number the matrix does not have goes to column 15 row 8, which nothing reads; a lamp
+   number the matrix does not have to -1, which vp_getLamp rejects */
+#define PINHECK_NOSUCH (15 * 8 + 7)
+static int pinheck_2m(int no, int cols, int none) { return no > 0 && no / 10 < cols && no % 10 >= 1 && no % 10 <= 8 ? (no / 10) * 8 + no % 10 - 1 : none; }
+static int pinheck_sw2m(int no) { return pinheck_2m(no, CORE_STDSWCOLS, PINHECK_NOSUCH); }
+static int pinheck_lamp2m(int no) { return pinheck_2m(no, CORE_CUSTLAMPCOL + 2, -1); }
 static int pinheck_m2sw(int col, int row) { return col * 10 + row + 1; }
 
 /* last pulse width of servo 0-4 in microseconds, 0 while it gets no pulses (for the playfield simulator) */
@@ -268,6 +273,7 @@ static void pinheck_uart_tx(void *ctx, int uart, uint8_t byte, uint64_t cycle)
 
 /* test log (PINHECK_LINK_LOG): every PIC32-to-Propeller packet, 16 bytes shifted LSB first, data sampled on the rising clock */
 static FILE *link_log;
+static int link_opened;
 static struct { int clk, nbits; uint64_t last, gap; uint8_t b[16]; } lnk;
 
 static void pinheck_link_bit(uint32_t drv, uint64_t cycle)
@@ -711,7 +717,8 @@ static MACHINE_INIT(pinheck)
 	pinheck_open_card();
 	pinheck_disp_init();
 	pinheck_brd_init();
-	if (!link_log && getenv("PINHECK_LINK_LOG")) link_log = fopen(getenv("PINHECK_LINK_LOG"), "w");
+	if (!link_log && getenv("PINHECK_LINK_LOG")) link_log = fopen(getenv("PINHECK_LINK_LOG"), link_opened ? "a" : "w");
+	link_opened = 1;
 	if (!time_log && getenv("PINHECK_TIME_LOG")) time_log = fopen(getenv("PINHECK_TIME_LOG"), "w");
 	pic32cpu_set_board(&board);
 	prop_set_clock(&prop, pinheck_pic_now, NULL);
@@ -725,6 +732,7 @@ static MACHINE_RESET(pinheck)
 	prop_reset(&prop, 0);
 	boot_reset(&boot, 0);
 	pinheck_disp_reset();
+	memset(&lnk, 0, sizeof(lnk));
 	cat24m01_init(&u13, u13mem, 0);
 	/* test hook: PINHECK_RTC (seconds since 1970, local time) starts the clock there, so a run is repeatable */
 	ds1340_init(&rtc, getenv("PINHECK_RTC") ? strtoll(getenv("PINHECK_RTC"), NULL, 10) : pinheck_local_now(), PINHECK_CLOCK);
@@ -764,6 +772,8 @@ static MACHINE_STOP(pinheck)
 	pinheck_brd_stop();
 	if (time_log) fclose(time_log);
 	time_log = NULL;
+	if (link_log) fclose(link_log);
+	link_log = NULL;
 }
 
 static MEMORY_READ32_START(pinheck_readmem)
@@ -784,7 +794,7 @@ MACHINE_DRIVER_START(PINHECK)
 	MDRV_NVRAM_HANDLER(pinheck)
 	MDRV_SWITCH_UPDATE(pinheck)
 	MDRV_SWITCH_CONV(pinheck_sw2m, pinheck_m2sw)
-	MDRV_LAMP_CONV(pinheck_sw2m, pinheck_m2sw)
+	MDRV_LAMP_CONV(pinheck_lamp2m, pinheck_m2sw)
 	MDRV_SOUND_ADD(CUSTOM, pinheck_sndInt)
 	MDRV_SOUND_ATTRIBUTES(SOUND_SUPPORTS_STEREO)
 	MDRV_VIDEO_ATTRIBUTES(VIDEO_TYPE_RASTER | VIDEO_RGB_DIRECT)

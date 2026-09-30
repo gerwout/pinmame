@@ -194,13 +194,14 @@ static int dominos_handleBallState(sim_tBallStatus *ball, int *inports) {
   return 0;
 }
 
-/* the Noid turns while its continuous-rotation servo gets pulses away from 1.5 ms */
+/* HandleMechanics bit 0: the Noid, which turns while its continuous-rotation servo gets pulses away
+   from 1.5 ms and closes Noid Home; bit 1: the target bank, down while servo 1 is above 1.5 ms */
 static void dominos_handleMech(int mech) {
   int i, us = pinheck_servo(0), bank = pinheck_servo(1);
-  (void)mech;
-  if (bank) locals.bankDown = bank > 1500;
   for (i = 1; i <= 24; i++)
     locals.since[i] = sol(i) ? 0 : locals.since[i] < 10000 ? locals.since[i] + 1 : 10000;
+  if ((mech & 0x02) && bank) locals.bankDown = bank > 1500;
+  if (!(mech & 0x01)) return;
   if (us > 1550) locals.noid = (locals.noid + 1) % NOID_TURN;
   else if (us && us < 1450) locals.noid = (locals.noid + NOID_TURN - 1) % NOID_TURN;
   if ((locals.noid < NOID_HOME) != locals.home) /* only on change: the switch test may toggle it by hand */

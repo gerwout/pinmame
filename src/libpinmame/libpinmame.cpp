@@ -2198,12 +2198,13 @@ static void SetupMsgApiGameStates()
                addPhysSol(fmtString("Output #%02d (WPC95 J110 LPDC)", 37 + (i & 3)),
                   nullptr, nullptr, 37 + i, GetSolenoid1State, GetSolenoid1VPMState, 1 << (36 + (i & 3)), 36 + (i & 3));
          }
-         // 37..44, S11, SAM, SPA: extension board with 8 outputs (stored in 0xFF00 of solenoids2)
-         else if (core_gameData->gen & (GEN_ALLS11 | GEN_SAM | GEN_SPA))
+         // 37..44, S11, SAM, SPA: extension board with 8 outputs; pinHeck: GI 8..15 (stored in 0xFF00 of solenoids2)
+         else if (core_gameData->gen & (GEN_ALLS11 | GEN_SAM | GEN_SPA | GEN_PINHECK))
          {
             for (uint16_t i = 37; i <= 44; i++)
                addPhysSol(
-                  fmtString("%s Ext Output #%d", (core_gameData->gen & GEN_ALLS11) ? "S11" : (core_gameData->gen & GEN_SAM) ? "SAM" : "SPA", i - 36),
+                  (core_gameData->gen & GEN_PINHECK) ? fmtString("pinHeck GI #%d", i - 29)
+                     : fmtString("%s Ext Output #%d", (core_gameData->gen & GEN_ALLS11) ? "S11" : (core_gameData->gen & GEN_SAM) ? "SAM" : "SPA", i - 36),
                   nullptr, nullptr, i, GetSolenoid2State, GetSolenoid2VPMState, 1 << (8 + i - 37), 40 + i - 37);
          }
       }
