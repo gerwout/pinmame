@@ -564,6 +564,209 @@ static void step(mips32_state *s)
 	execute(s, op);
 }
 
+/* the direct region holding [pa, pa + size), writable if wr; -1 if none */
+static int direct_slot(const mips32_state *s, uint32_t pa, uint32_t size, int wr)
+{
+	int k;
+	for (k = 0; k < MIPS32_REGIONS; k++) {
+		const mips32_region *m = &s->region[k];
+		if ((!wr || m->wr) && pa - m->base < m->size && m->size - (pa - m->base) >= size) return k;
+	}
+	return -1;
+}
+
+/* Instructions that raise no exception, touch only registers and direct memory and change no CP0 state run here,
+   held in locals; the first other instruction, or reaching lim cycles, returns with the state as before it.
+   Returns the number of instructions run. */
+static int fast_run(mips32_state *s, uint64_t lim)
+{
+	uint32_t *r = REGS(s);
+	uint32_t pc = s->pc, npc = s->npc, fva = s->fva, fsize = s->fsize;
+	const uint8_t *fptr = s->fptr;
+	uint64_t cyc = s->cycles;
+	int delay = s->delay, n = 0, kern = !USER(s), erl = (s->status & ST_ERL) != 0, ds = s->dslot;
+
+	if (!fsize) return 0;
+	while (cyc < lim) {
+		uint32_t off = pc - fva, op, rs, rt, v, ea, pa, tpc = npc + 4, nd = 0;
+		unsigned d = 0;
+		uint64_t add = 1;
+		const mips32_region *m;
+		if (off >= fsize || (off & 3)) break;
+		op = le32(fptr + off);
+		rs = r[RS(op)];
+		rt = r[RT(op)];
+		switch (op >> 26) {
+		case 0x00:
+			switch (FUNCT(op)) {
+			case 0x00: d = RD(op); v = rt << SA(op); break;
+			case 0x02: d = RD(op); v = (op & (1u << 21)) ? ror32(rt, SA(op)) : rt >> SA(op); break;
+			case 0x03: d = RD(op); v = sra32(rt, SA(op)); break;
+			case 0x04: d = RD(op); v = rt << (rs & 31); break;
+			case 0x06: d = RD(op); v = (op & (1u << 6)) ? ror32(rt, rs) : rt >> (rs & 31); break;
+			case 0x07: d = RD(op); v = sra32(rt, rs); break;
+			case 0x08: tpc = rs; nd = 1; v = 0; break;
+			case 0x09: d = RD(op); v = pc + 8; tpc = rs; nd = 1; break;
+			case 0x0A: d = rt ? 0 : RD(op); v = rs; break;
+			case 0x0B: d = rt ? RD(op) : 0; v = rs; break;
+			case 0x0F: v = 0; break;
+			case 0x10: d = RD(op); v = s->hi; break;
+			case 0x11: s->hi = rs; v = 0; break;
+			case 0x12: d = RD(op); v = s->lo; break;
+			case 0x13: s->lo = rs; v = 0; break;
+			case 0x18: { int64_t p = (int64_t)(int32_t)rs * (int32_t)rt; s->lo = (uint32_t)p; s->hi = (uint32_t)((uint64_t)p >> 32); v = 0; break; }
+			case 0x19: { uint64_t p = (uint64_t)rs * rt; s->lo = (uint32_t)p; s->hi = (uint32_t)(p >> 32); v = 0; break; }
+			case 0x1A:
+				if (rt) {
+					if (rs == 0x80000000u && rt == 0xFFFFFFFFu) { s->lo = 0x80000000u; s->hi = 0; }
+					else { s->lo = (uint32_t)((int32_t)rs / (int32_t)rt); s->hi = (uint32_t)((int32_t)rs % (int32_t)rt); }
+				}
+				add = 35; v = 0;
+				break;
+			case 0x1B: if (rt) { s->lo = rs / rt; s->hi = rs % rt; } add = 35; v = 0; break;
+			case 0x20: v = rs + rt; if (~(rs ^ rt) & (rs ^ v) & 0x80000000u) goto out; d = RD(op); break;
+			case 0x21: d = RD(op); v = rs + rt; break;
+			case 0x22: v = rs - rt; if ((rs ^ rt) & (rs ^ v) & 0x80000000u) goto out; d = RD(op); break;
+			case 0x23: d = RD(op); v = rs - rt; break;
+			case 0x24: d = RD(op); v = rs & rt; break;
+			case 0x25: d = RD(op); v = rs | rt; break;
+			case 0x26: d = RD(op); v = rs ^ rt; break;
+			case 0x27: d = RD(op); v = ~(rs | rt); break;
+			case 0x2A: d = RD(op); v = (int32_t)rs < (int32_t)rt; break;
+			case 0x2B: d = RD(op); v = rs < rt; break;
+			default: goto out;
+			}
+			break;
+		case 0x01:
+			switch (RT(op)) {
+			case 0x00: if ((int32_t)rs < 0) tpc = pc + 4 + (SIMM(op) << 2); nd = 1; v = 0; break;
+			case 0x01: if ((int32_t)rs >= 0) tpc = pc + 4 + (SIMM(op) << 2); nd = 1; v = 0; break;
+			case 0x10: if ((int32_t)rs < 0) tpc = pc + 4 + (SIMM(op) << 2); nd = 1; d = 31; v = pc + 8; break;
+			case 0x11: if ((int32_t)rs >= 0) tpc = pc + 4 + (SIMM(op) << 2); nd = 1; d = 31; v = pc + 8; break;
+			default: goto out;
+			}
+			break;
+		case 0x02: tpc = ((pc + 4) & 0xF0000000u) | ((op & 0x03FFFFFFu) << 2); nd = 1; v = 0; break;
+		case 0x03: tpc = ((pc + 4) & 0xF0000000u) | ((op & 0x03FFFFFFu) << 2); nd = 1; d = 31; v = pc + 8; break;
+		case 0x04: if (rs == rt) tpc = pc + 4 + (SIMM(op) << 2); nd = 1; v = 0; break;
+		case 0x05: if (rs != rt) tpc = pc + 4 + (SIMM(op) << 2); nd = 1; v = 0; break;
+		case 0x06: if ((int32_t)rs <= 0) tpc = pc + 4 + (SIMM(op) << 2); nd = 1; v = 0; break;
+		case 0x07: if ((int32_t)rs > 0) tpc = pc + 4 + (SIMM(op) << 2); nd = 1; v = 0; break;
+		case 0x08: v = rs + SIMM(op); if (~(rs ^ SIMM(op)) & (rs ^ v) & 0x80000000u) goto out; d = RT(op); break;
+		case 0x09: d = RT(op); v = rs + SIMM(op); break;
+		case 0x0A: d = RT(op); v = (int32_t)rs < (int32_t)SIMM(op); break;
+		case 0x0B: d = RT(op); v = rs < SIMM(op); break;
+		case 0x0C: d = RT(op); v = rs & UIMM(op); break;
+		case 0x0D: d = RT(op); v = rs | UIMM(op); break;
+		case 0x0E: d = RT(op); v = rs ^ UIMM(op); break;
+		case 0x0F: d = RT(op); v = UIMM(op) << 16; break;
+		case 0x14: case 0x15: case 0x16: case 0x17: {
+			int c = (op >> 26) == 0x14 ? rs == rt : (op >> 26) == 0x15 ? rs != rt : (op >> 26) == 0x16 ? (int32_t)rs <= 0 : (int32_t)rs > 0;
+			v = 0;
+			if (c) { tpc = pc + 4 + (SIMM(op) << 2); nd = 1; }
+			else { npc += 4; tpc = npc + 4; }
+			break;
+		}
+		case 0x1C: {
+			uint64_t acc = ((uint64_t)s->hi << 32) | s->lo;
+			switch (FUNCT(op)) {
+			case 0x00: acc += (uint64_t)((int64_t)(int32_t)rs * (int32_t)rt); break;
+			case 0x01: acc += (uint64_t)rs * rt; break;
+			case 0x02: d = RD(op); v = (uint32_t)((int64_t)(int32_t)rs * (int32_t)rt); add = 2; goto set;
+			case 0x04: acc -= (uint64_t)((int64_t)(int32_t)rs * (int32_t)rt); break;
+			case 0x05: acc -= (uint64_t)rs * rt; break;
+			case 0x20: d = RD(op); v = clz32(rs); goto set;
+			case 0x21: d = RD(op); v = clz32(~rs); goto set;
+			default: goto out;
+			}
+			s->lo = (uint32_t)acc;
+			s->hi = (uint32_t)(acc >> 32);
+			v = 0;
+			break;
+		}
+		case 0x1F:
+			switch (FUNCT(op)) {
+			case 0x00: d = RT(op); v = (rs >> SA(op)) & mask32(RD(op) + 1); break;
+			case 0x04: { uint32_t mk = mask32(RD(op) - SA(op) + 1) << SA(op); d = RT(op); v = (rt & ~mk) | ((rs << SA(op)) & mk); break; }
+			case 0x20:
+				switch (SA(op)) {
+				case 0x02: d = RD(op); v = ((rt & 0x00FF00FFu) << 8) | ((rt >> 8) & 0x00FF00FFu); break;
+				case 0x10: d = RD(op); v = (uint32_t)(int32_t)(int8_t)rt; break;
+				case 0x18: d = RD(op); v = (uint32_t)(int32_t)(int16_t)rt; break;
+				default: goto out;
+				}
+				break;
+			default: goto out;
+			}
+			break;
+		case 0x20: case 0x21: case 0x23: case 0x24: case 0x25: {
+			uint32_t sz = (op >> 26) == 0x23 ? 4 : ((op >> 26) & 1) ? 2 : 1;
+			const uint8_t *h;
+			ea = rs + SIMM(op);
+			if (ea & (sz - 1)) goto out;
+			if (ea < 0x80000000u) pa = erl ? ea : ea + 0x40000000u;
+			else if (kern && ea < 0xC0000000u) pa = ea & 0x1FFFFFFFu;
+			else goto out;
+			m = &s->region[ds];
+			if (!(pa - m->base < m->size && m->size - (pa - m->base) >= sz)) {
+				int k = direct_slot(s, pa, sz, 0);
+				if (k < 0) goto out;
+				ds = k;
+				m = &s->region[k];
+			}
+			h = m->rd + (pa - m->base);
+			switch (op >> 26) {
+			case 0x20: v = (uint32_t)(int32_t)(int8_t)h[0]; break;
+			case 0x21: v = (uint32_t)(int32_t)(int16_t)(h[0] | h[1] << 8); break;
+			case 0x23: v = le32(h); break;
+			case 0x24: v = h[0]; break;
+			default: v = (uint32_t)(h[0] | h[1] << 8); break;
+			}
+			d = RT(op);
+			break;
+		}
+		case 0x28: case 0x29: case 0x2B: {
+			uint32_t sz = (op >> 26) == 0x2B ? 4 : (op >> 26) == 0x29 ? 2 : 1;
+			uint8_t *h;
+			int k;
+			ea = rs + SIMM(op);
+			if (ea & (sz - 1)) goto out;
+			if (ea < 0x80000000u) pa = erl ? ea : ea + 0x40000000u;
+			else if (kern && ea < 0xC0000000u) pa = ea & 0x1FFFFFFFu;
+			else goto out;
+			k = direct_slot(s, pa, sz, 1);
+			if (k < 0) goto out;
+			m = &s->region[k];
+			h = m->wr + (pa - m->base);
+			h[0] = (uint8_t)rt;
+			if (sz > 1) h[1] = (uint8_t)(rt >> 8);
+			if (sz > 2) { h[2] = (uint8_t)(rt >> 16); h[3] = (uint8_t)(rt >> 24); }
+			v = 0;
+			break;
+		}
+		case 0x2F: if (!kern) goto out; v = 0; break;
+		case 0x33: v = 0; break;
+		default: goto out;
+		}
+	set:
+		if (d) r[d] = v;
+		pc = npc;
+		npc = tpc;
+		delay = (int)nd;
+		cyc += add;
+		n++;
+		continue;
+	out:
+		break;
+	}
+	s->pc = pc;
+	s->npc = npc;
+	s->delay = delay;
+	s->cycles = cyc;
+	s->dslot = ds;
+	return n;
+}
+
 static int irq_pending(const mips32_state *s)
 {
 	return s->eic_ripl > (int)ST_IPL(s->status) && (s->status & (ST_IE | ST_EXL | ST_ERL)) == ST_IE;
@@ -589,7 +792,8 @@ int mips32_run(mips32_state *s, int cycles)
 				if (s->stop) break;
 			}
 		}
-		if (s->waiting) {
+		if (!s->waiting && fast_run(s, end < s->ti_at ? end : s->ti_at)) {
+		} else if (s->waiting) {
 			uint64_t burn = end - s->cycles;
 			count_sync(s, s->cycles);
 			if (!(s->cause & CA_TI)) {
