@@ -84,7 +84,7 @@ spin_case() {
 	python3 mkrom.py --launch "$o.binary" "$o.lrom" "$o.lram"
 	./$B/p8run -rom "$o.lrom" -ram "$o.lram" -halt -cycles 400000 -dump "$o.lhub" > /dev/null 2>&1
 	rm -f "$o.sdump"
-	SPINSIM_DUMP=6000,400,$o.sdump timeout 60 $SPINSIM "$o.binary" > /dev/null 2>&1
+	SPINSIM_DUMP=6000,400,$o.sdump timeout -k 5 60 $SPINSIM "$o.binary" > /dev/null 2>&1
 	dd if="$o.lhub" of="$o.lwin" bs=1024 skip=24 count=1 2> /dev/null
 	if cmp -s "$o.sdump" "$o.lwin"; then pass=$((pass + 1))
 	else echo "SPINSIM MISMATCH $1"; python3 cmpwin.py "$o.sdump" "$o.lwin"; fail=$((fail + 1)); fi

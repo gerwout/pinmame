@@ -20,7 +20,7 @@ if [ -f audio_test.c ]; then
 fi
 if [ -f dutywin.c ]; then
 	cc $CF -I$S/wpc/pinheck -o $B/dutywin dutywin.c $S/wpc/pinheck/audio.c -lm || exit 2
-	[ -s $B/duty.rtl ] || timeout 600 $TOOLS/p1rtl/p1rtl -rom $B/duty.rom -ram $B/duty.ram -halt -cycles 400000 -dump $B/duty.rtlhub > $B/duty.rtl
+	[ -s $B/duty.rtl ] || timeout -k 30 600 $TOOLS/p1rtl/p1rtl -rom $B/duty.rom -ram $B/duty.ram -halt -cycles 400000 -dump $B/duty.rtlhub > $B/duty.rtl
 	./$B/dutywin $B/duty.rtl $B/duty.our $B/duty.ctr 500 || fail=$((fail + 1))
 fi
 echo "audio: $fail failed"

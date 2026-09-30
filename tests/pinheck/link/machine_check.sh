@@ -1,14 +1,16 @@
 #!/bin/sh
 run=$1 rom=$2 upd=$3
-B=build
+B=${MACHINE_OUT:-build}
+mkdir -p $B
 zip=${PINHECK_ZIP:-$B/dominos-stored.zip}
 if [ ! -f "$zip" ]; then
 	echo "machine: building $zip from $upd (stored, once)"
 	(cd "$upd" && zip -q -0 -r "$OLDPWD/$zip" DOM_V006.PRG PRP_V008.BIN DMD SFX) || { echo "MACHINE FAIL: cannot build $zip"; exit 1; }
 fi
 args="-zip $zip -rom $rom -prp $upd/PRP_V008.BIN $upd/DOM_V006.PRG"
-timeout 3000 $run -v -boots 3 -first 11000000000 -c 1040000000 -send 900000000 '[E97000]' $args > $B/fresh.txt 2> $B/fresh.err &
-timeout 3000 $run -v -inservice 6 -updatecode -stale -boots 2 -first 80000000 -c 11000000000 $args > $B/update.txt 2> $B/update.err &
+# -v logs are capped at 100 MB each (ulimit -f counts 512-byte blocks)
+(ulimit -f 204800; timeout -k 30 3000 $run -v -boots 3 -first 11000000000 -c 1040000000 -send 900000000 '[E97000]' $args > $B/fresh.txt 2> $B/fresh.err) &
+(ulimit -f 204800; timeout -k 30 3000 $run -v -inservice 6 -updatecode -stale -boots 2 -first 80000000 -c 11000000000 $args > $B/update.txt 2> $B/update.err) &
 wait
 fail=0
 for f in fresh update; do
