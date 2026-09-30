@@ -38,6 +38,8 @@ if [ "$P8X32A_JIT" = 1 ]; then
 		$CC -DP8X32A_JIT -I$CORE -I$DEV -c "$f" -o $B/jit-$(basename "$f" .c).o || exit 2
 	done
 	c++ -o $B/p8run $B/jit-*.o $B/p8x32ajit.o $B/asmjit/libasmjit.a -lz -lpthread || exit 2
+	c++ $JF -Wall -Wextra -Werror -I$CORE -o $B/jit_oom_test jit_oom_test.cpp $B/p8x32ajit.o $B/asmjit/libasmjit.a -lpthread || exit 2
+	./$B/jit_oom_test || fail=$((fail + 1))
 	echo "p8run: translated"
 fi
 if [ -f dasm_test.c ]; then

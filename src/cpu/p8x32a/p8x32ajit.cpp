@@ -402,7 +402,13 @@ extern "C" p8x32a_jblk *p8x32a_jit_build(void *jit, p8x32a_jblk *old, unsigned a
 	if (!b) {
 		b = (p8x32a_jblk *)calloc(1, sizeof(*b));
 		if (!b) return NULL;
-		j->blocks.push_back(b);
+		// out of memory: no block (the interpreter runs the code); nothing throws into C
+		try {
+			j->blocks.push_back(b);
+		} catch (...) {
+			free(b);
+			return NULL;
+		}
 	} else if (b->fn) {
 		j->rt.release(b->fn);
 	}
