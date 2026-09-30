@@ -8,8 +8,13 @@
 #define PINHECK_PROPREGION REGION_USER1
 #define PINHECK_BIOSREGION REGION_USER2
 
-/* the 128x32 panel is drawn 2x2 per dot, like a DMD, and that is also the exported frame */
+/* the 128x32 panel is drawn 2x2 per dot in the PinMAME and VPinMAME windows; libpinmame hosts
+   draw their own dots, so they get the panel as sent */
+#ifdef LIBPINMAME
+#define PINHECK_VIDEO_SCALE 1
+#else
 #define PINHECK_VIDEO_SCALE 2
+#endif
 #define PINHECK_VIDEO_W (128 * PINHECK_VIDEO_SCALE)
 #define PINHECK_VIDEO_H (32 * PINHECK_VIDEO_SCALE)
 
