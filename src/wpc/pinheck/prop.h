@@ -53,6 +53,7 @@ typedef struct pinheck_prop {
 	void *clock_ctx;
 	uint64_t stamp; /* the PIC32 cycle at which the running call was made */
 	void *worker; /* worker thread, NULL = calls run inline */
+	uint64_t owner; /* the thread that started the worker: the only one whose prop_sync waits for it */
 } pinheck_prop;
 
 void prop_init(pinheck_prop *p, const uint8_t *rom32k, uint8_t *eemem);

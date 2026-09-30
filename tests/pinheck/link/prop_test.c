@@ -1,7 +1,14 @@
+#define _POSIX_C_SOURCE 200809L
 #include "../../../src/wpc/pinheck/prop.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <time.h>
+#endif
 
 #define CLK  (1u << 25)
 #define DATA (1u << 26)
@@ -238,6 +245,137 @@ static void pins_mask(void)
 	CHECK(calls[0] > 2 && calls[1] == calls[0] && calls[2] == 1);
 }
 
+static volatile int host_go;
+
+static void *host_sync(void *arg)
+{
+	(void)arg;
+	while (host_go) prop_sync(&p);
+	return NULL;
+}
+
+/* another thread's prop_sync (a host reading NVRAM) while the emulation thread starts and stops the worker */
+static void foreign_sync(void)
+{
+	int round, k;
+	for (round = 0; round < 100; round++) {
+		pthread_t h;
+		uint64_t pic = 200000;
+		boot();
+		CHECK(prop_start_thread(&p) == 0);
+		host_go = 1;
+		CHECK(pthread_create(&h, NULL, host_sync, NULL) == 0);
+		for (k = 0; k < 200; k++) { prop_catch_up(&p, pic); pulse(&pic, k & 1); }
+		prop_stop_thread(&p);
+		host_go = 0;
+		pthread_join(h, NULL);
+	}
+}
+
+static double wall_s(void)
+{
+#ifdef _WIN32
+	LARGE_INTEGER f, c;
+	QueryPerformanceFrequency(&f);
+	QueryPerformanceCounter(&c);
+	return (double)c.QuadPart / (double)f.QuadPart;
+#else
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec + ts.tv_nsec * 1e-9;
+#endif
+}
+
+static double cpu_s(void)
+{
+#ifdef _WIN32
+	FILETIME a, b, k, u;
+	GetThreadTimes(GetCurrentThread(), &a, &b, &k, &u);
+	return (((uint64_t)k.dwHighDateTime << 32 | k.dwLowDateTime) + ((uint64_t)u.dwHighDateTime << 32 | u.dwLowDateTime)) * 1e-7;
+#else
+	struct timespec ts;
+	clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+	return ts.tv_sec + ts.tv_nsec * 1e-9;
+#endif
+}
+
+static void nap_ms(int ms)
+{
+#ifdef _WIN32
+	Sleep(ms);
+#else
+	struct timespec ts;
+	ts.tv_sec = ms / 1000;
+	ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+	nanosleep(&ts, NULL);
+#endif
+}
+
+static int slow_calls;
+static volatile int slow_done;
+#ifdef _WIN32
+static int worker_prio;
+#endif
+
+static void slow_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
+{
+	(void)ctx; (void)t; (void)out; (void)dir;
+#ifdef _WIN32
+	worker_prio = GetThreadPriority(GetCurrentThread());
+#endif
+	if (slow_calls++ == 0) { nap_ms(300); slow_done = 1; }
+}
+
+/* a sync that waits longer than the spin bound blocks instead of spinning, returns once the worker is done, and the
+   worker keeps running afterwards */
+static void blocking_sync(void)
+{
+	uint64_t pic = 200000;
+	double c0, w0;
+	int b;
+	boot();
+	prop_set_pins(&p, slow_pins, NULL);
+	slow_calls = slow_done = 0;
+	CHECK(prop_start_thread(&p) == 0);
+	prop_catch_up(&p, pic);
+	for (b = 0; b < 8; b++) pulse(&pic, b & 1);
+	prop_catch_up(&p, pic);
+	c0 = cpu_s();
+	w0 = wall_s();
+	prop_sync(&p);
+	CHECK(slow_done && count() == 8);
+	CHECK(wall_s() - w0 > 0.15);
+	CHECK(cpu_s() - c0 < 0.05);
+	for (b = 0; b < 8; b++) pulse(&pic, b & 1);
+	prop_catch_up(&p, pic);
+	prop_sync(&p);
+	CHECK(count() == 16);
+	prop_stop_thread(&p);
+}
+
+#ifdef _WIN32
+/* the worker runs at the priority of the thread that started it */
+static void priority(void)
+{
+	HANDLE me = GetCurrentThread();
+	int old = GetThreadPriority(me);
+	uint64_t pic = 200000;
+	CHECK(SetThreadPriority(me, THREAD_PRIORITY_ABOVE_NORMAL));
+	boot();
+	prop_set_pins(&p, slow_pins, NULL);
+	slow_calls = 1;
+	worker_prio = -99;
+	CHECK(prop_start_thread(&p) == 0);
+	prop_catch_up(&p, pic);
+	pulse(&pic, 1);
+	prop_catch_up(&p, pic);
+	prop_sync(&p);
+	CHECK(worker_prio == THREAD_PRIORITY_ABOVE_NORMAL);
+	prop_stop_thread(&p);
+	SetThreadPriority(me, old);
+}
+#endif
+
 static int load(const char *path, uint8_t *dst)
 {
 	FILE *f = fopen(path, "rb");
@@ -263,6 +401,11 @@ int main(int argc, char **argv)
 	clkset_reset_bit();
 	threaded();
 	pins_mask();
+	foreign_sync();
+	blocking_sync();
+#ifdef _WIN32
+	priority();
+#endif
 	printf("prop: %s\n", fails ? "FAIL" : "ok");
 	return fails != 0;
 }

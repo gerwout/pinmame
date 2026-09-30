@@ -312,16 +312,18 @@ static void post(pinheck_prop *p, int kind, uint64_t pic, uint32_t pins) { (void
 #else
 #ifdef _WIN32
 #include <windows.h>
-typedef struct prop_os { HANDLE th, ev; } prop_os;
+#include <process.h>
+typedef struct prop_os { HANDLE th, ev, sev; } prop_os;
 static unsigned get_acq(volatile unsigned *v) { unsigned r = *v; MemoryBarrier(); return r; }
 static void put_rel(volatile unsigned *v, unsigned x) { MemoryBarrier(); *v = x; }
 static unsigned xchg(volatile unsigned *v, unsigned x) { return (unsigned)InterlockedExchange((volatile LONG *)v, (LONG)x); }
-static void relax(int k) { if (k > PROP_SPIN) SwitchToThread(); else YieldProcessor(); }
+static uint64_t self_id(void) { return GetCurrentThreadId(); }
 #define CPU_RELAX_ANY() YieldProcessor()
+static unsigned get_sc(volatile unsigned *v) { MemoryBarrier(); return *v; }
+static void put_sc(volatile unsigned *v, unsigned x) { InterlockedExchange((volatile LONG *)v, (LONG)x); }
 #else
 #include <pthread.h>
-#include <sched.h>
-typedef struct prop_os { pthread_t th; pthread_mutex_t m; pthread_cond_t c; int wake; } prop_os;
+typedef struct prop_os { pthread_t th; pthread_mutex_t m; pthread_cond_t c, sc; int wake; } prop_os;
 static unsigned get_acq(volatile unsigned *v) { return __atomic_load_n(v, __ATOMIC_ACQUIRE); }
 static void put_rel(volatile unsigned *v, unsigned x) { __atomic_store_n(v, x, __ATOMIC_RELEASE); }
 static unsigned xchg(volatile unsigned *v, unsigned x) { return __atomic_exchange_n(v, x, __ATOMIC_SEQ_CST); }
@@ -332,8 +334,16 @@ static unsigned xchg(volatile unsigned *v, unsigned x) { return __atomic_exchang
 #else
 #define CPU_RELAX() ((void)0)
 #endif
-static void relax(int k) { if (k > PROP_SPIN) sched_yield(); else CPU_RELAX(); }
+static uint64_t self_id(void)
+{
+	pthread_t t = pthread_self();
+	uint64_t r = 0;
+	memcpy(&r, &t, sizeof(t) < sizeof(r) ? sizeof(t) : sizeof(r));
+	return r;
+}
 #define CPU_RELAX_ANY() CPU_RELAX()
+static unsigned get_sc(volatile unsigned *v) { return __atomic_load_n(v, __ATOMIC_SEQ_CST); }
+static void put_sc(volatile unsigned *v, unsigned x) { __atomic_store_n(v, x, __ATOMIC_SEQ_CST); }
 #endif
 
 typedef struct prop_worker {
@@ -341,6 +351,7 @@ typedef struct prop_worker {
 	prop_cmd q[PROP_Q];
 	volatile unsigned head, tail; /* head: next command the worker runs; tail: next free slot */
 	volatile unsigned sleeping;
+	volatile unsigned waiting, want; /* the poster blocks until head reaches want */
 } prop_worker;
 
 /* the worker, idle for a while, blocks until the next post */
@@ -372,6 +383,43 @@ static void wake(prop_worker *w)
 #endif
 }
 
+/* the poster waits for head to reach want: a bounded spin, then it blocks until the worker gets there */
+static void wait_head(prop_worker *w, unsigned want)
+{
+	int k;
+	for (k = 0; k < PROP_SPIN; k++) {
+		if ((int)(get_acq(&w->head) - want) >= 0) return;
+		CPU_RELAX_ANY();
+	}
+#ifdef _WIN32
+	w->want = want;
+	xchg(&w->waiting, 1);
+	while ((int)(get_sc(&w->head) - want) < 0) WaitForSingleObject(w->os.sev, INFINITE);
+	xchg(&w->waiting, 0);
+#else
+	pthread_mutex_lock(&w->os.m);
+	w->want = want;
+	xchg(&w->waiting, 1);
+	while ((int)(get_sc(&w->head) - want) < 0) pthread_cond_wait(&w->os.sc, &w->os.m);
+	xchg(&w->waiting, 0);
+	pthread_mutex_unlock(&w->os.m);
+#endif
+}
+
+/* the worker moves head to h and wakes a poster waiting for it */
+static void head_moved(prop_worker *w, unsigned h)
+{
+	put_sc(&w->head, h);
+	if (!get_sc(&w->waiting) || (int)(h - w->want) < 0) return;
+#ifdef _WIN32
+	SetEvent(w->os.sev);
+#else
+	pthread_mutex_lock(&w->os.m);
+	pthread_cond_signal(&w->os.sc);
+	pthread_mutex_unlock(&w->os.m);
+#endif
+}
+
 static void run_cmd(pinheck_prop *p, const prop_cmd *c)
 {
 	p->stamp = c->stamp;
@@ -380,7 +428,7 @@ static void run_cmd(pinheck_prop *p, const prop_cmd *c)
 }
 
 #ifdef _WIN32
-static DWORD WINAPI worker(LPVOID arg)
+static unsigned __stdcall worker(void *arg)
 #else
 static void *worker(void *arg)
 #endif
@@ -397,9 +445,9 @@ static void *worker(void *arg)
 			continue;
 		}
 		k = 0;
-		if (w->q[h % PROP_Q].kind == CMD_QUIT) break;
+		if (w->q[h % PROP_Q].kind == CMD_QUIT) { put_rel(&w->head, h + 1); break; }
 		run_cmd(p, &w->q[h % PROP_Q]);
-		put_rel(&w->head, ++h);
+		head_moved(w, ++h);
 	}
 	return 0;
 }
@@ -409,8 +457,7 @@ static void post(pinheck_prop *p, int kind, uint64_t pic, uint32_t pins)
 	prop_worker *w = (prop_worker *)p->worker;
 	unsigned t = w->tail;
 	prop_cmd *c;
-	int k = 0;
-	while (t - get_acq(&w->head) >= PROP_Q) relax(++k);
+	if (t - get_acq(&w->head) >= PROP_Q) wait_head(w, t - PROP_Q + 1);
 	c = &w->q[t % PROP_Q];
 	c->kind = kind;
 	c->pic = pic;
@@ -420,12 +467,13 @@ static void post(pinheck_prop *p, int kind, uint64_t pic, uint32_t pins)
 	wake(w);
 }
 
+/* only the thread that owns the worker waits; another (a host reading NVRAM) reads the state as it is */
 void prop_sync(pinheck_prop *p)
 {
-	prop_worker *w = (prop_worker *)p->worker;
-	int k = 0;
-	if (!w) return;
-	while (get_acq(&w->head) != w->tail) relax(++k);
+	prop_worker *w;
+	if (p->owner != self_id()) return;
+	w = (prop_worker *)p->worker;
+	if (w) wait_head(w, w->tail);
 }
 
 int prop_start_thread(pinheck_prop *p)
@@ -435,15 +483,28 @@ int prop_start_thread(pinheck_prop *p)
 	w = (prop_worker *)calloc(1, sizeof(*w));
 	if (!w) return -1;
 	p->worker = w;
+	p->owner = self_id();
 #ifdef _WIN32
 	w->os.ev = CreateEvent(NULL, FALSE, FALSE, NULL);
-	w->os.th = w->os.ev ? CreateThread(NULL, 0, worker, p, 0, NULL) : NULL;
-	if (!w->os.th) { if (w->os.ev) CloseHandle(w->os.ev); free(w); p->worker = NULL; return -1; }
+	w->os.sev = CreateEvent(NULL, FALSE, FALSE, NULL);
+	/* the CRT's thread start (callbacks use it), at the priority of the thread that runs the emulation */
+	w->os.th = w->os.ev && w->os.sev ? (HANDLE)_beginthreadex(NULL, 0, worker, p, CREATE_SUSPENDED, NULL) : NULL;
+	if (!w->os.th) {
+		if (w->os.ev) CloseHandle(w->os.ev);
+		if (w->os.sev) CloseHandle(w->os.sev);
+		free(w);
+		p->worker = NULL;
+		return -1;
+	}
+	SetThreadPriority(w->os.th, GetThreadPriority(GetCurrentThread()));
+	ResumeThread(w->os.th);
 #else
 	pthread_mutex_init(&w->os.m, NULL);
 	pthread_cond_init(&w->os.c, NULL);
+	pthread_cond_init(&w->os.sc, NULL);
 	if (pthread_create(&w->os.th, NULL, worker, p)) {
 		pthread_cond_destroy(&w->os.c);
+		pthread_cond_destroy(&w->os.sc);
 		pthread_mutex_destroy(&w->os.m);
 		free(w);
 		p->worker = NULL;
@@ -462,9 +523,11 @@ void prop_stop_thread(pinheck_prop *p)
 	WaitForSingleObject(w->os.th, INFINITE);
 	CloseHandle(w->os.th);
 	CloseHandle(w->os.ev);
+	CloseHandle(w->os.sev);
 #else
 	pthread_join(w->os.th, NULL);
 	pthread_cond_destroy(&w->os.c);
+	pthread_cond_destroy(&w->os.sc);
 	pthread_mutex_destroy(&w->os.m);
 #endif
 	free(w);
