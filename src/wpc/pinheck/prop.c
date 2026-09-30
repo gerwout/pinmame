@@ -605,9 +605,11 @@ void prop_pic_pins(pinheck_prop *p, uint64_t pic_cycle, uint32_t pins)
 	do_pic_pins(p, pic_cycle, pins);
 }
 
-/* A second of host time below 0.95x real time with the worker tries a second without it, and the faster of the two
-   stays; the other is tried again after a pause that doubles (10 s to 320 s). Both give the same results, so
-   switching changes only the speed. flip (test hook) switches every second. */
+/* Host time is judged in windows of a second. Three windows in a row below 0.95x real time with the worker try one
+   without it, which stays if it is 5% faster than the median of the last five windows with it; the other is tried
+   again after a pause that doubles (10 s to 320 s). A host stall (one vblank taking over 0.25 s and four times as long
+   as the one before) restarts the window. Both give the same results, so switching changes only the speed.
+   flip (test hook) switches every window. */
 enum { GOV_OFF, GOV_THREADED, GOV_TRY_INLINE, GOV_INLINE, GOV_TRY_THREADED };
 
 static void gov_log(pinheck_prop *p, const char *what, double a, double b)
@@ -616,6 +618,22 @@ static void gov_log(pinheck_prop *p, const char *what, double a, double b)
 	if (!p->log) return;
 	sprintf(msg, "prop: worker thread %s (%.2fx with it, %.2fx without)", what, a, b);
 	p->log(p->log_ctx, msg);
+}
+
+static double gov_median(const double *v, int n)
+{
+	double a[PROP_GOV_RING], t;
+	int i, j;
+	for (i = 0; i < n; i++) a[i] = v[i];
+	for (i = 1; i < n; i++)
+		for (j = i; j > 0 && a[j - 1] > a[j]; j--) { t = a[j]; a[j] = a[j - 1]; a[j - 1] = t; }
+	return a[n / 2];
+}
+
+static void gov_backoff(prop_gov *g, double w)
+{
+	g->next = w + g->pause;
+	if (g->pause < 320.0) g->pause *= 2.0;
 }
 
 /* starts the worker; 0 when it runs */
@@ -632,9 +650,18 @@ int prop_gov_start(pinheck_prop *p, prop_gov *g, double w, int flip)
 
 void prop_governor(pinheck_prop *p, prop_gov *g, double w, double e)
 {
-	double s;
+	double s, gap = w - g->wl, de = e - g->el;
+	int stall = gap > 3.0 || (gap > 0.25 && gap > 4.0 * g->rate * de);
 	if (g->state == GOV_OFF) return;
-	if (g->w0 == 0.0 || w - g->w0 > 3.0 || e < g->e0) { g->w0 = w; g->e0 = e; return; } /* start, pause or reset */
+	g->wl = w;
+	g->el = e;
+	if (de > 0.0) g->rate = gap / de;
+	if (g->w0 == 0.0 || e < g->e0 || stall) { /* start, reset or stall */
+		g->w0 = w;
+		g->e0 = e;
+		g->slow = 0;
+		return;
+	}
 	if (w - g->w0 < 1.0) return;
 	s = (e - g->e0) / (w - g->w0);
 	g->w0 = w;
@@ -647,39 +674,41 @@ void prop_governor(pinheck_prop *p, prop_gov *g, double w, double e)
 	}
 	switch (g->state) {
 	case GOV_THREADED:
-		if (s >= 0.95 || w < g->next) break;
-		g->thr = s;
+		g->thr[g->n++ % PROP_GOV_RING] = s;
+		g->slow = s < 0.95 ? g->slow + 1 : 0;
+		if (g->slow < 3 || w < g->next) break;
 		prop_stop_thread(p);
 		g->state = GOV_TRY_INLINE;
 		break;
-	case GOV_TRY_INLINE:
+	case GOV_TRY_INLINE: {
+		double thr = gov_median(g->thr, g->n < PROP_GOV_RING ? g->n : PROP_GOV_RING);
 		g->inl = s;
-		if (s > g->thr * 1.05) {
-			gov_log(p, "off", g->thr, s);
+		g->slow = 0;
+		if (s > thr * 1.05) {
+			gov_log(p, "off", thr, s);
 			g->state = GOV_INLINE;
-		} else {
-			prop_start_thread(p);
-			g->state = GOV_THREADED;
-		}
-		g->next = w + g->pause;
-		if (g->pause < 320.0) g->pause *= 2.0;
+		} else g->state = prop_start_thread(p) ? GOV_INLINE : GOV_THREADED;
+		gov_backoff(g, w);
 		break;
+	}
 	case GOV_INLINE:
 		g->inl = s;
-		if (w < g->next || prop_start_thread(p)) break;
-		g->state = GOV_TRY_THREADED;
+		if (w < g->next) break;
+		if (prop_start_thread(p)) gov_backoff(g, w); /* one CPU allowed */
+		else g->state = GOV_TRY_THREADED;
 		break;
 	case GOV_TRY_THREADED:
 		if (s > g->inl * 1.05 || s >= 0.95) {
 			gov_log(p, "on", s, g->inl);
 			g->state = GOV_THREADED;
+			g->n = 0;
+			g->next = w + g->pause;
 			g->pause = 10.0;
 			break;
 		}
 		prop_stop_thread(p);
 		g->state = GOV_INLINE;
-		g->next = w + g->pause;
-		if (g->pause < 320.0) g->pause *= 2.0;
+		gov_backoff(g, w);
 		break;
 	}
 }

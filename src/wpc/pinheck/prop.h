@@ -76,7 +76,11 @@ uint64_t prop_time(pinheck_prop *p, uint64_t pic_cycle);
 
 /* The worker thread stays on while it is faster: prop_governor, called with the host and the emulated time in
    seconds (at each vblank), switches it off while the calls run faster inline. */
-typedef struct prop_gov { int state, flip; double w0, e0, next, pause, thr, inl; } prop_gov;
+#define PROP_GOV_RING 5
+typedef struct prop_gov {
+	int state, flip, slow, n;
+	double w0, e0, wl, el, rate, next, pause, inl, thr[PROP_GOV_RING];
+} prop_gov;
 int prop_gov_start(pinheck_prop *p, prop_gov *g, double host_s, int flip);
 void prop_governor(pinheck_prop *p, prop_gov *g, double host_s, double emu_s);
 
