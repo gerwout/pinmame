@@ -2,7 +2,7 @@
    message API VPX standalone uses, and logs what a host receives.
    host [-p] [-o] [-x] [-P] [-R] [-m mech] [-s switches] GAME FRAMES DIR
      -p  plugin message API (a minimal MsgPluginAPI host); -o sample lamps 1-98 and solenoids 1-64 each frame;
-     -x  probe lamp and solenoid numbers no game has (0, -1, 100000) and pinHeck lamp numbers that do not exist; -m  HandleMechanics mask (default 0);
+     -x  probe lamps and solenoids 0, -1 and 100000 and pinHeck lamp numbers that do not exist; -m  HandleMechanics mask (default 0);
      -s  file of "frame switch state" lines applied with PinmameSetSwitch; -P  physical outputs (SolMask(2) = 2);
      -R  stop after FRAMES, copy $PINHECK_LINK_LOG to DIR/link1.log, run FRAMES more in a new session
    host -T: messages broadcast from a second thread while this one subscribes (for a ThreadSanitizer build)

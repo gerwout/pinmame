@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What a libpinmame host (VPX standalone's PinMAME plugin, or any other) receives (spec M10 4.1), from host's logs.
   vpx.py displays DIR...        every announced display index exists and gets updates
-  vpx.py probe DIR...           lamp and solenoid numbers no game has read 0
+  vpx.py probe DIR...           lamps and solenoids 0, -1 and 100000 read 0 on the games run
   vpx.py plan DIR               the workloads: DIR/switches.txt, send, send_at, send_gap, frames; DIR/mech.txt
   vpx.py outputs DIR            lamps, solenoids, GI, RGB, servos and switches through the API equal the driver's
   vpx.py media DIR REF.wav      display frames and sound through the API equal the driver's frame log and capture;
@@ -57,7 +57,8 @@ def displays(dirs):
 
 
 def probe(dirs):
-    """lamp and solenoid numbers no game has read 0 and do not stop the emulation"""
+    """lamps and solenoids 0, -1 and 100000 read 0 and do not stop the emulation on pb_l5, tz_94h and babypac:
+    -1 and 100000 are out of range; 0 is a real lamp on some systems (Taito, GTS80, GTS3)"""
     fail = 0
     for d in dirs:
         api, other = api_log(d)
