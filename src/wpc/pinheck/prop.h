@@ -17,6 +17,7 @@ typedef void (*prop_log_fn)(void *ctx, const char *msg);
 typedef void (*prop_tx_fn)(void *ctx, uint64_t pic_cycle, int level);
 typedef void (*prop_ctr_fn)(void *ctx, uint64_t t, int cog, int ctr, uint32_t ctr_reg, uint32_t frq);
 typedef void (*prop_pins_fn)(void *ctx, uint64_t prop_cycle, uint32_t out, uint32_t dir);
+typedef uint64_t (*prop_clock_fn)(void *ctx);
 
 typedef struct prop_edge { uint64_t pic, prop; uint32_t pins; } prop_edge; /* prop = pic in Propeller cycles */
 typedef struct prop_seg { uint64_t pic0, prop0; uint32_t num, den; } prop_seg;
@@ -47,6 +48,10 @@ typedef struct pinheck_prop {
 	void *snd_ctx;
 	prop_pins_fn pins;
 	void *pins_ctx;
+	prop_clock_fn clock; /* the PIC32 cycle now */
+	void *clock_ctx;
+	uint64_t stamp; /* the PIC32 cycle at which the running call was made */
+	void *worker; /* worker thread, NULL = calls run inline */
 } pinheck_prop;
 
 void prop_init(pinheck_prop *p, const uint8_t *rom32k, uint8_t *eemem);
@@ -59,7 +64,12 @@ void prop_reset(pinheck_prop *p, uint64_t pic_cycle);
 void prop_pic_pins(pinheck_prop *p, uint64_t pic_cycle, uint32_t pins);
 void prop_catch_up(pinheck_prop *p, uint64_t pic_cycle);
 int prop_p24(pinheck_prop *p, uint64_t pic_cycle);
-uint64_t prop_time(const pinheck_prop *p, uint64_t pic_cycle);
+void prop_set_clock(pinheck_prop *p, prop_clock_fn fn, void *ctx);
+uint64_t prop_stamp(const pinheck_prop *p);
+int prop_start_thread(pinheck_prop *p);
+void prop_stop_thread(pinheck_prop *p);
+void prop_sync(pinheck_prop *p);
+uint64_t prop_time(pinheck_prop *p, uint64_t pic_cycle);
 
 #ifdef __cplusplus
 }

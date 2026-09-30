@@ -146,6 +146,69 @@ static void clkset_reset_bit(void)
 	CHECK(count() == 1);
 }
 
+static uint64_t clock_now;
+static uint64_t stamps[4 * BITS];
+static int nstamps;
+
+static uint64_t test_clock(void *ctx) { (void)ctx; return clock_now; }
+
+static void stamp_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
+{
+	(void)ctx; (void)t; (void)out; (void)dir;
+	if (nstamps < 4 * BITS) stamps[nstamps++] = prop_stamp(&p);
+}
+
+/* the same calls on the worker thread give the same Propeller, pin changes and stamps (the clock runs ahead of
+   the calls' cycles, so a stamp taken from the wrong one differs) */
+static void threaded(void)
+{
+	static uint8_t hub[65536];
+	static uint64_t seq[4 * BITS];
+	uint64_t pic, now = 0;
+	int k, pass, n = 0, p24[BITS];
+	for (pass = 0; pass < 2; pass++) {
+		boot();
+		prop_set_clock(&p, test_clock, NULL);
+		prop_set_pins(&p, stamp_pins, NULL);
+		nstamps = 0;
+		if (pass) CHECK(prop_start_thread(&p) == 0);
+		pic = 200000;
+		clock_now = pic + 1000;
+		prop_catch_up(&p, pic);
+		for (k = 0; k < BITS; k++) {
+			int bit = (k * 7 + 3) % 5 < 2, v;
+			clock_now = pic + 1000;
+			prop_pic_pins(&p, pic, CLK | (bit ? DATA : 0));
+			clock_now = pic + 1100;
+			v = prop_p24(&p, pic + 100);
+			if (!pass) p24[k] = v;
+			else CHECK(v == p24[k]);
+			clock_now = pic + 1200;
+			prop_pic_pins(&p, pic + 200, bit ? DATA : 0);
+			clock_now = pic + 1300;
+			prop_catch_up(&p, pic + 300);
+			pic += 400;
+		}
+		clock_now = pic + 1000;
+		prop_catch_up(&p, pic);
+		prop_sync(&p);
+		CHECK(count() == BITS);
+		if (!pass) {
+			memcpy(hub, p.chip.hub, sizeof(hub));
+			memcpy(seq, stamps, sizeof(seq));
+			n = nstamps;
+			now = p.chip.now;
+		} else {
+			CHECK(!memcmp(hub, p.chip.hub, sizeof(hub)));
+			CHECK(nstamps == n && !memcmp(seq, stamps, sizeof(seq)));
+			CHECK(p.chip.now == now);
+			prop_stop_thread(&p);
+			CHECK(p.worker == NULL);
+		}
+	}
+	CHECK(n > 0);
+}
+
 static int load(const char *path, uint8_t *dst)
 {
 	FILE *f = fopen(path, "rb");
@@ -169,6 +232,7 @@ int main(int argc, char **argv)
 	reset_rebases(1);
 	reset_rebases(0);
 	clkset_reset_bit();
+	threaded();
 	printf("prop: %s\n", fails ? "FAIL" : "ok");
 	return fails != 0;
 }
