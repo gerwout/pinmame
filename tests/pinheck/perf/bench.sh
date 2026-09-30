@@ -1,7 +1,8 @@
 #!/bin/sh
 # Headless benchmark and determinism check (Milestone 9).
 #   bench.sh [attract] [video]     time each workload with $SDL3PINMAME; with $REFERENCE set, run it too
-#                                  and require byte-identical UART1, frame, sound and NVRAM output
+#                                  and require byte-identical UART1, frame, sound and NVRAM output; each timing
+#                                  also gives the slowest 100 ms of host time (PINHECK_TIME_LOG)
 #   bench.sh profile WORKLOAD      perf record one workload with $SDL3PINMAME, then components.py
 : "${SDL3PINMAME:?set SDL3PINMAME to the built sdl3pinmame binary}"
 : "${P8X32A_ROM:?set P8X32A_ROM to the 32 KB Propeller mask ROM (crc32 f99b3070)}"
@@ -56,7 +57,7 @@ run() {
 	echo "$MARK mark window" > $D/keys.txt
 	t0=$(date +%s.%N)
 	(cd $D && LD_PRELOAD=$B/fixtime.so PINHECK_FIXTIME=$FIXTIME PINHECK_INSERVICE=6 PINHECK_UART1_LOG=$D/uart.log \
-		PINHECK_FRAME_LOG=$D/frames.bin PINHECK_WAV=$D/snd.wav PINHECK_UART1_SEND_AT=$SEND_AT PINHECK_UART1_SEND_GAP=1 PINHECK_UART1_SEND="$SEND" \
+		PINHECK_FRAME_LOG=$D/frames.bin PINHECK_TIME_LOG=$D/time.log PINHECK_WAV=$D/snd.wav PINHECK_UART1_SEND_AT=$SEND_AT PINHECK_UART1_SEND_GAP=1 PINHECK_UART1_SEND="$SEND" \
 		timeout -k 30 5400 $wrap "$bin" dominos -rompath ../roms -nvram_directory nvram -cfg_directory ../cfg -headless \
 		-frames_to_run $FRAMES -skip_gamewarnings -nothrottle -samplefreq 48000 -fakesound -key_script keys.txt > run.out 2>&1) \
 		|| { echo "BENCH FAIL: $w with $bin exited $?"; tail -3 $D/run.out; exit 1; }
@@ -75,6 +76,21 @@ try:
     line += ', whole run %.1f G instructions and %.1f s CPU per emulated s' % (ins / 1e9 / ((frames - 1) / 60.0), task / ((frames - 1) / 60.0))
 except (OSError, AttributeError):
     pass
+# the slowest 100 ms (host time) of the timed window, from the per-vblank emulated and host times
+try:
+    ts = [tuple(map(float, l.split())) for l in open(d + '/time.log')]
+    ts = [x for x in ts if x[0] >= mark / 60.0]
+    worst, j = None, 0
+    for i in range(len(ts)):
+        while j < len(ts) and ts[j][1] - ts[i][1] < 0.1:
+            j += 1
+        if j == len(ts):
+            break
+        v = (ts[j][0] - ts[i][0]) / (ts[j][1] - ts[i][1])
+        worst = v if worst is None or v < worst else worst
+    line += ', worst 100 ms %.3fx' % worst
+except (OSError, ValueError, TypeError):
+    line += ', worst 100 ms unknown'
 line += ', load %s' % open('/proc/loadavg').read().split()[0]
 print(line)
 open(d + '/bench.txt', 'w').write(line + '\n')

@@ -560,8 +560,12 @@ PINMAME_VIDEO_UPDATE(pinheck_video)
 #endif
 }
 
+/* test hook: PINHECK_TIME_LOG gets the emulated and the host time at each vblank, in seconds */
+static FILE *time_log;
+
 static INTERRUPT_GEN(pinheck_vblank)
 {
+	if (time_log) fprintf(time_log, "%.6f %.6f\n", timer_get_time(), (double)osd_cycles() / (double)osd_cycles_per_second());
 	/* the system set refuses to run: leave its on-screen message up, then stop with an error */
 	if (locals.idle && timer_get_time() >= PINHECK_REFUSE_SECS) mame_schedule_error_exit();
 	if (!locals.idle) pinheck_brd_vblank();
@@ -708,6 +712,7 @@ static MACHINE_INIT(pinheck)
 	pinheck_disp_init();
 	pinheck_brd_init();
 	if (!link_log && getenv("PINHECK_LINK_LOG")) link_log = fopen(getenv("PINHECK_LINK_LOG"), "w");
+	if (!time_log && getenv("PINHECK_TIME_LOG")) time_log = fopen(getenv("PINHECK_TIME_LOG"), "w");
 	pic32cpu_set_board(&board);
 	prop_set_clock(&prop, pinheck_pic_now, NULL);
 	if (!getenv("PINHECK_THREADS") || atoi(getenv("PINHECK_THREADS")) != 0) prop_start_thread(&prop);
@@ -757,6 +762,8 @@ static MACHINE_STOP(pinheck)
 	locals.have_vol = locals.have_zip = 0;
 	pinheck_disp_stop();
 	pinheck_brd_stop();
+	if (time_log) fclose(time_log);
+	time_log = NULL;
 }
 
 static MEMORY_READ32_START(pinheck_readmem)
