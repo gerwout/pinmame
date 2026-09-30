@@ -56,7 +56,7 @@ The display is not driven by the Propeller's video generator. No `WAITVID` execu
 
 **`src/wpc/pinheck.c` (display part)**
 
-- A `CORE_VIDEO` 128×32 layout.
+- A `CORE_VIDEO` layout of 256×64 in the PinMAME and VPinMAME windows, each dot drawn 2×2 in the display look (M8/M9 addendum §5); libpinmame exports the 128×32 panel as sent (Milestone 10).
 - A 256-entry palette set to the RGB332 colours, so frame bytes are pixel values.
 - The renderer draws the last completed frame. Config packets are logged when they change, and the latest is kept.
 

@@ -29,7 +29,7 @@ Milestone 9: the emulation runs at real time on the reference machine. VPX drive
    - lamps, solenoids, GI and modulated outputs equal Milestone 8's board outputs during the scripted game.
 2. **Names:** `src/wpc/pinheck_names.h`, following `src/wpc/p2k_names.h`. It covers switch, lamp, coil, GI, RGB and servo names and numbers from `docs/Dominos-Switch-Matrix.pdf`, `Dominos-Lamp-Matrix.pdf` and `Spooky_Pinball_Domino's_Solenoid_List.pdf`, for VPinMAME name lookups and table scripts.
 3. **VPX standalone on Linux:** a minimal test table loads `dominos` through the PinMAME plugin and:
-   - shows the 128×32 colour display;
+   - shows the colour display (libpinmame's 128×32 frame, as sent);
    - shows the 64 lamps, GI and RGB outputs as labelled indicators;
    - maps the switches to keys;
    - shows coil and servo activity;
@@ -38,7 +38,7 @@ Milestone 9: the emulation runs at real time on the reference machine. VPX drive
    The proof is scripted where VPX standalone can run headless, otherwise a written manual checklist.
 4. **Windows VPX with VPinMAME:**
    - The Windows cmake builds of VPinMAME must contain every pinHeck source.
-   - It is established how VPinMAME's display window presents a 128×32 `CORE_VIDEO` display, with Baby Pac-Man as the precedent. Any change needed goes into the driver or core.
+   - VPinMAME's display window presents the 256×64 `CORE_VIDEO` layout (2×2 dots, in the display look) crisply, as the standalone window does (established on Windows: `DmdWidth`/`DmdHeight` 256×64; `RawDmdWidth`/`RawDmdHeight` are −1 for every `CORE_VIDEO` game, Baby Pac-Man included). No change is needed.
    - The same test table and a manual checklist are for the user to run on Windows, because no Windows machine is available to this work.
 5. **Where the table lives:** the test table (`.vpx`, a binary authoring file) and its script live outside the PinMAME repository, in `/code/spooky_domino/vpx/`. Whether any of it ships is part of the release decision.
 
@@ -56,3 +56,11 @@ Milestone 9: the emulation runs at real time on the reference machine. VPX drive
 ## 7. Order
 
 After Milestone 9, and before or together with the release phase.
+
+## 8. Findings of Milestone 10
+
+- **Precondition met.** `pinheck` at `29692743` runs `dominos` in real time on the reference machine: 1.28× in attract mode and 1.08× with video (Plans 9b and 9c).
+- **VPX version.** libpinmame names its plugin messages with a version (`GetStateSrc:1`, `GetDisplays:1`, upstream since 2026-09-05). The PinMAME plugin of the VPX 10.8.1-5436 release (2026-08-21) asks for the unversioned names, so with this libpinmame it gets no lamps, solenoids, switches or display. VPX builds from after 2026-09-05 (tested: 10.8.1-5947 `4dc8d8afb`) work. On Windows, VPX with VPinMAME (COM) does not use these messages.
+- **Flipper buttons.** PinMAME copies its flipper column to cabinet switches 4 (left) and 3 (right) every frame, so a table presses switch 114 (lower left) and 112 (lower right); `pinheck_names.h` names them `swLLFlip` and `swLRFlip`.
+- **Numbers that name nothing.** A switch number outside the matrix goes to an unused switch; a lamp number outside the matrix reads 0.
+- **First launch.** On an empty NVRAM the firmware updates itself and asks for two restarts: the PIC32 is reflashed and the display shows `PLEASE RESTART`; after the restart it shows `System has been updated / Please restart your machine`; after the second restart the game runs. With the test hook `PINHECK_INSERVICE=6` the first launch skips the reflash and shows `System has been updated`, so one restart is enough.
