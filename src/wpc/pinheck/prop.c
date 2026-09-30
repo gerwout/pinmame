@@ -329,8 +329,8 @@ static void put_rel(volatile unsigned *v, unsigned x) { __atomic_store_n(v, x, _
 static unsigned xchg(volatile unsigned *v, unsigned x) { return __atomic_exchange_n(v, x, __ATOMIC_SEQ_CST); }
 #if defined(__x86_64__) || defined(__i386__)
 #define CPU_RELAX() __asm__ __volatile__("pause")
-#elif defined(__aarch64__) || defined(__arm__)
-#define CPU_RELAX() __asm__ __volatile__("yield")
+#elif defined(__aarch64__) || (defined(__arm__) && (__ARM_ARCH >= 7 || defined(__ARM_ARCH_6K__) || defined(__ARM_ARCH_6KZ__)))
+#define CPU_RELAX() __asm__ __volatile__("yield") /* ARMv6 before 6K has no yield */
 #else
 #define CPU_RELAX() ((void)0)
 #endif

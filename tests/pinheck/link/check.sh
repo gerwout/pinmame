@@ -14,6 +14,7 @@ mkdir -p $B
 fail=0
 for f in prop.c rtc.c bootldr.c; do [ -f $S/wpc/pinheck/$f ] || continue; cc -std=c89 -pedantic-errors -Wno-long-long -fsyntax-only $S/wpc/pinheck/$f || { echo "C89 FAIL $f"; fail=$((fail + 1)); }; done
 cc -std=c89 -pedantic-errors -Wno-long-long -Wall -Werror -DPINHECK_NO_THREADS -fsyntax-only $S/wpc/pinheck/prop.c || { echo "NO_THREADS FAIL prop.c"; fail=$((fail + 1)); }
+if command -v clang > /dev/null; then python3 relax_check.py $S/wpc/pinheck/prop.c || fail=$((fail + 1)); else echo "relax: clang missing, skipped"; fi
 [ -x "$TOOLS/openspin/build/openspin" ] || { echo "TOOLS MISSING: run ../p8x32a/tools.sh or set TOOLS"; exit 2; }
 "$TOOLS/openspin/build/openspin" -q echo.spin -o $B/echo.binary > $B/echo.log 2>&1 || { cat $B/echo.log; exit 2; }
 python3 ../p8x32a/mkrom.py $B/echo.binary $B/echo.rom $B/echo.ram || exit 2
