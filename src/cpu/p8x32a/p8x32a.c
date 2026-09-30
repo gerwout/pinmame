@@ -897,9 +897,9 @@ static int issue_local(const p8x32a_cog *c)
 }
 
 enum { K_NL, K_GEN, K_JMP, K_DJNZ, K_TJ, K_AND, K_ANDN, K_OR, K_XOR, K_ADD, K_SUB, K_MOV, K_SHL, K_SHR, K_MOVS, K_MOVD, K_MOVI };
-enum { F_IMM = 1, F_SPEC = 2, F_WR = 4, F_WC = 8, F_WZ = 16 };
+enum { F_IMM = 1, F_SPEC = 2, F_WR = 4, F_WC = 8, F_WZ = 16, F_INA = 32 };
 
-/* decode for run_local: K_NL for an instruction it does not run */
+/* decode for run_local: K_NL for an instruction it does not run as a local one; F_INA for an INA source */
 static void dec_fill(p8x32a_dec *e, uint32_t i)
 {
 	unsigned op = OP(i);
@@ -915,7 +915,91 @@ static void dec_fill(p8x32a_dec *e, uint32_t i)
 	e->cond = (uint8_t)COND(i);
 	e->kind = kinds[op];
 	e->fl = (uint8_t)((FIM(i) ? F_IMM : (SRC(i) >= 0x1F0 ? F_SPEC : 0)) | (FWR(i) ? F_WR : 0) | (FWC(i) ? F_WC : 0) | (FWZ(i) ? F_WZ : 0));
-	if ((FWR(i) && DST(i) >= 0x1F0) || (!FIM(i) && SRC(i) == 0x1F2)) e->kind = K_NL;
+	if (!FIM(i) && SRC(i) == 0x1F2) e->fl |= F_INA;
+	if (FWR(i) && DST(i) >= 0x1F0) e->kind = K_NL;
+}
+
+/* the hub access and completion of cog n's hub read or write i, with source s and destination d, due at h with
+   m3 = latch + 4, as do_hub and complete do them; returns the flags fl (Z bit 0, C bit 1) after it */
+static unsigned hub_rw(p8x32a *p, int n, uint32_t i, uint32_t s, uint32_t d, uint64_t h, uint64_t m3, unsigned fl)
+{
+	p8x32a_loop *l = &p->loop[n];
+	uint32_t *ram = p->cog[n].ram, a = s & 0xFFFF, w = rd32(p, a), r;
+	unsigned op = OP(i), dst = DST(i);
+	if (!FWR(i) && a < 0x8000) {
+		unsigned sz = op == 2 ? 4 : op == 1 ? 2 : 1, ha = a & ~(sz - 1), k;
+		int changed = 0;
+		for (k = 0; k < sz; k++) {
+			changed |= p->hub[ha + k] != (uint8_t)(d >> (8 * k));
+			p->hub[ha + k] = (uint8_t)(d >> (8 * k));
+		}
+		if (changed) {
+			l->dirty = 1;
+			if (p->sleepers) loop_hub_write(p, n, ha, sz, h);
+		}
+	}
+	r = op == 2 ? w : op == 1 ? (w >> ((a & 2) * 8)) & 0xFFFF : (w >> ((a & 3) * 8)) & 0xFF;
+	if (FWR(i)) {
+		if (ram[dst] != r) { uint32_t o = ram[dst]; ram[dst] = r; l->dirty = 1; jit_write(p, n, dst, o); }
+		if (dst >= 0x1F0) { special_write(p, n, dst, r, m3); l->dirty = 1; }
+	}
+	if (FWC(i)) fl = (fl & ~2u) | (unsigned)p->sys_c << 1;
+	if (FWZ(i)) fl = (fl & ~1u) | (unsigned)!r;
+	return fl;
+}
+
+/* An event instruction of running cog n that the scheduler would take next: its event is before lim, the key of
+   the other cogs' earliest event, no other cog's event has moved since lim was taken (gen), and it is not past t.
+   Runs it as exec, do_hub and complete would: a hub read or write, or an instruction with an INA source or a
+   special destination (not a jump, wait or system op). e decodes ix, at cog address pc - 1, due at *t2 with flags
+   *fl. Returns 0 if it must wait for the scheduler; else 1, with *fl, *t2 (the next instruction's time) and *nix
+   (the word fetched for the next instruction). */
+static int event_run(p8x32a *p, int n, const p8x32a_dec *e, uint32_t ix, unsigned pc, unsigned *fl, uint64_t *t2, uint32_t *nix, uint64_t t, uint64_t lim, unsigned gen)
+{
+	p8x32a_cog *c = &p->cog[n];
+	p8x32a_loop *l = &p->loop[n];
+	uint32_t *ram = c->ram, s, d, r;
+	unsigned op = OP(ix), f = *fl;
+	uint64_t now = *t2;
+
+	if (p->sched_gen != gen || p->stop || l->state != LOOP_SEARCH || !((e->cond >> f) & 1)) return 0;
+	if (op <= 2) {
+		uint64_t latch = next_slot(p, n, now + 1), h = latch + 2, m3 = latch + 4;
+		if ((e->fl & F_INA) || h > t || (h << 4 | (uint64_t)n) >= lim || m3 + 1 >= c->disable_at) return 0;
+		if (e->fl & F_IMM) s = e->src;
+		else if (!(e->fl & F_SPEC)) s = ram[e->src];
+		else {
+			s = sread(p, n, e->src, now);
+			if (e->src == 0x1F1 || e->src == 0x1FC || e->src == 0x1FD) l->dirty = 1;
+		}
+		*nix = ram[pc];
+		p->now = h;
+		c->latch = latch;
+		f = hub_rw(p, n, ix, s, ram[e->dst], h, m3, f);
+		*t2 = m3 + 3;
+	} else {
+		int wr, ci, zi;
+		if (op == 3 || op > 0x3B || op == 0x17 || op >= 0x39) return 0;
+		if (((now << 4) | 8 | (uint64_t)n) >= lim || now + 2 >= c->disable_at) return 0;
+		p->now = now;
+		if (e->fl & F_IMM) s = e->src;
+		else if (e->fl & F_INA) s = ina(p, now);
+		else if (!(e->fl & F_SPEC)) s = ram[e->src];
+		else {
+			s = sread(p, n, e->src, now);
+			if (e->src == 0x1F1 || e->src == 0x1FC || e->src == 0x1FD) l->dirty = 1;
+		}
+		d = ram[e->dst];
+		*nix = ram[pc];
+		r = alu_run(op, s, d, pc, (int)(f >> 1 & 1), (int)(f & 1), p->sys_c, (e->fl & F_WC) != 0, &wr, &ci, &zi);
+		if ((e->fl & F_WR) && wr && ram[e->dst] != r) { uint32_t o = ram[e->dst]; ram[e->dst] = r; l->dirty = 1; jit_write(p, n, e->dst, o); }
+		if ((e->fl & F_WR) && e->dst >= 0x1F0) { special_write(p, n, e->dst, r, now + 1); l->dirty = 1; }
+		if (e->fl & F_WC) f = (f & ~2u) | (unsigned)ci << 1;
+		if (e->fl & F_WZ) f = (f & ~1u) | (unsigned)zi;
+		*t2 = now + 4;
+	}
+	*fl = f;
+	return 1;
 }
 
 /* a write changed fixed code slot s of cog n from old: the blocks with it are dropped; its changed bits accumulate
@@ -958,8 +1042,12 @@ static p8x32a_jblk *jit_get(p8x32a *p, int n, unsigned a, uint32_t ix)
 }
 
 /* exec + complete for local instructions of cog n, kept in locals, until one is not local or t is passed.
-   fl holds Z (bit 0), C (bit 1) and cancel (bit 2); an instruction runs if bit fl of its condition mask is set. */
-static void run_local(p8x32a *p, int n, uint64_t t)
+   fl holds Z (bit 0), C (bit 1) and cancel (bit 2); an instruction runs if bit fl of its condition mask is set.
+   Event instructions run here while the scheduler would take them next (event_run, with the key lim of the other
+   cogs' earliest event and gen); one that does not run is a no-op unless it reads INA; a hub read or write that
+   must wait is issued as exec issues it. A cog whose hub read or write is due (EV_HUB, the scheduler's next event)
+   first completes it as do_hub and complete would. Returns 0 if the cog did not move. */
+static int run_local(p8x32a *p, int n, uint64_t t, uint64_t lim, unsigned gen)
 {
 	p8x32a_cog *c = &p->cog[n];
 	p8x32a_loop *l = &p->loop[n];
@@ -968,24 +1056,40 @@ static void run_local(p8x32a *p, int n, uint64_t t)
 	uint64_t t2 = c->ev_t, dis = c->disable_at, tl = dis < 2 ? 0 : dis - 2 < t ? dis - 2 : t;
 	uint32_t ix = c->ix;
 	unsigned pc = c->p, fl = (unsigned)(c->c << 1 | c->z) | (unsigned)c->cancel << 2, nins = 0;
-	int idled = 0;
+	int idled = 0, done = 0;
+	uint64_t t2in = t2, hub = 0;
+	p8x32a_jst st;
 
+	st.ram = ram;
+	st.code = p->jcode[n];
+	st.tab = p->jblk[n];
+	st.loop = l;
+
+	if (c->ev == EV_HUB) {
+		uint64_t m3 = c->latch + 4;
+		if (OP(c->i) > 2 || m3 + 1 >= dis) return 0;
+		fl = hub_rw(p, n, c->i, c->s, c->d, t2, m3, fl);
+		nins++;
+		pc = (c->px + 1) & 511;
+		fl = (fl & 3) | (c->px == 511) << 2;
+		ix = c->nix;
+		t2 = m3 + 3;
+		done = 1;
+	}
 	if (t2 > tl || dis < 2) goto limit;
 	for (;;) {
 		uint32_t s, d, r, nix;
 		unsigned px = pc, jc = 0;
-		if (p->jit_build && !(fl & 4)) {
+		e = &dec[(pc - 1) & 511];
+		if (e->word != ix) dec_fill(e, ix);
+		/* event instructions are never translated */
+		if (p->jit_build && !(fl & 4) && e->kind != K_NL && !(e->fl & F_INA)) {
 			unsigned a = (pc - 1) & 511;
 			p8x32a_jblk *b = jit_get(p, n, a, ix);
 			unsigned k;
-			p8x32a_jst st;
 			if (b && b->len && t2 + 4 * (uint64_t)(b->len - 1) <= tl) {
 				l->nins = (uint16_t)(l->nins + nins);
 				nins = 0;
-				st.ram = ram;
-				st.code = p->jcode[n];
-				st.tab = p->jblk[n];
-				st.loop = l;
 				st.t2 = t2;
 				st.budget = (uint32_t)((tl - t2) / 4 + 1);
 				st.ix = ix;
@@ -1028,9 +1132,33 @@ static void run_local(p8x32a *p, int n, uint64_t t)
 				continue;
 			}
 		}
-		e = &dec[(pc - 1) & 511];
-		if (e->word != ix) dec_fill(e, ix);
-		if (e->kind == K_NL) break;
+		if (e->kind == K_NL || (e->fl & F_INA)) {
+			if (!((e->cond >> fl) & 1)) {
+				if (e->fl & F_INA) break;
+				if ((e->fl & F_SPEC) && (e->src == 0x1F1 || e->src == 0x1FC || e->src == 0x1FD)) l->dirty = 1;
+				nix = ram[px];
+				nins++;
+				goto next;
+			}
+			if (!event_run(p, n, e, ix, pc, &fl, &t2, &nix, t, lim, gen)) {
+				if (OP(ix) <= 2 && !(e->fl & F_INA) && l->state == LOOP_SEARCH) {
+					/* a hub read or write waiting for its slot, as exec issues it */
+					c->i = ix;
+					c->cond = 1;
+					c->s = (e->fl & F_IMM) ? e->src : (e->fl & F_SPEC) ? sread(p, n, e->src, t2) : ram[e->src];
+					if ((e->fl & F_SPEC) && (e->src == 0x1F1 || e->src == 0x1FC || e->src == 0x1FD)) l->dirty = 1;
+					c->d = ram[e->dst];
+					c->px = (uint16_t)pc;
+					c->nix = ram[pc];
+					c->latch = next_slot(p, n, t2 + 1);
+					hub = c->latch + 2;
+				}
+				break;
+			}
+			nins++;
+			t2 -= 4;
+			goto next;
+		}
 		if (e->fl & F_IMM) s = e->src;
 		else if (!(e->fl & F_SPEC)) s = ram[e->src];
 		else {
@@ -1093,6 +1221,7 @@ static void run_local(p8x32a *p, int n, uint64_t t)
 			nix = ram[px];
 			nins++;
 		}
+	next:
 		if (!jc) pc = (px + 1) & 511;
 		fl = (fl & 3) | (jc || px == 511) << 2;
 		ix = nix;
@@ -1108,7 +1237,7 @@ limit:
 	if (t2 <= t) {
 		e = &dec[(pc - 1) & 511];
 		if (e->word != ix) dec_fill(e, ix);
-		if (e->kind != K_NL) {
+		if (e->kind != K_NL && !(e->fl & F_INA)) {
 			if ((e->fl & F_SPEC)) {
 				(void)sread(p, n, e->src, t2);
 				if (e->src == 0x1F1 || e->src == 0x1FC || e->src == 0x1FD) l->dirty = 1;
@@ -1126,7 +1255,12 @@ out:
 	c->t0 = t2 - 2;
 	c->ev_t = t2;
 	c->ev = EV_EXEC;
+	if (hub) {
+		c->ev = EV_HUB;
+		c->ev_t = hub;
+	}
 	if (idled) idle(p, n);
+	return done || t2 != t2in || hub || idled;
 }
 
 void p8x32a_run_until(p8x32a *p, uint64_t t)
@@ -1154,8 +1288,12 @@ void p8x32a_run_until(p8x32a *p, uint64_t t)
 	again:
 		p->now = b->ev_t;
 		switch (b->ev) {
-		case EV_HUB: do_hub(p, best); break;
-		case EV_EXEC: exec(p, best); break;
+		case EV_HUB:
+			if (!b->run || p->loop[best].state != LOOP_SEARCH || !run_local(p, best, t, bk2, gen)) do_hub(p, best);
+			break;
+		case EV_EXEC:
+			if (!b->run || p->loop[best].state != LOOP_SEARCH || !run_local(p, best, t, bk2, gen)) exec(p, best);
+			break;
 		case EV_WAITPIN: wait_pins(p, best); break;
 		case EV_RESTART: restart(p, best); break;
 		case EV_DONE:
@@ -1168,7 +1306,7 @@ void p8x32a_run_until(p8x32a *p, uint64_t t)
 		/* local instructions run on ahead of the other cogs: their order against them is unobservable */
 		while (b->ev == EV_EXEC && b->ev_t <= t && (local(b) || issue_local(b))) {
 			if (p->loop[best].state == LOOP_RECORD || !local(b)) exec(p, best);
-			else run_local(p, best, t);
+			else run_local(p, best, t, bk2, gen);
 			if (p->loop[best].state == LOOP_RECORD) loop_post(p, best);
 		}
 		/* while no other cog's next event has changed, this cog goes again if it is still the earliest */
