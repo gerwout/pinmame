@@ -197,7 +197,8 @@ def verify(d, dmd):
           'UART1: the high scores were not sent to the display five times after the game')
     for line in ('pizzaDispatchModeStart[player] 0', 'COLLECTING JP??', 'MODES ARE ENDING'):
         check(line in uart, 'UART1: the game never printed %r' % line)
-    check('%s ' % time.strftime('%Y/%-m/%-d', time.gmtime(RTC)) in uart, 'UART1: the clock did not start at PINHECK_RTC')
+    day = time.gmtime(RTC)
+    check('%d/%d/%d ' % (day.tm_year, day.tm_mon, day.tm_mday) in uart, 'UART1: the clock did not start at PINHECK_RTC')
     # the display: clips the firmware starts are shown pixel-exact
     shown = frames(d + '/frames2.bin')
     exact = [(t, v) for t, v in clips if clip_shown(dmd, v, t, shown)]
