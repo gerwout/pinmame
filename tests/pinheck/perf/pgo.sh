@@ -13,9 +13,15 @@ mkdir -p build && rm -rf "$P"
 for m in gen use; do
 	M=$(echo $m | tr a-z A-Z)
 	cmake -S . -B build/pgo-$m -DCMAKE_BUILD_TYPE=Release -DPINMAME_PGO=$M -DPINMAME_PGO_DIR="$P" "$@" > build/pgo-$m.cmake.log 2>&1 || { tail -20 build/pgo-$m.cmake.log; exit 1; }
-	cmake --build build/pgo-$m -j$J > build/pgo-$m.log 2>&1 || { tail -20 build/pgo-$m.log; exit 1; }
+	# the profile is no dependency of the objects: the build with it starts clean
+	c=
+	[ $m = use ] && c=--clean-first
+	cmake --build build/pgo-$m -j$J $c > build/pgo-$m.log 2>&1 || { tail -20 build/pgo-$m.log; exit 1; }
 	[ $m = use ] && break
-	SDL3PINMAME=build/pgo-gen/sdl3pinmame tests/pinheck/perf/bench.sh attract video | sed 's/^/pgo training: /'
+	SDL3PINMAME=build/pgo-gen/sdl3pinmame tests/pinheck/perf/bench.sh attract video > build/pgo-train.log 2>&1
+	st=$?
+	sed 's/^/pgo training: /' build/pgo-train.log
+	[ $st -eq 0 ] || { echo "pgo: the training run failed"; exit 1; }
 	if ls "$P"/*.profraw > /dev/null 2>&1; then
 		${LLVM_PROFDATA:-llvm-profdata} merge -o "$P/default.profdata" "$P"/*.profraw || exit 1
 	fi
