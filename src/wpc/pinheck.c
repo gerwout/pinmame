@@ -544,8 +544,7 @@ PINMAME_VIDEO_UPDATE(pinheck_video)
 	const int x0 = layout->left, y0 = layout->top;
 	int x, y;
 	prop_sync(&prop);
-	/* the core's visible area is larger than the panel: clear it so nothing stale shows */
-	fillbitmap(bitmap, get_black_pen(), cliprect);
+	(void)cliprect;
 #if !defined(LIBPINMAME) && PINHECK_VIDEO_SCALE == 2
 	/* the module's look (dot shape, brightness, position); libpinmame hosts get the frame as sent */
 	if (disp_dirty) pinheck_display_render(&disp_look, disp_shown, disp_img);

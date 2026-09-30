@@ -4,7 +4,8 @@ the visible area is SCALE x the 128x32 frame wide and the full screen high, the 
 drawn SCALE x SCALE at the top left, and everything else is black apart from the core's
 lamp/switch/solenoid panel, which starts 3 rows under the display and uses only the core's
 own pens, never an RGB332 frame colour, and a game simulator's ball list and plunger bar to its
-right (from x = 130, in white: sim.c's sim_draw), which are not judged."""
+right (from x = 130, in white: sim.c's sim_draw), which are not judged. With --sol-log the core's
+solenoid log (the last four solenoids switched on, drawn at the panel's top right) must be on screen."""
 import argparse
 import struct
 import sys
@@ -74,6 +75,7 @@ def main():
     ap.add_argument('log')
     ap.add_argument('--last', type=int, default=8, help='the snapshot must show one of the last N logged frames')
     ap.add_argument('--config', help='the last config packet (hex bytes) before the snapshot; none = the exact look')
+    ap.add_argument('--sol-log', action='store_true', help='the core\'s solenoid log must show')
     a = ap.parse_args()
     look, _ = parse_look(bytes.fromhex(a.config) if a.config else None)
     w, h, rows = read_png(a.png)
@@ -108,6 +110,14 @@ def main():
         fail = 1
     else:
         print('render: %dx%d visible, black outside the frame apart from the core panel (%d pens, none a frame colour)' % (w, h, len(pens)))
+    if a.sol_log:
+        # core_textOutf(max_x - 12 * 8, 0, ...): the panel's first text row, 8 pixels high
+        lit = sum(1 for y in range(panel, min(h, panel + 8)) for x in range(w - 12 * 8, w) if not near(rows[y][x], (0, 0, 0)))
+        if lit:
+            print('render: the core\'s solenoid log shows (%d pixels)' % lit)
+        else:
+            print('render: FAIL, the core\'s solenoid log is not on screen')
+            fail = 1
     sys.exit(fail)
 
 

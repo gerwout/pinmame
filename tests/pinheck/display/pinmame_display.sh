@@ -11,7 +11,7 @@ cd "$(dirname "$0")" || exit 2
 B=build/pinmame
 CLIP=${PINHECK_CLIP:-LT5}
 SEND_AT=${PINHECK_CLIP_AT:-12}
-rm -rf $B && mkdir -p $B/roms $B/nvram $B/cfg $B/snap || exit 2
+rm -rf $B && mkdir -p $B/roms $B/nvram $B/cfg $B/snap $B/snap2 || exit 2
 cp "$P8X32A_ROM" $B/p8x32a.rom && (cd $B && zip -q -j roms/pinheck.zip p8x32a.rom && rm p8x32a.rom) || exit 2
 ln -s "$PINHECK_ZIP" $B/roms/dominos.zip || exit 2
 launch() {
@@ -22,7 +22,9 @@ launch() {
 # F12 just before the end of launch 1: a screen snapshot for render.py
 echo "1190 tap 2 KEYCODE_F12" > $B/snap.ks
 launch 1 1200 "-key_script $PWD/$B/snap.ks -snapshot_directory $PWD/$B/snap"
-PINHECK_UART1_SEND_AT=$SEND_AT PINHECK_UART1_SEND="[V00$CLIP]" launch 2 900
+# and at the end of launch 2, when attract mode has switched GI on and off: the core's solenoid log must show
+echo "890 tap 2 KEYCODE_F12" > $B/snap2.ks
+PINHECK_UART1_SEND_AT=$SEND_AT PINHECK_UART1_SEND="[V00$CLIP]" launch 2 900 "-key_script $PWD/$B/snap2.ks -snapshot_directory $PWD/$B/snap2"
 fail=0
 grep -aq "PROPELLER SYNC CHECK\.*OK" $B/uart2.log || { echo "PINMAME FAIL: no sync check"; fail=1; }
 grep -aq "Playing Video" $B/uart2.log || { echo "PINMAME FAIL: [V00$CLIP] not acknowledged"; fail=1; }
@@ -32,5 +34,6 @@ python3 frames.py $B/frames1.bin || fail=1
 python3 render.py $B/snap/dominos.png $B/frames1.bin --config "$(grep '^display: config ' $B/prop1.log | tail -1 | cut -d' ' -f3-)" || fail=1
 dir=$(echo "$CLIP" | cut -c1)
 python3 frames.py $B/frames2.bin --after "$SEND_AT" --vid "$PINHECK_UPDATE_DIR/DMD/_D$dir/$CLIP.VID" || fail=1
+python3 render.py $B/snap2/dominos.png $B/frames2.bin --sol-log --config "$(grep '^display: config ' $B/prop2.log | tail -1 | cut -d' ' -f3-)" || fail=1
 [ $fail -eq 0 ] || exit 1
 echo "pinmame display: ok"
