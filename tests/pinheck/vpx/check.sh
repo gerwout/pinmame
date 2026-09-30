@@ -1,7 +1,7 @@
 #!/bin/sh
 # VPX support without the firmware: Domino's names, the pinHeck sources in every build list, the display size
-# libpinmame exports, and (with LIBPINMAME and PINMAME_ROMS) libpinmame's display list and getters on a
-# segment, a DMD and a video game
+# libpinmame exports, the media check's frame rule on synthetic runs, and (with LIBPINMAME and PINMAME_ROMS)
+# libpinmame's display list and getters on a segment, a DMD and a video game
 [ -z "$LIBPINMAME" ] || LIBPINMAME=$(realpath "$LIBPINMAME") || exit 2
 [ -z "$PINMAME_ROMS" ] || PINMAME_ROMS=$(realpath "$PINMAME_ROMS") || exit 2
 cd "$(dirname "$0")" || exit 2
@@ -21,6 +21,7 @@ for f in ../../../cmake/*/CMakeLists*.txt; do
 	n=$((n + 1))
 done
 echo "builds: $n build lists carry the same $(wc -l < $B/srcs.ref) pinHeck sources"
+python3 vpx.py selftest $B/selftest || fail=$((fail + 1))
 scale() { cc -E -dM -x c "$@" -I$S -I$S/wpc -I$S/unix -I$S/unix/sysdep $S/wpc/pinheck.h | sed -n 's/^#define PINHECK_VIDEO_SCALE //p'; }
 if [ "$(scale)" = 2 ] && [ "$(scale -DLIBPINMAME)" = 1 ]; then
 	echo "scale: 2x2 dots in PinMAME and VPinMAME windows, the 128x32 panel as sent to libpinmame hosts"

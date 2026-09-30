@@ -4,10 +4,12 @@
   vpx.py probe DIR...           lamp and solenoid numbers no game has read 0
   vpx.py plan DIR               the workloads: DIR/switches.txt, send, send_at, send_gap, frames; DIR/mech.txt
   vpx.py outputs DIR            lamps, solenoids, GI, RGB, servos and switches through the API equal the driver's
-  vpx.py media DIR REF.wav      display frames and sound through the API equal the driver's frame log and capture
+  vpx.py media DIR REF.wav      display frames and sound through the API equal the driver's frame log and capture;
+                                every frame on the panel for a vblank (1/60 s) or more reaches the host
   vpx.py mech ON_DIR OFF_DIR    HandleMechanics bit 0 turns the simulated Noid on and off
   vpx.py restart DIR            a second session in the same process: the link log is complete at the first
-                                session's end, and the second session's packets start whole"""
+                                session's end, and the second session's packets start whole
+  vpx.py selftest DIR           media's frame rule on synthetic runs written to DIR"""
 import array
 import os
 import struct
@@ -235,11 +237,18 @@ def media(d, ref):
     lut = [rgb565(v) for v in range(256)]
     raw = open(os.path.join(d, 'frames.log'), 'rb').read()
     rec = 20 + W * H
-    drv = []
+    drv, start, last = [], [], 0.0
     for i in range(0, len(raw) - rec + 1, rec):
         f = raw[i + 20:i + rec]
+        last = struct.unpack_from('<Q', raw, i + 8)[0] / 80e6       # PIC32 time stamp
         if not drv or drv[-1] != f:
             drv.append(f)
+            start.append(last)
+    # the host reads the panel at vblank n (n / FPS s), up to its last frame
+    ends = [l for l in other if l.startswith('end ')]
+    stop = int(ends[0].split()[1]) / FPS if ends else last
+    on = [min(t, stop) - s for s, t in zip(start, start[1:] + [stop])]
+    long_ = [i for i in range(len(drv)) if on[i] >= 1.0 / FPS]
     want = [array.array('H', (lut[v] for v in f)).tobytes() for f in drv]
     raw = open(os.path.join(d, 'frames.bin'), 'rb').read()
     rec = 4 + W * H * 2
@@ -252,20 +261,26 @@ def media(d, ref):
             continue                             # the plugin's frame buffer before the first frame
         got[tag >= 0x80000000].append(f)
     for plugin in (False, True) if plugin_run else (False,):
-        k, seen = 0, 0
+        k, seen, shown = 0, 0, set()
         for f in got[plugin]:
             while k < len(want) and want[k] != f:
                 k += 1
             if k == len(want):
                 break
             seen += 1
+            shown.add(k)
         path = 'plugin' if plugin else 'callback'
         if seen < len(got[plugin]):
             fails.append('%s frame %d is none of the decoded frames that follow the last match' % (path, seen))
         else:
             print('media: %s path: %d frames, each a decoded frame, in order; the frame log has %d distinct frames' % (path, seen, len(want)))
-        if len(got[plugin]) < len(want) - 2:
-            fails.append('%s path showed %d of %d frames' % ('plugin' if plugin else 'callback', len(got[plugin]), len(want)))
+        missed = [i for i in long_ if i not in shown]
+        if missed:
+            fails.append('%s path missed %d of the %d frames on the panel for a vblank or more (first: frame %d, %.1f ms from %.3f s)' % (
+                path, len(missed), len(long_), missed[0], on[missed[0]] * 1000, start[missed[0]]))
+        else:
+            print('media: %s path: all %d frames on the panel for a vblank or more; %d shorter ones, %d of them shown' % (
+                path, len(long_), len(drv) - len(long_), len(shown) - len(long_)))
     a = array.array('h', open(os.path.join(d, 'audio.raw'), 'rb').read())
     with wave.open(os.path.join(d, 'api.wav'), 'wb') as out:     # for corr.py
         out.setnchannels(2)
@@ -323,6 +338,47 @@ def restart(d):
     return 1 if fails else 0
 
 
+def selftest(d):
+    """media on synthetic runs: frames of (ms on the panel, exported); each case (name, frames, expected exit)"""
+    cases = [('all shown', [(40, 1), (40, 1), (40, 1), (40, 1)], 0),
+             ('a 60 ms frame missing', [(40, 1), (60, 0), (40, 1), (40, 1)], 1),
+             ('three 10 ms frames missing', [(40, 1), (10, 0), (10, 0), (10, 0), (40, 1), (40, 1)], 0),
+             ('a 17 ms frame missing', [(40, 1), (17, 0), (40, 1)], 1)]
+    fail = 0
+    for name, frames, want in cases:
+        c = os.path.join(d, name.replace(' ', '_'))
+        os.makedirs(c, exist_ok=True)
+        lut = [rgb565(v) for v in range(256)]
+        log, got, t = b'', b'', 5.0
+        for k, (ms, shown) in enumerate(frames):
+            px = bytes([k + 1]) * (W * H)
+            for r in range(max(1, ms // 10)):     # the Propeller resends a frame every 10 ms
+                log += struct.pack('<QQI', 0, round((t + r * 0.01) * 80e6), 0) + px
+            if shown:
+                got += struct.pack('<I', k + 1) + array.array('H', (lut[v] for v in px)).tobytes()
+            t += ms / 1000.0
+        open(os.path.join(c, 'frames.log'), 'wb').write(log)
+        open(os.path.join(c, 'frames.bin'), 'wb').write(got)
+        open(os.path.join(c, 'api.log'), 'w').write('avail 0 1 type 15 128x32 depth 16 length 0\n')
+        pcm = array.array('h', [3000, -3000] * 1000).tobytes()
+        open(os.path.join(c, 'audio.raw'), 'wb').write(pcm)
+        with wave.open(os.path.join(c, 'capture.wav'), 'wb') as w:
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(pcm)
+        stdout, sys.stdout = sys.stdout, open(os.devnull, 'w')
+        try:
+            got_rc = media(c, os.path.join(c, 'capture.wav'))
+        finally:
+            sys.stdout.close()
+            sys.stdout = stdout
+        ok = got_rc == want
+        print('selftest: %s: media %s%s' % (name, 'fails' if got_rc else 'passes', '' if ok else '  FAIL'))
+        fail += not ok
+    return fail
+
+
 if __name__ == '__main__':
     a = sys.argv[1:]
     if a[:1] == ['displays'] and len(a) > 1:
@@ -339,4 +395,6 @@ if __name__ == '__main__':
         sys.exit(mech(a[1], a[2]))
     if a[:1] == ['restart'] and len(a) == 2:
         sys.exit(restart(a[1]))
+    if a[:1] == ['selftest'] and len(a) == 2:
+        sys.exit(1 if selftest(a[1]) else 0)
     sys.exit(__doc__)
