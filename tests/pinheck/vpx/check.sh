@@ -30,6 +30,12 @@ else
 fi
 if [ -n "$LIBPINMAME" ] && [ -n "$PINMAME_ROMS" ]; then
 	c++ -std=c++20 -O1 -Wall -Wextra -Werror -I$S/libpinmame host.cpp "$LIBPINMAME" -Wl,-rpath,"$(dirname "$LIBPINMAME")" -pthread -o $B/host || exit 2
+	# the host's message API from two threads, under ThreadSanitizer where the compiler has it
+	if c++ -std=c++20 -O1 -g -fsanitize=thread -Wall -Wextra -Werror -I$S/libpinmame host.cpp "$LIBPINMAME" -Wl,-rpath,"$(dirname "$LIBPINMAME")" -pthread -o $B/host_tsan 2> /dev/null; then
+		TSAN_OPTIONS=exitcode=66 ./$B/host_tsan -T > $B/tsan.out 2>&1 && head -1 $B/tsan.out || { echo "VPX FAIL: ThreadSanitizer: $(grep -m1 WARNING $B/tsan.out)"; fail=$((fail + 1)); }
+	else
+		echo "vpx: no ThreadSanitizer: the host's message API not run from two threads"
+	fi
 	run() {
 		rm -rf $B/$1 && mkdir -p $B/$1/nvram $B/$1/cfg && ln -s "$PINMAME_ROMS" $B/$1/roms || exit 2
 		(cd $B/$1 && timeout -k 30 300 ../host -x $2 $1 180 . > run.out 2>&1) || { echo "VPX FAIL: $1 exited $?"; fail=$((fail + 1)); }
@@ -39,6 +45,10 @@ if [ -n "$LIBPINMAME" ] && [ -n "$PINMAME_ROMS" ]; then
 	run babypac -P
 	python3 vpx.py displays $B/pb_l5 $B/tz_94h $B/babypac || fail=$((fail + 1))
 	python3 vpx.py probe $B/pb_l5 $B/tz_94h $B/babypac || fail=$((fail + 1))
+	# two sessions through the plugin message API, as VPX's reset does
+	rm -rf $B/restart && mkdir -p $B/restart/nvram $B/restart/cfg && ln -s "$PINMAME_ROMS" $B/restart/roms || exit 2
+	(cd $B/restart && timeout -k 30 300 ../host -p -R tz_94h 180 . > run.out 2>&1) || { echo "VPX FAIL: restart exited $?"; fail=$((fail + 1)); }
+	python3 vpx.py sessions $B/restart || fail=$((fail + 1))
 else
 	echo "vpx: LIBPINMAME or PINMAME_ROMS not set: libpinmame's display list and getters not run"
 fi

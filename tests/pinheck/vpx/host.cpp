@@ -5,6 +5,7 @@
      -x  probe lamp and solenoid numbers no game has (0, -1, 100000) and pinHeck lamp numbers that do not exist; -m  HandleMechanics mask (default 0);
      -s  file of "frame switch state" lines applied with PinmameSetSwitch; -P  physical outputs (SolMask(2) = 2);
      -R  stop after FRAMES, copy $PINHECK_LINK_LOG to DIR/link1.log, run FRAMES more in a new session
+   host -T: messages broadcast from a second thread while this one subscribes (for a ThreadSanitizer build)
    DIR gets api.log, frames.bin (VIDEO frames: uint32 frame, then the pixels) and audio.raw (int16 stereo). */
 #include "libpinmame.h"
 #include "plugins/ControllerPlugin.h"
@@ -40,6 +41,7 @@ static void logl(const char *fmt, ...)
 /* plugin message API: one endpoint for libpinmame, one for this host; callbacks queued to the main thread */
 static std::map<std::string, unsigned> msg_ids;
 static std::map<unsigned, std::vector<std::pair<msgpi_msg_callback, void *>>> subs;
+static std::mutex msgm;                          /* msg_ids and subs */
 static std::vector<std::pair<msgpi_timer_callback, void *>> queue;
 static std::mutex qm;
 static std::thread::id main_id;
@@ -48,22 +50,42 @@ static void MSGPIAPI GetEndpointInfo(const uint32_t, MsgEndpointInfo *) {}
 static unsigned MSGPIAPI GetMsgID(const char *ns, const char *name)
 {
 	std::string k = std::string(ns) + "." + name;
+	std::lock_guard<std::mutex> g(msgm);
 	auto it = msg_ids.find(k);
 	if (it != msg_ids.end()) return it->second;
 	unsigned id = (unsigned)msg_ids.size() + 1;
 	msg_ids[k] = id;
 	return id;
 }
-static void MSGPIAPI SubscribeMsg(const uint32_t, const unsigned id, const msgpi_msg_callback cb, void *ud) { subs[id].push_back({cb, ud}); }
+static void MSGPIAPI SubscribeMsg(const uint32_t, const unsigned id, const msgpi_msg_callback cb, void *ud)
+{
+	std::lock_guard<std::mutex> g(msgm);
+	subs[id].push_back({cb, ud});
+}
 static void MSGPIAPI UnsubscribeMsg(const unsigned id, const msgpi_msg_callback cb, void *ud)
 {
-	auto &v = subs[id];
+	std::lock_guard<std::mutex> g(msgm);
+	auto it = subs.find(id);
+	if (it == subs.end()) return;
+	auto &v = it->second;
 	for (size_t i = 0; i < v.size(); i++)
 		if (v[i].first == cb && v[i].second == ud) { v.erase(v.begin() + i); break; }
 }
+static bool subscribed(const unsigned id)
+{
+	std::lock_guard<std::mutex> g(msgm);
+	auto it = subs.find(id);
+	return it != subs.end() && !it->second.empty();
+}
 static void MSGPIAPI BroadcastMsg(const uint32_t, const unsigned id, void *data)
 {
-	auto v = subs[id];
+	std::vector<std::pair<msgpi_msg_callback, void *>> v;
+	{
+		std::lock_guard<std::mutex> g(msgm);
+		auto it = subs.find(id);
+		if (it == subs.end()) return;
+		v = it->second;
+	}
 	for (auto &s : v) s.first(id, s.second, data);
 }
 static void MSGPIAPI SendMsg(const uint32_t ep, const unsigned id, const uint32_t, void *data) { BroadcastMsg(ep, id, data); }
@@ -177,7 +199,7 @@ static void sample(int f)
 			DisplayFrame fr = d.GetRenderFrame(d.callContext);
 			if (fr.frameId == last_frame_id) continue;
 			last_frame_id = fr.frameId;
-			const size_t n = (size_t)d.width * d.height * (d.frameFormat == CTLPI_DISPLAY_FORMAT_SRGB565 ? 2 : 3);
+			const size_t n = (size_t)d.width * d.height * (d.frameFormat == CTLPI_DISPLAY_FORMAT_SRGB565 ? 2 : d.frameFormat == CTLPI_DISPLAY_FORMAT_SRGB888 ? 3 : 4);
 			uint32_t tag = (uint32_t)f | 0x80000000u;
 			fwrite(&tag, 4, 1, framef);
 			fwrite(fr.frame, 1, n, framef);
@@ -226,8 +248,29 @@ static void PINMAMECALLBACK OnLogMessage(PINMAME_LOG_LEVEL level, const char *fm
 }
 static int PINMAMECALLBACK IsKeyPressed(PINMAME_KEYCODE, void *const) { return 0; }
 
+static void MSGPIAPI OnNothing(const unsigned, void *, void *) {}
+static int thread_check()
+{
+	const unsigned id = GetMsgID("test", "msg");
+	std::thread t([id] {
+		for (int i = 0; i < 20000; i++) {
+			BroadcastMsg(0, id, nullptr);
+			BroadcastMsg(0, id + 1 + i % 64, nullptr);
+			GetMsgID("test", std::to_string(i % 64).c_str());
+		}
+	});
+	for (int i = 0; i < 20000; i++) {
+		SubscribeMsg(0, id, OnNothing, nullptr);
+		UnsubscribeMsg(id, OnNothing, nullptr);
+	}
+	t.join();
+	printf("threads: message ids and subscriptions shared with a second thread\n");
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
+	if (argc == 2 && !strcmp(argv[1], "-T")) return thread_check();
 	bool plugin = false, restart = false;
 	int mech = 0, a = 1;
 	for (; a < argc && argv[a][0] == '-'; a++) {
@@ -284,11 +327,14 @@ int main(int argc, char **argv)
 			logl("restart after %d frames\n", (int)frame);
 			frame = 0;
 			done = 0;
+			displays.clear();                    /* the first session's sources are gone */
+			groups.clear();
+			last_frame_id = ~0u;
 		}
 		if (PinmameRun(game) != PINMAME_STATUS_OK) { logl("run failed\n"); return 1; }
 		while (!done) {
 			run_queue();
-			if (plugin && !plugin_ready && !groups.size() && PinmameIsRunning() && !subs[GetMsgID(CTLPI_NAMESPACE, CTLPI_STATE_GET_SRC_MSG)].empty())
+			if (plugin && !plugin_ready && !groups.size() && PinmameIsRunning() && subscribed(GetMsgID(CTLPI_NAMESPACE, CTLPI_STATE_GET_SRC_MSG)))
 				plugin_enumerate();
 			std::this_thread::sleep_for(std::chrono::milliseconds(2));
 		}

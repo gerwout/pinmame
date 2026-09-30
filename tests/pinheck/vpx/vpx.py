@@ -9,6 +9,7 @@
   vpx.py mech ON_DIR OFF_DIR    HandleMechanics bit 0 turns the simulated Noid on and off
   vpx.py restart DIR            a second session in the same process: the link log is complete at the first
                                 session's end, and the second session's packets start whole
+  vpx.py sessions DIR           with the plugin API over two sessions (-p -R), the second session enumerates and reads it again
   vpx.py selftest DIR           media's frame rule on synthetic runs written to DIR"""
 import array
 import os
@@ -338,6 +339,32 @@ def restart(d):
     return 1 if fails else 0
 
 
+def sessions(d):
+    fails = []
+    _, other = api_log(d)
+    k = next((i for i, l in enumerate(other) if l.startswith('restart after ')), None)
+    if k is None or not any(l.startswith('end ') for l in other):
+        fails.append('the host did not run two sessions')
+        k = len(other)
+    groups = [sum(1 for l in part if l.startswith('plugin group ')) for part in (other[:k], other[k:])]
+    disp = [l.split() for l in other if l.startswith('plugin display ')]
+    if not disp:
+        disp = [['plugin', 'display', '0x0', 'format', '3']]
+    w, h = map(int, disp[0][2].split('x'))
+    raw = open(os.path.join(d, 'frames.bin'), 'rb').read()
+    rec = 4 + w * h * {3: 2, 2: 3}.get(int(disp[0][4]), 4)    # RGB565, RGB888, else 32-bit luminance
+    tags = [struct.unpack_from('<I', raw, i)[0] for i in range(0, len(raw) - rec + 1, rec)]
+    tags = [t & 0x7fffffff for t in tags if t >= 0x80000000]
+    drop = next((i for i in range(1, len(tags)) if tags[i] < tags[i - 1]), len(tags))
+    frames = [drop, len(tags) - drop]
+    print('sessions: plugin groups enumerated %d + %d, plugin frames read %d + %d' % tuple(groups + frames))
+    if not all(groups) or not all(frames):
+        fails.append('a session without the plugin API\'s groups or frames')
+    for f in fails:
+        print('VPX FAIL: ' + f)
+    return 1 if fails else 0
+
+
 def selftest(d):
     """media on synthetic runs: frames of (ms on the panel, exported); each case (name, frames, expected exit)"""
     cases = [('all shown', [(40, 1), (40, 1), (40, 1), (40, 1)], 0),
@@ -395,6 +422,8 @@ if __name__ == '__main__':
         sys.exit(mech(a[1], a[2]))
     if a[:1] == ['restart'] and len(a) == 2:
         sys.exit(restart(a[1]))
+    if a[:1] == ['sessions'] and len(a) == 2:
+        sys.exit(sessions(a[1]))
     if a[:1] == ['selftest'] and len(a) == 2:
         sys.exit(1 if selftest(a[1]) else 0)
     sys.exit(__doc__)
