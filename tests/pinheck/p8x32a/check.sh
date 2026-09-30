@@ -22,6 +22,24 @@ if [ -f ../eeprom/eeprom_test.c ]; then
 fi
 [ -f $CORE/p8x32a.c ] || { echo "p8x32a: core not present yet"; exit 2; }
 $CC -I$CORE -I$DEV -o $B/p8run run.c $CORE/p8x32a.c $DEV/eeprom.c $DEV/sd.c $DEV/vfat.c $DEV/zipsrc.c -lz || exit 2
+# P8X32A_JIT=1: every test runs with local instruction runs translated (x86-64 only)
+if [ "$P8X32A_JIT" = 1 ]; then
+	ASMJIT=../../../ext/asmjit
+	JF="-O2 -std=c++17 -DASMJIT_STATIC -DASMJIT_NO_FOREIGN -DASMJIT_NO_UJIT -I$ASMJIT"
+	mkdir -p $B/asmjit
+	if [ ! -f $B/asmjit/libasmjit.a ]; then
+		for f in $ASMJIT/asmjit/core/*.cpp $ASMJIT/asmjit/x86/*.cpp $ASMJIT/asmjit/support/*.cpp; do
+			c++ $JF -c "$f" -o $B/asmjit/$(basename "$f" .cpp).o || exit 2
+		done
+		ar rcs $B/asmjit/libasmjit.a $B/asmjit/*.o || exit 2
+	fi
+	c++ $JF -Wall -Wextra -Werror -I$CORE -c $CORE/p8x32ajit.cpp -o $B/p8x32ajit.o || exit 2
+	for f in run.c $CORE/p8x32a.c $DEV/eeprom.c $DEV/sd.c $DEV/vfat.c $DEV/zipsrc.c; do
+		$CC -DP8X32A_JIT -I$CORE -I$DEV -c "$f" -o $B/jit-$(basename "$f" .c).o || exit 2
+	done
+	c++ -o $B/p8run $B/jit-*.o $B/p8x32ajit.o $B/asmjit/libasmjit.a -lz -lpthread || exit 2
+	echo "p8run: translated"
+fi
 if [ -f dasm_test.c ]; then
 	$CC -I$CORE -o $B/dasm_test dasm_test.c $CORE/p8x32adasm.c || exit 2
 	./$B/dasm_test || fail=$((fail + 1))

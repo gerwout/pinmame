@@ -3,6 +3,9 @@
 #include "core.h"
 #include "cpu/pic32mx/pic32mxcpu.h"
 #include "pinheck/prop.h"
+#ifdef PINMAME_JIT_ASMJIT
+#include "cpu/p8x32a/p8x32ajit.h"
+#endif
 #include "pinheck/rtc.h"
 #include "pinheck/bootldr.h"
 #include "pinheck/sd.h"
@@ -665,6 +668,10 @@ static MACHINE_INIT(pinheck)
 	const char *log = getenv("PINHECK_UART1_LOG"), *plog = getenv("PINHECK_PROP_LOG");
 
 	prop_stop_thread(&prop);
+#ifdef PINMAME_JIT_ASMJIT
+	p8x32a_jit_free(prop.chip.jit);
+	prop.chip.jit = NULL;
+#endif
 	if (locals.uart1) fclose(locals.uart1);
 	if (locals.proplog) fclose(locals.proplog);
 	memset(&locals, 0, sizeof(locals));
@@ -681,6 +688,10 @@ static MACHINE_INIT(pinheck)
 	}
 	memcpy(propmem, memory_region(PINHECK_PROPREGION), 0x8000);
 	prop_init(&prop, memory_region(PINHECK_BIOSREGION), propmem);
+#ifdef PINMAME_JIT_ASMJIT
+	if ((!getenv("PINHECK_JIT") || atoi(getenv("PINHECK_JIT")) != 0) && (prop.chip.jit = p8x32a_jit_new()) != NULL)
+		prop.chip.jit_build = p8x32a_jit_build;
+#endif
 	prop_set_log(&prop, pinheck_prop_log, NULL);
 	prop_set_tx(&prop, pinheck_prop_tx, NULL);
 	if (sndl.started) prop_set_sound(&prop, pinheck_snd_ctr, pinheck_snd_pins, NULL);
@@ -732,6 +743,11 @@ static NVRAM_HANDLER(pinheck)
 static MACHINE_STOP(pinheck)
 {
 	prop_stop_thread(&prop);
+#ifdef PINMAME_JIT_ASMJIT
+	p8x32a_jit_free(prop.chip.jit);
+	prop.chip.jit = NULL;
+	prop.chip.jit_build = NULL;
+#endif
 	if (locals.uart1) fclose(locals.uart1);
 	if (locals.proplog) fclose(locals.proplog);
 	locals.uart1 = locals.proplog = NULL;

@@ -58,6 +58,39 @@ typedef struct p8x32a_loop {
 	unsigned char snap[P8X32A_PAT][P8X32A_SNAP];
 } p8x32a_loop;
 
+/* Translated runs of a cog's local instructions (p8x32ajit.cpp). fn runs its block and the blocks it leads to on
+   st and returns how many instructions ran, updating in st: fl (Z bit 0, C bit 1), t2 (time of the next
+   instruction), budget (instructions that may still start), and loop's dirty, nins and search state as run_local
+   does; for the last instruction run, pc, px (address the next word was fetched from), nix (that word), jmp (it was a
+   jump that ran), jc (a jump that did not jump), edge (a backward jump run_local must pass to loop_edge), w, s, d
+   (its word and operands). A block ends after a jump that runs and before a slot whose word no longer fits
+   (P8X32A_JDYN); the next block runs if it is valid, fits the budget and no cancel or code change intervenes. */
+#define P8X32A_JMAX 32
+#define P8X32A_JDYN 0x3FFFFu /* the S and D fields: a slot whose words differ only here is read at run time */
+
+typedef struct p8x32a_jblk p8x32a_jblk;
+
+typedef struct p8x32a_jst {
+	uint32_t *ram;
+	const uint8_t *code; /* bit s: slot s is a fixed word of a block; a write that changes it is reported in inv */
+	p8x32a_jblk **tab;   /* the cog's blocks by address */
+	p8x32a_loop *loop;
+	uint64_t t2;
+	uint32_t budget, ix, fl, pc, px, nix, jmp, jc, edge, w, s, d; /* pc: of the last instruction run */
+	uint32_t inv, inv_old; /* 0, or the slot + 1 and its old word; ~0: more than one */
+} p8x32a_jst;
+
+struct p8x32a_jblk {
+	uint32_t (*fn)(p8x32a_jst *st);
+	const void *body; /* entry for a block reached from another */
+	unsigned len, valid;
+	uint32_t words[P8X32A_JMAX], dyn; /* dyn: bit k set, slot k is read at run time */
+};
+
+/* translate the run at cog address a: ix, then the words after it in ram; var[k] holds the bits in which slot k
+   has changed (0: fixed, only S/D: read at run time, else not translated); old is the block this one replaces */
+typedef p8x32a_jblk *(*p8x32a_jit_fn)(void *jit, p8x32a_jblk *old, unsigned a, uint32_t ix, const uint32_t *ram, const uint32_t *var);
+
 /* a decoded instruction word, valid while word matches the instruction being run */
 typedef struct p8x32a_dec {
 	uint32_t word;
@@ -89,6 +122,11 @@ typedef struct p8x32a {
 	uint64_t sleeps; /* idle loops entered */
 	p8x32a_loop loop[8];
 	p8x32a_dec dec[8][512];
+	p8x32a_jit_fn jit_build; /* NULL: no translation */
+	void *jit;
+	p8x32a_jblk *jblk[8][512];
+	uint32_t jvar[8][512];
+	uint8_t jcode[8][64];
 } p8x32a;
 
 void p8x32a_init(p8x32a *p, const p8x32a_bus *bus);

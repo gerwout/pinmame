@@ -47,6 +47,7 @@ static uint32_t rd32(const p8x32a *p, uint32_t a)
 static uint32_t regval(const p8x32a_reg *r, uint64_t t) { return t >= r->at ? r->cur : r->prev; }
 
 static void loop_notify(p8x32a *p, uint64_t t, uint32_t pins);
+static void jit_write(p8x32a *p, int n, unsigned s, uint32_t old);
 
 /* a pin change at t; pins = the pins it may change */
 static void add_pending(p8x32a *p, uint64_t t, uint32_t pins)
@@ -669,7 +670,7 @@ static void complete(p8x32a *p, int n, uint64_t m3, uint32_t q, int bus_c)
 		r = alu(op, c->s, c->d, c->p, c->run, c->c, c->z, q, bus_c, &wr, &co, &zo);
 	if (c->cond) {
 		if (FWR(i)) {
-			if (wr && c->ram[DST(i)] != r) { c->ram[DST(i)] = r; p->loop[n].dirty = 1; }
+			if (wr && c->ram[DST(i)] != r) { uint32_t o = c->ram[DST(i)]; c->ram[DST(i)] = r; p->loop[n].dirty = 1; jit_write(p, n, DST(i), o); }
 			if (DST(i) >= 0x1F0) { special_write(p, n, DST(i), r, m3); p->loop[n].dirty = 1; }
 		}
 		if (FWC(i)) c->c = (uint8_t)co;
@@ -917,6 +918,45 @@ static void dec_fill(p8x32a_dec *e, uint32_t i)
 	if ((FWR(i) && DST(i) >= 0x1F0) || (!FIM(i) && SRC(i) == 0x1F2)) e->kind = K_NL;
 }
 
+/* a write changed fixed code slot s of cog n from old: the blocks with it are dropped; its changed bits accumulate
+   in jvar, which decides whether the slot is read at run time or left to the interpreter */
+static void jit_written(p8x32a *p, int n, unsigned s, uint32_t old)
+{
+	int k;
+	p->jvar[n][s] |= old ^ p->cog[n].ram[s];
+	for (k = (int)s; k >= 0 && k > (int)s - P8X32A_JMAX; k--) {
+		p8x32a_jblk *b = p->jblk[n][k];
+		if (b && b->valid && (unsigned)k + b->len > s && !(b->dyn >> (s - (unsigned)k) & 1)) b->valid = 0;
+	}
+	p->jcode[n][s >> 3] &= (uint8_t)~(1u << (s & 7));
+}
+
+static void jit_write(p8x32a *p, int n, unsigned s, uint32_t old)
+{
+	if (p->jit_build && (p->jcode[n][s >> 3] >> (s & 7) & 1)) jit_written(p, n, s, old);
+}
+
+/* the translated block for ix at cog address a */
+static p8x32a_jblk *jit_get(p8x32a *p, int n, unsigned a, uint32_t ix)
+{
+	p8x32a_jblk *b = p->jblk[n][a];
+	uint32_t *var = p->jvar[n];
+	unsigned k;
+	if (var[a] & ~P8X32A_JDYN) return NULL;
+	if (b && b->valid) {
+		uint32_t x = (b->dyn & 1) ? (ix ^ b->words[0]) & ~P8X32A_JDYN : ix ^ b->words[0];
+		if (!x) return b;
+		var[a] |= x;
+		if (var[a] & ~P8X32A_JDYN) return NULL;
+	}
+	b = p->jit_build(p->jit, b, a, ix, p->cog[n].ram, var);
+	p->jblk[n][a] = b;
+	if (b && b->valid)
+		for (k = 0; k < b->len; k++)
+			if (!(b->dyn >> k & 1)) p->jcode[n][(a + k) >> 3] |= (uint8_t)(1u << ((a + k) & 7));
+	return b;
+}
+
 /* exec + complete for local instructions of cog n, kept in locals, until one is not local or t is passed.
    fl holds Z (bit 0), C (bit 1) and cancel (bit 2); an instruction runs if bit fl of its condition mask is set. */
 static void run_local(p8x32a *p, int n, uint64_t t)
@@ -934,6 +974,60 @@ static void run_local(p8x32a *p, int n, uint64_t t)
 	for (;;) {
 		uint32_t s, d, r, nix;
 		unsigned px = pc, jc = 0;
+		if (p->jit_build && !(fl & 4)) {
+			unsigned a = (pc - 1) & 511;
+			p8x32a_jblk *b = jit_get(p, n, a, ix);
+			unsigned k;
+			p8x32a_jst st;
+			if (b && b->len && t2 + 4 * (uint64_t)(b->len - 1) <= tl) {
+				l->nins = (uint16_t)(l->nins + nins);
+				nins = 0;
+				st.ram = ram;
+				st.code = p->jcode[n];
+				st.tab = p->jblk[n];
+				st.loop = l;
+				st.t2 = t2;
+				st.budget = (uint32_t)((tl - t2) / 4 + 1);
+				st.ix = ix;
+				st.fl = fl & 3;
+				st.inv = st.edge = 0;
+				k = b->fn(&st);
+			} else
+				k = 0;
+			if (k) {
+				if (st.inv == ~0u) {
+					unsigned j;
+					for (j = 0; j < 512; j++)
+						if (p->jblk[n][j]) p->jblk[n][j]->valid = 0;
+					memset(p->jcode[n], 0, sizeof(p->jcode[n]));
+				} else if (st.inv)
+					jit_written(p, n, st.inv - 1, st.inv_old);
+				fl = st.fl;
+				px = st.px;
+				jc = st.jc;
+				nix = st.nix;
+				t2 = st.t2;
+				if (st.edge) {
+					loop_edge(p, n, px, t2 - 3);
+					if (l->state == LOOP_RECORD) {
+						c->i = st.w; c->s = st.s; c->d = st.d; c->px = (uint16_t)px; c->nix = nix; c->cond = 1;
+						pc = (px + 1) & 511;
+						fl |= (px == 511) << 2;
+						ix = nix;
+						break;
+					}
+				}
+				if (!jc) pc = (px + 1) & 511;
+				else pc = st.pc;
+				fl |= (jc || px == 511) << 2;
+				ix = nix;
+				if (t2 > tl) {
+					if (t2 - 2 >= dis) { idled = 1; break; }
+					goto limit;
+				}
+				continue;
+			}
+		}
 		e = &dec[(pc - 1) & 511];
 		if (e->word != ix) dec_fill(e, ix);
 		if (e->kind == K_NL) break;
@@ -971,13 +1065,13 @@ static void run_local(p8x32a *p, int n, uint64_t t)
 				zo = (unsigned)zi;
 				if (op == 0x3A) jc = !d;
 				else if (op == 0x3B) jc = d != 0;
-				if ((e->fl & F_WR) && wr && ram[e->dst] != r) { ram[e->dst] = r; l->dirty = 1; }
+				if ((e->fl & F_WR) && wr && ram[e->dst] != r) { uint32_t o = ram[e->dst]; ram[e->dst] = r; l->dirty = 1; jit_write(p, n, e->dst, o); }
 				goto flags;
 			}
 			}
 			nix = ram[px];
 			zo = !r;
-			if ((e->fl & F_WR) && ram[e->dst] != r) { ram[e->dst] = r; l->dirty = 1; }
+			if ((e->fl & F_WR) && ram[e->dst] != r) { uint32_t o = ram[e->dst]; ram[e->dst] = r; l->dirty = 1; jit_write(p, n, e->dst, o); }
 		flags:
 			if (e->fl & F_WC) fl = (fl & ~2u) | co << 1;
 			if (e->fl & F_WZ) fl = (fl & ~1u) | zo;

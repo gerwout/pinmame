@@ -1,4 +1,7 @@
 #include "p8x32a.h"
+#ifdef P8X32A_JIT
+#include "p8x32ajit.h"
+#endif
 #include "eeprom.h"
 #include "sd.h"
 #include "vfat.h"
@@ -255,6 +258,9 @@ int main(int argc, char **argv)
 	}
 	if (!rom) { fprintf(stderr, "p8run: -rom is required\n"); return 2; }
 	p8x32a_init(&chip, &bus);
+#ifdef P8X32A_JIT
+	if ((chip.jit = p8x32a_jit_new()) != NULL) chip.jit_build = p8x32a_jit_build;
+#endif
 	if (!load(rom, chip.hub + 0x8000, 0x8000, &n) || n != 0x8000) { fprintf(stderr, "p8run: rom must be 32768 bytes\n"); return 2; }
 	if (ram && !load(ram, chip.hub, 0x8000, &n)) return 2;
 	if (eep) {
