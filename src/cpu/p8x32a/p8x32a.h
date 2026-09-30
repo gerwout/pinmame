@@ -72,6 +72,11 @@ typedef struct p8x32a {
 	int stop;
 	int ctr_ok;
 	uint64_t ctr_from, ctr_nt;
+	uint16_t nco_mask, nco_ok; /* counters (2 * cog + ctr) with an NCO mode now or before their last write; cached next changes */
+	uint8_t nco_n, nco_list[16];
+	int pins_ok; /* reg_out, reg_dir, cog_dir, nco_lvl hold the pins since the last change point */
+	uint32_t reg_out, reg_dir, cog_dir[8], nco_lvl[16];
+	uint64_t nco_from[16], nco_nt[16];
 	uint8_t sleepers;
 	uint64_t sleeps; /* idle loops entered */
 	p8x32a_loop loop[8];

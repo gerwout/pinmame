@@ -11,6 +11,7 @@
 #define PIN_P25  (1u << 25)
 #define PIN_SCL  (1u << 28)
 #define PIN_SDA  (1u << 29)
+#define PIN_SND  ((1u << 14) | (1u << 15))
 
 static const uint32_t rate_num[8] = { 3, 1, 13, 13, 13, 13, 13, 13 };
 static const uint32_t rate_den[8] = { 20, 4000, 160, 160, 80, 40, 20, 10 };
@@ -88,19 +89,28 @@ static uint64_t pins_next(void *ctx, uint64_t t)
 	return P8X32A_NEVER;
 }
 
+/* each device sees a change of its own pins; the EEPROM, SD card, UART and sound only act on those */
 static void pins_out(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 {
 	pinheck_prop *p = (pinheck_prop *)ctx;
-	int scl = (dir & PIN_SCL) ? (out & PIN_SCL) != 0 : 1;
-	int sda = (dir & PIN_SDA) ? (out & PIN_SDA) != 0 : 1;
-	int tx = (dir & PIN_P25) ? (out & PIN_P25) != 0 : 1;
-	if (p->tx && tx != p->tx_level) {
-		p->tx_level = tx;
-		p->tx(p->tx_ctx, to_pic(p, t), tx);
+	uint32_t ch = p->po_ok ? (out ^ p->po_out) | (dir ^ p->po_dir) : 0xFFFFFFFFu;
+	p->po_out = out;
+	p->po_dir = dir;
+	p->po_ok = 1;
+	if (ch & PIN_P25) {
+		int tx = (dir & PIN_P25) ? (out & PIN_P25) != 0 : 1;
+		if (p->tx && tx != p->tx_level) {
+			p->tx_level = tx;
+			p->tx(p->tx_ctx, to_pic(p, t), tx);
+		}
 	}
-	if (p->snd_pins) p->snd_pins(p->snd_ctx, t, out, dir);
-	p->ee_bits = PIN_SCL | (cat24m01_update(&p->eeprom, scl, sda) ? PIN_SDA : 0);
-	if (p->sd) {
+	if (p->snd_pins && (ch & PIN_SND)) p->snd_pins(p->snd_ctx, t, out, dir);
+	if (ch & (PIN_SCL | PIN_SDA)) {
+		int scl = (dir & PIN_SCL) ? (out & PIN_SCL) != 0 : 1;
+		int sda = (dir & PIN_SDA) ? (out & PIN_SDA) != 0 : 1;
+		p->ee_bits = PIN_SCL | (cat24m01_update(&p->eeprom, scl, sda) ? PIN_SDA : 0);
+	}
+	if (p->sd && (ch & (PIN_CS | PIN_SCLK | PIN_DI))) {
 		int cs = (dir & PIN_CS) ? (out & PIN_CS) != 0 : 1;
 		int sclk = (dir & PIN_SCLK) ? (out & PIN_SCLK) != 0 : 0;
 		int mosi = (dir & PIN_DI) ? (out & PIN_DI) != 0 : 1;
@@ -145,6 +155,7 @@ static void restart(pinheck_prop *p, uint64_t t)
 	cat24m01_init(&p->eeprom, p->eemem, 0);
 	p->ee_bits = PIN_SCL | PIN_SDA;
 	p->sd_do = 1;
+	p->po_ok = 0;
 	p->reset_pending = 0;
 	retime(p);
 }
@@ -178,6 +189,7 @@ void prop_attach_sd(pinheck_prop *p, prop_spi_fn fn, void *ctx)
 	p->sd = fn;
 	p->sd_ctx = ctx;
 	p->sd_do = 1;
+	p->po_ok = 0;
 }
 
 void prop_set_log(pinheck_prop *p, prop_log_fn fn, void *ctx)
@@ -190,6 +202,7 @@ void prop_set_tx(pinheck_prop *p, prop_tx_fn fn, void *ctx)
 {
 	p->tx = fn;
 	p->tx_ctx = ctx;
+	p->po_ok = 0;
 	p->tx_level = 1;
 }
 
@@ -204,6 +217,7 @@ void prop_set_sound(pinheck_prop *p, prop_ctr_fn ctr, prop_pins_fn pins, void *c
 	p->snd_ctr = ctr;
 	p->snd_pins = pins;
 	p->snd_ctx = ctx;
+	p->po_ok = 0;
 }
 
 void prop_reset(pinheck_prop *p, uint64_t pic_cycle)

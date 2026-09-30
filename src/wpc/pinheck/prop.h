@@ -32,6 +32,8 @@ typedef struct pinheck_prop {
 	int nseg;
 	uint64_t pic_last;
 	uint32_t ee_bits, sd_do;
+	uint32_t po_out, po_dir; /* the pins the devices last saw; po_ok 0: all see the next change */
+	int po_ok;
 	int reset_pending;
 	prop_spi_fn sd;
 	void *sd_ctx;
