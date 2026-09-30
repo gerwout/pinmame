@@ -568,78 +568,15 @@ PINMAME_VIDEO_UPDATE(pinheck_video)
 /* test hook: PINHECK_TIME_LOG gets the emulated and the host time at each vblank, in seconds */
 static FILE *time_log;
 
-/* The worker thread stays on while it is faster. A second of host time below 0.95x real time with it tries a second
-   without it, and the faster of the two stays; the other is tried again after a pause that doubles (10 s to 320 s).
-   Both give the same results, so switching changes only the speed. Test hook: PINHECK_THREAD_FLIP switches every
-   second. */
-enum { GOV_OFF, GOV_THREADED, GOV_TRY_INLINE, GOV_INLINE, GOV_TRY_THREADED };
-static struct { int state, flip; double w0, e0, next, pause, thr, inl; } gov;
+/* the worker thread stays on while it is faster (prop_governor) */
+static prop_gov gov;
 
-static void pinheck_gov_log(const char *what, double a, double b)
-{
-	char msg[96];
-	sprintf(msg, "prop: worker thread %s (%.2fx with it, %.2fx without)", what, a, b);
-	pinheck_prop_log(NULL, msg);
-}
-
-static void pinheck_governor(void)
-{
-	double w = (double)osd_cycles() / (double)osd_cycles_per_second(), e = timer_get_time(), s;
-	if (gov.state == GOV_OFF) return;
-	if (gov.w0 == 0.0 || w - gov.w0 > 3.0 || e < gov.e0) { gov.w0 = w; gov.e0 = e; return; } /* start, pause or reset */
-	if (w - gov.w0 < 1.0) return;
-	s = (e - gov.e0) / (w - gov.w0);
-	gov.w0 = w;
-	gov.e0 = e;
-	if (gov.flip) {
-		if (prop.worker) prop_stop_thread(&prop);
-		else prop_start_thread(&prop);
-		pinheck_prop_log(NULL, prop.worker ? "prop: worker thread switched on" : "prop: worker thread switched off");
-		return;
-	}
-	switch (gov.state) {
-	case GOV_THREADED:
-		if (s >= 0.95 || w < gov.next) break;
-		gov.thr = s;
-		prop_stop_thread(&prop);
-		gov.state = GOV_TRY_INLINE;
-		break;
-	case GOV_TRY_INLINE:
-		gov.inl = s;
-		if (s > gov.thr * 1.05) {
-			pinheck_gov_log("off", gov.thr, s);
-			gov.state = GOV_INLINE;
-		} else {
-			prop_start_thread(&prop);
-			gov.state = GOV_THREADED;
-		}
-		gov.next = w + gov.pause;
-		if (gov.pause < 320.0) gov.pause *= 2.0;
-		break;
-	case GOV_INLINE:
-		gov.inl = s;
-		if (w < gov.next || prop_start_thread(&prop)) break;
-		gov.state = GOV_TRY_THREADED;
-		break;
-	case GOV_TRY_THREADED:
-		if (s > gov.inl * 1.05 || s >= 0.95) {
-			pinheck_gov_log("on", s, gov.inl);
-			gov.state = GOV_THREADED;
-			gov.pause = 10.0;
-			break;
-		}
-		prop_stop_thread(&prop);
-		gov.state = GOV_INLINE;
-		gov.next = w + gov.pause;
-		if (gov.pause < 320.0) gov.pause *= 2.0;
-		break;
-	}
-}
+static double pinheck_host_s(void) { return (double)osd_cycles() / (double)osd_cycles_per_second(); }
 
 static INTERRUPT_GEN(pinheck_vblank)
 {
 	if (time_log) fprintf(time_log, "%.6f %.6f\n", timer_get_time(), (double)osd_cycles() / (double)osd_cycles_per_second());
-	if (!locals.idle) pinheck_governor();
+	if (!locals.idle) prop_governor(&prop, &gov, pinheck_host_s(), timer_get_time());
 	/* the system set refuses to run: leave its on-screen message up, then stop with an error */
 	if (locals.idle && timer_get_time() >= PINHECK_REFUSE_SECS) mame_schedule_error_exit();
 	if (!locals.idle) pinheck_brd_vblank();
@@ -791,12 +728,8 @@ static MACHINE_INIT(pinheck)
 	pic32cpu_set_board(&board);
 	prop_set_clock(&prop, pinheck_pic_now, NULL);
 	memset(&gov, 0, sizeof(gov));
-	if ((!getenv("PINHECK_THREADS") || atoi(getenv("PINHECK_THREADS")) != 0) && prop_start_thread(&prop) == 0) {
-		gov.state = GOV_THREADED;
-		gov.next = (double)osd_cycles() / (double)osd_cycles_per_second() + 5.0;
-		gov.pause = 10.0;
-		gov.flip = getenv("PINHECK_THREAD_FLIP") != NULL;
-	}
+	if (!getenv("PINHECK_THREADS") || atoi(getenv("PINHECK_THREADS")) != 0)
+		prop_gov_start(&prop, &gov, pinheck_host_s(), getenv("PINHECK_THREAD_FLIP") != NULL);
 }
 
 static MACHINE_RESET(pinheck)

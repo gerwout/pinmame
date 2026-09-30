@@ -604,3 +604,82 @@ void prop_pic_pins(pinheck_prop *p, uint64_t pic_cycle, uint32_t pins)
 	p->stamp = p->clock ? p->clock(p->clock_ctx) : pic_cycle;
 	do_pic_pins(p, pic_cycle, pins);
 }
+
+/* A second of host time below 0.95x real time with the worker tries a second without it, and the faster of the two
+   stays; the other is tried again after a pause that doubles (10 s to 320 s). Both give the same results, so
+   switching changes only the speed. flip (test hook) switches every second. */
+enum { GOV_OFF, GOV_THREADED, GOV_TRY_INLINE, GOV_INLINE, GOV_TRY_THREADED };
+
+static void gov_log(pinheck_prop *p, const char *what, double a, double b)
+{
+	char msg[96];
+	if (!p->log) return;
+	sprintf(msg, "prop: worker thread %s (%.2fx with it, %.2fx without)", what, a, b);
+	p->log(p->log_ctx, msg);
+}
+
+/* starts the worker; 0 when it runs */
+int prop_gov_start(pinheck_prop *p, prop_gov *g, double w, int flip)
+{
+	memset(g, 0, sizeof(*g));
+	if (prop_start_thread(p)) return -1;
+	g->state = GOV_THREADED;
+	g->next = w + 5.0;
+	g->pause = 10.0;
+	g->flip = flip;
+	return 0;
+}
+
+void prop_governor(pinheck_prop *p, prop_gov *g, double w, double e)
+{
+	double s;
+	if (g->state == GOV_OFF) return;
+	if (g->w0 == 0.0 || w - g->w0 > 3.0 || e < g->e0) { g->w0 = w; g->e0 = e; return; } /* start, pause or reset */
+	if (w - g->w0 < 1.0) return;
+	s = (e - g->e0) / (w - g->w0);
+	g->w0 = w;
+	g->e0 = e;
+	if (g->flip) {
+		if (p->worker) prop_stop_thread(p);
+		else prop_start_thread(p);
+		if (p->log) p->log(p->log_ctx, p->worker ? "prop: worker thread switched on" : "prop: worker thread switched off");
+		return;
+	}
+	switch (g->state) {
+	case GOV_THREADED:
+		if (s >= 0.95 || w < g->next) break;
+		g->thr = s;
+		prop_stop_thread(p);
+		g->state = GOV_TRY_INLINE;
+		break;
+	case GOV_TRY_INLINE:
+		g->inl = s;
+		if (s > g->thr * 1.05) {
+			gov_log(p, "off", g->thr, s);
+			g->state = GOV_INLINE;
+		} else {
+			prop_start_thread(p);
+			g->state = GOV_THREADED;
+		}
+		g->next = w + g->pause;
+		if (g->pause < 320.0) g->pause *= 2.0;
+		break;
+	case GOV_INLINE:
+		g->inl = s;
+		if (w < g->next || prop_start_thread(p)) break;
+		g->state = GOV_TRY_THREADED;
+		break;
+	case GOV_TRY_THREADED:
+		if (s > g->inl * 1.05 || s >= 0.95) {
+			gov_log(p, "on", s, g->inl);
+			g->state = GOV_THREADED;
+			g->pause = 10.0;
+			break;
+		}
+		prop_stop_thread(p);
+		g->state = GOV_INLINE;
+		g->next = w + g->pause;
+		if (g->pause < 320.0) g->pause *= 2.0;
+		break;
+	}
+}
