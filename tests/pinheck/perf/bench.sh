@@ -85,6 +85,7 @@ if [ "$1" = profile ]; then
 	[ -n "$PERF" ] || { echo "bench: perf not found"; exit 2; }
 	run prof "$SDL3PINMAME" "${2:-attract}" record || exit 1
 	$PERF report -i $B/prof/${2:-attract}/perf.data --stdio --sort srcfile 2> /dev/null | python3 components.py
+	$PERF report -i $B/prof/${2:-attract}/perf.data --stdio --sort dso 2> /dev/null | awk '/\[JIT\]/ { s += $1 } END { printf "%6.1f%%  of it translated Propeller code\n", s }'
 	exit 0
 fi
 [ $# -eq 0 ] && set -- attract video
