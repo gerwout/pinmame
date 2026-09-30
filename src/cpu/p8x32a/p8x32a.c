@@ -47,27 +47,33 @@ static uint32_t rd32(const p8x32a *p, uint32_t a)
 static uint32_t regval(const p8x32a_reg *r, uint64_t t) { return t >= r->at ? r->cur : r->prev; }
 
 static void loop_notify(p8x32a *p, uint64_t t, uint32_t pins);
+static void jit_write(p8x32a *p, int n, unsigned s, uint32_t old);
 
-/* a pin change at t; pins = the pins it may change */
-static void add_pending(p8x32a *p, uint64_t t, uint32_t pins)
+/* a pin change at t; pins = the pins it may change, what = the registers that change (P8X32A_PEND_COG(n): cog n's
+   OUTA or DIRA, P8X32A_PEND_CTR(j): counter j = 2 * cog + A/B) */
+static void add_pending(p8x32a *p, uint64_t t, uint32_t pins, uint32_t what)
 {
 	int k;
 	if (p->sleepers) loop_notify(p, t, pins);
 	for (k = 0; k < p->npend; k++)
-		if (p->pend[k] == t) { p->pend_pins[k] |= pins; return; }
-	if (p->npend < (int)(sizeof(p->pend) / sizeof(p->pend[0]))) { p->pend_pins[p->npend] = pins; p->pend[p->npend++] = t; }
+		if (p->pend[k] == t) { p->pend_pins[k] |= pins; p->pend_what[k] |= what; return; }
+	if (p->npend < (int)(sizeof(p->pend) / sizeof(p->pend[0]))) {
+		p->pend_pins[p->npend] = pins;
+		p->pend_what[p->npend] = what;
+		p->pend[p->npend++] = t;
+	}
 }
 
 static void flush(p8x32a *p, uint64_t t);
 
-static void regset(p8x32a *p, p8x32a_reg *r, uint32_t v, uint64_t at)
+static void regset(p8x32a *p, int n, p8x32a_reg *r, uint32_t v, uint64_t at)
 {
 	uint32_t pins = (r->cur ^ v) | (r->prev ^ v);
 	flush(p, p->now);
 	if (at > r->at) r->prev = r->cur;
 	r->cur = v;
 	r->at = at;
-	add_pending(p, at, pins);
+	add_pending(p, at, pins, P8X32A_PEND_COG(n));
 }
 
 static int nco(uint32_t ctr)
@@ -104,8 +110,9 @@ static uint64_t nco_toggle(uint32_t ctr, uint32_t f, uint32_t ph, uint64_t pt, u
 	if (t < pt) return pt;
 	if (!f) return P8X32A_NEVER;
 	x = (ph + f * (uint32_t)(t - pt)) & 0x7FFFFFFFu;
-	if (f < 0x80000000u) dt = ((uint64_t)0x80000000u - x + f - 1) / f;
-	else dt = (uint64_t)x / (0x100000000ull - f) + 1;
+	/* both quotients fit 32 bits: 0x80000000 - x + f - 1 < 2^32 for f < 2^31, and x < 2^31 */
+	if (f < 0x80000000u) dt = (uint32_t)(0x80000000u - x + f - 1) / f;
+	else dt = x / (uint32_t)(0u - f) + 1;
 	return t + dt;
 }
 
@@ -118,15 +125,21 @@ static uint64_t ctr_toggle(const p8x32a_cog *c, int k, uint64_t t)
 	return nco_toggle(c->ctr[k], c->frq[k], c->phs[k], c->phs_t[k], t);
 }
 
-/* the next counter pin change after t; cached until a counter changes or t reaches it */
+/* the next counter pin change after t; cached, per counter and in all, until a counter changes or t reaches it */
 static uint64_t ctr_next(p8x32a *p, uint64_t t)
 {
-	uint64_t nt = P8X32A_NEVER, e;
-	int n, k;
+	uint64_t nt = P8X32A_NEVER;
+	int k;
 	if (p->ctr_ok && t >= p->ctr_from && t < p->ctr_nt) return p->ctr_nt;
-	for (n = 0; n < 8; n++)
-		for (k = 0; k < 2; k++)
-			if ((e = ctr_toggle(&p->cog[n], k, t)) < nt) nt = e;
+	for (k = 0; k < p->nco_n; k++) {
+		int j = p->nco_list[k];
+		if (!(p->nco_ok >> j & 1) || t < p->nco_from[j] || t >= p->nco_nt[j]) {
+			p->nco_nt[j] = ctr_toggle(&p->cog[j >> 1], j & 1, t);
+			p->nco_from[j] = t;
+			p->nco_ok |= (uint16_t)(1u << j);
+		}
+		if (p->nco_nt[j] < nt) nt = p->nco_nt[j];
+	}
 	p->ctr_ok = 1;
 	p->ctr_from = t;
 	p->ctr_nt = nt;
@@ -139,32 +152,143 @@ uint32_t p8x32a_pins(p8x32a *p, uint64_t t, uint32_t *dir)
 	int n;
 	for (n = 0; n < 8; n++) {
 		p8x32a_cog *c = &p->cog[n];
-		uint32_t dd = regval(&c->dira, t);
+		uint32_t dd = regval(&c->dira, t), v;
 		if (!dd) continue;
 		d |= dd;
-		o |= (regval(&c->outa, t) | ctr_pins(c, 0, t) | ctr_pins(c, 1, t)) & dd;
+		v = regval(&c->outa, t);
+		if (p->nco_mask >> (2 * n) & 1) v |= ctr_pins(c, 0, t);
+		if (p->nco_mask >> (2 * n) & 2) v |= ctr_pins(c, 1, t);
+		o |= v & dd;
 	}
 	*dir = d;
+	return o;
+}
+
+/* the pins at t from the register part and the NCO outputs: evaluated (full), or the outputs of the counters that
+   change at t inverted (ctr_next(t) found t as their next change) */
+static uint32_t pins_nco(p8x32a *p, uint64_t t, int full)
+{
+	uint32_t o = p->reg_out;
+	int k;
+	for (k = 0; k < p->nco_n; k++) {
+		int j = p->nco_list[k], n = j >> 1, c = j & 1;
+		const p8x32a_cog *g = &p->cog[n];
+		if (full) p->nco_lvl[j] = ctr_pins(g, c, t);
+		else if (p->nco_nt[j] == t) p->nco_lvl[j] ^= nco_pins(t < g->ctr_at[c] ? g->ctr_old[c] : g->ctr[c]);
+		o |= p->nco_lvl[j] & p->cog_dir[n];
+	}
+	return o;
+}
+
+/* pins_nco(p, when, 0) and the next ctr_next(p, when) in one pass: the counters that change at when flip and get
+   their next change; when is ctr_next(p->flushed), so every listed counter's next change is cached */
+static uint64_t nco_step(p8x32a *p, uint64_t when, uint32_t *out)
+{
+	uint32_t o = p->reg_out;
+	uint64_t nt = P8X32A_NEVER;
+	int k;
+	for (k = 0; k < p->nco_n; k++) {
+		int j = p->nco_list[k];
+		const p8x32a_cog *g = &p->cog[j >> 1];
+		if (p->nco_nt[j] == when) {
+			int c = j & 1;
+			p->nco_lvl[j] ^= nco_pins(when < g->ctr_at[c] ? g->ctr_old[c] : g->ctr[c]);
+			p->nco_nt[j] = ctr_toggle(g, c, when);
+			p->nco_from[j] = when;
+		}
+		o |= p->nco_lvl[j] & p->cog_dir[j >> 1];
+		if (p->nco_nt[j] < nt) nt = p->nco_nt[j];
+	}
+	p->ctr_from = when;
+	p->ctr_nt = nt;
+	*out = o;
+	return nt;
+}
+
+static void pins_regs(p8x32a *p, uint64_t t)
+{
+	int n;
+	p->reg_out = p->reg_dir = 0;
+	for (n = 0; n < 8; n++) {
+		const p8x32a_cog *c = &p->cog[n];
+		uint32_t dd = regval(&c->dira, t);
+		p->cog_dir[n] = dd;
+		p->cog_out[n] = dd ? regval(&c->outa, t) & dd : 0;
+		p->reg_dir |= dd;
+		p->reg_out |= p->cog_out[n];
+	}
+	p->pins_ok = 1;
+}
+
+/* a pending point at t where only the registers in what change (the others keep their state since the last one):
+   those cogs' OUTA and DIRA and those counters' levels are evaluated, the other counters flip if they change at t */
+static uint32_t pins_what(p8x32a *p, uint64_t t, uint32_t what)
+{
+	uint32_t o, d = 0;
+	int k, n;
+	o = 0;
+	for (n = 0; n < 8; n++) {
+		if (what >> n & 1) {
+			const p8x32a_cog *c = &p->cog[n];
+			uint32_t dd = regval(&c->dira, t);
+			p->cog_dir[n] = dd;
+			p->cog_out[n] = dd ? regval(&c->outa, t) & dd : 0;
+		}
+		d |= p->cog_dir[n];
+		o |= p->cog_out[n];
+	}
+	p->reg_out = o;
+	p->reg_dir = d;
+	for (k = 0; k < p->nco_n; k++) {
+		int j = p->nco_list[k], c = j & 1;
+		const p8x32a_cog *g = &p->cog[j >> 1];
+		if (what >> (8 + j) & 1) p->nco_lvl[j] = ctr_pins(g, c, t);
+		else if (p->nco_nt[j] == t) p->nco_lvl[j] ^= nco_pins(t < g->ctr_at[c] ? g->ctr_old[c] : g->ctr[c]);
+		o |= p->nco_lvl[j] & p->cog_dir[j >> 1];
+	}
 	return o;
 }
 
 static void flush(p8x32a *p, uint64_t t)
 {
 	for (;;) {
-		int k, best = -1;
+		int k, best = -1, full;
 		uint32_t out, dir;
 		uint64_t when = ctr_next(p, p->flushed);
 		for (k = 0; k < p->npend; k++)
 			if (p->pend[k] <= t && (best < 0 || p->pend[k] < p->pend[best])) best = k;
 		if (best >= 0 && p->pend[best] < when) when = p->pend[best];
 		if (when > t) break;
-		out = p8x32a_pins(p, when, &dir);
+		/* registers change only at pending points: between them only the counters move */
+		full = !p->pins_ok || (best >= 0 && p->pend[best] == when);
+		if (!full) {
+			/* NCO changes up to the next pending point or t */
+			uint64_t end = best >= 0 ? p->pend[best] : t + 1;
+			do {
+				uint64_t nt = nco_step(p, when, &out);
+				if (out != p->last_out && p->bus.pins_out) p->bus.pins_out(p->bus.ctx, when, out, p->last_dir);
+				p->last_out = out;
+				p->flushed = when;
+				when = nt;
+			} while (when < end);
+			continue;
+		}
+		if (p->pins_ok) {
+			uint32_t what = 0;
+			for (k = 0; k < p->npend; k++)
+				if (p->pend[k] == when) what |= p->pend_what[k];
+			out = pins_what(p, when, what);
+		} else {
+			pins_regs(p, when);
+			out = pins_nco(p, when, 1);
+		}
+		dir = p->reg_dir;
 		if ((out != p->last_out || dir != p->last_dir) && p->bus.pins_out) p->bus.pins_out(p->bus.ctx, when, out, dir);
 		p->last_out = out;
 		p->last_dir = dir;
 		if (when > p->flushed) p->flushed = when;
 		for (k = 0; k < p->npend; k++)
-			if (p->pend[k] == when) { --p->npend; p->pend[k] = p->pend[p->npend]; p->pend_pins[k] = p->pend_pins[p->npend]; k--; }
+			if (p->pend[k] == when) { --p->npend; p->pend[k] = p->pend[p->npend]; p->pend_pins[k] = p->pend_pins[p->npend]; p->pend_what[k] = p->pend_what[p->npend]; k--; }
 	}
 	if (t > p->flushed) p->flushed = t;
 }
@@ -207,14 +331,41 @@ static void ctr_check(p8x32a *p, uint32_t ctr)
 
 static void ctr_save(p8x32a *p, p8x32a_cog *c, int k, uint64_t e)
 {
+	int j = 2 * (int)(c - p->cog) + k;
 	flush(p, p->now);
-	p->ctr_ok = 0;
-	add_pending(p, e, nco_pins(c->ctr[k]));
+	if (c->ctr_at[k] <= p->flushed && (p->nco_ok >> j & 1)) {
+		/* the state in effect lasts until e: its cached next change stays, capped at e */
+		if (e < p->nco_nt[j]) p->nco_nt[j] = e;
+		if (e < p->ctr_nt) p->ctr_nt = e;
+	} else {
+		p->ctr_ok = 0;
+		p->nco_ok &= (uint16_t)~(1u << j);
+		/* a state that has not taken effect yet is replaced (a cog stopped right after a counter write): the pins
+		   are evaluated again */
+		if (c->ctr_at[k] > p->flushed) p->pins_ok = 0;
+	}
+	add_pending(p, e, nco_pins(c->ctr[k]), P8X32A_PEND_CTR(j));
 	c->ctr_old[k] = c->ctr[k];
 	c->frq_old[k] = c->frq[k];
 	c->phs_old[k] = c->phs[k];
 	c->phs_t_old[k] = c->phs_t[k];
 	c->ctr_at[k] = e;
+}
+
+/* after a write to a counter: is it, or was it before the write, an NCO */
+static void ctr_mask(p8x32a *p, int n, int k)
+{
+	const p8x32a_cog *c = &p->cog[n];
+	uint16_t b = (uint16_t)(1u << (2 * n + k)), m = p->nco_mask;
+	int j;
+	if (nco(c->ctr[k]) || nco(c->ctr_old[k])) p->nco_mask |= b;
+	else p->nco_mask &= (uint16_t)~b;
+	if (p->nco_mask == m) return;
+	/* a counter joining was not an NCO before: no level until its write takes effect */
+	if (p->nco_mask & b) p->nco_lvl[2 * n + k] = 0;
+	p->nco_n = 0;
+	for (j = 0; j < 16; j++)
+		if (p->nco_mask >> j & 1) p->nco_list[p->nco_n++] = (uint8_t)j;
 }
 
 static void ctr_notify(p8x32a *p, int n, int k, uint64_t t)
@@ -232,9 +383,9 @@ static void special_write(p8x32a *p, int n, unsigned a, uint32_t v, uint64_t m3)
 	uint64_t e = m3 + 1;
 	int k = a & 1;
 	switch (a) {
-	case 0x1F4: regset(p, &c->outa, v, e); break;
-	case 0x1F6: if (e < c->disable_at) regset(p, &c->dira, v, e); break;
-	case 0x1F8: case 0x1F9: ctr_save(p, c, k, e); ctr_rebase(c, k, e); c->ctr[k] = v; add_pending(p, e, nco_pins(v)); ctr_check(p, v); ctr_notify(p, n, k, e); break;
+	case 0x1F4: regset(p, n, &c->outa, v, e); break;
+	case 0x1F6: if (e < c->disable_at) regset(p, n, &c->dira, v, e); break;
+	case 0x1F8: case 0x1F9: ctr_save(p, c, k, e); ctr_rebase(c, k, e); c->ctr[k] = v; add_pending(p, e, nco_pins(v), P8X32A_PEND_CTR(2 * n + k)); ctr_mask(p, n, k); ctr_check(p, v); ctr_notify(p, n, k, e); break;
 	case 0x1FA: case 0x1FB: ctr_save(p, c, k, e); ctr_rebase(c, k, e); c->frq[k] = v; ctr_notify(p, n, k, e); break;
 	case 0x1FC: case 0x1FD: ctr_save(p, c, k, e); c->phs[k] = v; c->phs_t[k] = e; break;
 	case 0x1FE: c->vcfg = v; break;
@@ -360,32 +511,40 @@ static uint32_t alu(unsigned i, uint32_t s, uint32_t d, unsigned pc, int run, in
 
 static uint32_t ror32(uint32_t x, unsigned n) { return n ? x >> n | x << (32 - n) : x; }
 
-/* the common ALU ops of a running cog (not hub ops); the others go to alu() */
-static uint32_t alu_run(unsigned i, uint32_t s, uint32_t d, unsigned pc, int ci, int zi, int bus_c, int *wr, int *co, int *zo)
+/* the common ALU ops of a running cog (not hub ops); the others go to alu(). wc = 0: *co need not be set */
+static uint32_t alu_run(unsigned i, uint32_t s, uint32_t d, unsigned pc, int ci, int zi, int bus_c, int wc, int *wr, int *co, int *zo)
 {
 	uint32_t r;
 	unsigned sh = s & 31;
 	*wr = 1;
+	*co = 0;
 	switch (i) {
 	case 0x08: r = ror32(d, sh); *co = (int)(d & 1); break;
 	case 0x09: r = ror32(d, (32 - sh) & 31); *co = (int)(d >> 31); break;
 	case 0x0A: r = d >> sh; *co = (int)(d & 1); break;
 	case 0x0B: r = d << sh; *co = (int)(d >> 31); break;
+	case 0x0C: r = sh ? d >> sh | (ci ? 0xFFFFFFFFu << (32 - sh) : 0) : d; *co = (int)(d & 1); break;
+	case 0x0D: r = sh ? d << sh | (ci ? 0xFFFFFFFFu >> (32 - sh) : 0) : d; *co = (int)(d >> 31); break;
+	case 0x0E: r = sh ? d >> sh | ((d >> 31) ? 0xFFFFFFFFu << (32 - sh) : 0) : d; *co = (int)(d & 1); break;
+	case 0x0F: r = bitrev(d) >> sh; *co = (int)(d & 1); break;
 	case 0x14: r = (d & 0xFFFFFE00u) | (s & 511); *co = d < s; break;
 	case 0x15: r = (d & 0xFFFC01FFu) | ((s & 511) << 9); *co = d < s; break;
+	case 0x16: r = ((s & 511) << 23) | (d & 0x007FFFFFu); *co = d < s; break;
 	case 0x17: r = (d & 0xFFFFFE00u) | (pc & 511); *co = d < s; break;
-	case 0x18: r = d & s; *co = parity(r); break;
-	case 0x19: r = d & ~s; *co = parity(r); break;
-	case 0x1A: r = d | s; *co = parity(r); break;
-	case 0x1B: r = d ^ s; *co = parity(r); break;
-	case 0x1C: r = ci ? d | s : d & ~s; *co = parity(r); break;
-	case 0x1D: r = ci ? d & ~s : d | s; *co = parity(r); break;
-	case 0x1E: r = zi ? d | s : d & ~s; *co = parity(r); break;
-	case 0x1F: r = zi ? d & ~s : d | s; *co = parity(r); break;
+	case 0x18: r = d & s; if (wc) *co = parity(r); break;
+	case 0x19: r = d & ~s; if (wc) *co = parity(r); break;
+	case 0x1A: r = d | s; if (wc) *co = parity(r); break;
+	case 0x1B: r = d ^ s; if (wc) *co = parity(r); break;
+	case 0x1C: r = ci ? d | s : d & ~s; if (wc) *co = parity(r); break;
+	case 0x1D: r = ci ? d & ~s : d | s; if (wc) *co = parity(r); break;
+	case 0x1E: r = zi ? d | s : d & ~s; if (wc) *co = parity(r); break;
+	case 0x1F: r = zi ? d & ~s : d | s; if (wc) *co = parity(r); break;
 	case 0x20: r = d + s; *co = r < d; break;
 	case 0x21: r = d - s; *co = d < s; break;
 	case 0x28: r = s; *co = (int)(s >> 31); break;
+	case 0x30: r = d - s; *co = (int32_t)d < (int32_t)s; break;
 	case 0x39: r = d - 1; *co = !d; break;
+	case 0x3A: case 0x3B: r = d; break;
 	default: return alu(i, s, d, pc, 1, ci, zi, 0, bus_c, wr, co, zo);
 	}
 	*zo = !r;
@@ -405,7 +564,7 @@ static void loop_notify(p8x32a *p, uint64_t t, uint32_t pins)
 {
 	int n;
 	for (n = 0; n < 8; n++)
-		if ((p->sleepers >> n & 1) && (pins & p->loop[n].wake) && t < p->cog[n].ev_t) p->cog[n].ev_t = t;
+		if ((p->sleepers >> n & 1) && (pins & p->loop[n].wake) && t < p->cog[n].ev_t) { p->cog[n].ev_t = t; p->sched_gen++; }
 }
 
 static void loop_hub_write(p8x32a *p, int writer, unsigned a, unsigned sz, uint64_t h)
@@ -415,7 +574,7 @@ static void loop_hub_write(p8x32a *p, int writer, unsigned a, unsigned sz, uint6
 		p8x32a_loop *l = &p->loop[n];
 		if (!(p->sleepers >> n & 1) || n == writer) continue;
 		for (k = 0; k < l->nhub; k++)
-			if (a < (unsigned)l->hub_a[k] + l->hub_n[k] && l->hub_a[k] < a + sz && h < p->cog[n].ev_t) p->cog[n].ev_t = h;
+			if (a < (unsigned)l->hub_a[k] + l->hub_n[k] && l->hub_a[k] < a + sz && h < p->cog[n].ev_t) { p->cog[n].ev_t = h; p->sched_gen++; }
 	}
 }
 
@@ -483,6 +642,7 @@ static void loop_resume(p8x32a *p, int n, uint64_t w)
 	if (j == l->nsnap) { j = 0; k++; }
 	shift = l->t0 - l->snap_t[0] + k * l->period;
 	memcpy(SNAP(c), l->snap[j], P8X32A_SNAP);
+	p->pins_ok = 0;
 	c->ev_t += shift;
 	c->t0 += shift;
 	if (l->hub) c->latch += shift;
@@ -590,10 +750,17 @@ static void complete(p8x32a *p, int n, uint64_t m3, uint32_t q, int bus_c)
 	unsigned op = OP(i);
 	int wr, co, zo, jc = 0;
 
-	r = alu(op, c->s, c->d, c->p, c->run, c->c, c->z, q, bus_c, &wr, &co, &zo);
+	if (op <= 3) {
+		/* alu() for group 0: the hub result */
+		r = (c->run || (c->p >> 4) != 31) ? q : 0;
+		wr = 1;
+		co = bus_c;
+		zo = !r;
+	} else
+		r = alu(op, c->s, c->d, c->p, c->run, c->c, c->z, q, bus_c, &wr, &co, &zo);
 	if (c->cond) {
 		if (FWR(i)) {
-			if (wr && c->ram[DST(i)] != r) { c->ram[DST(i)] = r; p->loop[n].dirty = 1; }
+			if (wr && c->ram[DST(i)] != r) { uint32_t o = c->ram[DST(i)]; c->ram[DST(i)] = r; p->loop[n].dirty = 1; jit_write(p, n, DST(i), o); }
 			if (DST(i) >= 0x1F0) { special_write(p, n, DST(i), r, m3); p->loop[n].dirty = 1; }
 		}
 		if (FWC(i)) c->c = (uint8_t)co;
@@ -625,12 +792,14 @@ static void stop_cog(p8x32a *p, int n, uint64_t d)
 {
 	p8x32a_cog *c = &p->cog[n];
 	if (d < c->disable_at) c->disable_at = d;
-	regset(p, &c->dira, 0, d);
+	regset(p, n, &c->dira, 0, d);
 	ctr_save(p, c, 0, d);
 	ctr_save(p, c, 1, d);
 	ctr_rebase(c, 0, d);
 	ctr_rebase(c, 1, d);
 	c->ctr[0] = c->ctr[1] = 0;
+	ctr_mask(p, n, 0);
+	ctr_mask(p, n, 1);
 	ctr_notify(p, n, 0, d);
 	ctr_notify(p, n, 1, d);
 }
@@ -643,6 +812,7 @@ static void sys(p8x32a *p, int n, uint64_t h)
 	uint8_t enc = (op & 4) ? p->lock_e : p->cog_e, bit;
 	int all = enc == 0xFF, old = 0;
 
+	p->sched_gen++;
 	while (newx < 7 && (enc >> newx & 1)) newx++;
 	num = ((op == 2 && (dc & 8)) || op == 4) ? newx : (dc & 7);
 	bit = (uint8_t)(1u << num);
@@ -807,90 +977,413 @@ static int local(const p8x32a_cog *c)
 	return !(FWR(i) && DST(i) >= 0x1F0);
 }
 
-/* exec + complete for local instructions of cog n, kept in locals, until one is not local or t is passed */
-static void run_local(p8x32a *p, int n, uint64_t t)
+/* a hub op or wait whose issue reads nothing shared: exec() for it may run ahead too */
+static int issue_local(const p8x32a_cog *c)
+{
+	uint32_t i = c->ix;
+	unsigned op = OP(i);
+	if (!c->run || (op > 3 && (op < 0x3C || op > 0x3E))) return 0;
+	return FIM(i) || SRC(i) < 0x1F0;
+}
+
+enum { K_NL, K_GEN, K_JMP, K_DJNZ, K_TJ, K_AND, K_ANDN, K_OR, K_XOR, K_ADD, K_SUB, K_MOV, K_SHL, K_SHR, K_MOVS, K_MOVD, K_MOVI };
+enum { F_IMM = 1, F_SPEC = 2, F_WR = 4, F_WC = 8, F_WZ = 16, F_INA = 32 };
+
+/* decode for run_local: K_NL for an instruction it does not run as a local one; F_INA for an INA source */
+static void dec_fill(p8x32a_dec *e, uint32_t i)
+{
+	unsigned op = OP(i);
+	static const uint8_t kinds[64] = {
+		K_NL, K_NL, K_NL, K_NL, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_SHR, K_SHL, K_GEN, K_GEN, K_GEN, K_GEN,
+		K_GEN, K_GEN, K_GEN, K_GEN, K_MOVS, K_MOVD, K_MOVI, K_JMP, K_AND, K_ANDN, K_OR, K_XOR, K_GEN, K_GEN, K_GEN, K_GEN,
+		K_ADD, K_SUB, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_MOV, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN,
+		K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_GEN, K_DJNZ, K_TJ, K_TJ, K_NL, K_NL, K_NL, K_NL
+	};
+	e->word = i;
+	e->src = (uint16_t)SRC(i);
+	e->dst = (uint16_t)DST(i);
+	e->cond = (uint8_t)COND(i);
+	e->kind = kinds[op];
+	e->fl = (uint8_t)((FIM(i) ? F_IMM : (SRC(i) >= 0x1F0 ? F_SPEC : 0)) | (FWR(i) ? F_WR : 0) | (FWC(i) ? F_WC : 0) | (FWZ(i) ? F_WZ : 0));
+	if (!FIM(i) && SRC(i) == 0x1F2) e->fl |= F_INA;
+	if (FWR(i) && DST(i) >= 0x1F0) e->kind = K_NL;
+}
+
+/* the hub access and completion of cog n's hub read or write i, with source s and destination d, due at h with
+   m3 = latch + 4, as do_hub and complete do them; returns the flags fl (Z bit 0, C bit 1) after it */
+static unsigned hub_rw(p8x32a *p, int n, uint32_t i, uint32_t s, uint32_t d, uint64_t h, uint64_t m3, unsigned fl)
+{
+	p8x32a_loop *l = &p->loop[n];
+	uint32_t *ram = p->cog[n].ram, a = s & 0xFFFF, w = rd32(p, a), r;
+	unsigned op = OP(i), dst = DST(i);
+	if (!FWR(i) && a < 0x8000) {
+		unsigned sz = op == 2 ? 4 : op == 1 ? 2 : 1, ha = a & ~(sz - 1), k;
+		int changed = 0;
+		for (k = 0; k < sz; k++) {
+			changed |= p->hub[ha + k] != (uint8_t)(d >> (8 * k));
+			p->hub[ha + k] = (uint8_t)(d >> (8 * k));
+		}
+		if (changed) {
+			l->dirty = 1;
+			if (p->sleepers) loop_hub_write(p, n, ha, sz, h);
+		}
+	}
+	r = op == 2 ? w : op == 1 ? (w >> ((a & 2) * 8)) & 0xFFFF : (w >> ((a & 3) * 8)) & 0xFF;
+	if (FWR(i)) {
+		if (ram[dst] != r) { uint32_t o = ram[dst]; ram[dst] = r; l->dirty = 1; jit_write(p, n, dst, o); }
+		if (dst >= 0x1F0) { special_write(p, n, dst, r, m3); l->dirty = 1; }
+	}
+	if (FWC(i)) fl = (fl & ~2u) | (unsigned)p->sys_c << 1;
+	if (FWZ(i)) fl = (fl & ~1u) | (unsigned)!r;
+	return fl;
+}
+
+/* An event instruction of running cog n that the scheduler would take next: its event is before lim, the key of
+   the other cogs' earliest event, no other cog's event has moved since lim was taken (gen), and it is not past t.
+   Runs it as exec, do_hub and complete would: a hub read or write, or an instruction with an INA source or a
+   special destination (not a jump, wait or system op). e decodes ix, at cog address pc - 1, due at *t2 with flags
+   *fl. Returns 0 if it must wait for the scheduler; else 1, with *fl, *t2 (the next instruction's time) and *nix
+   (the word fetched for the next instruction). */
+static int event_run(p8x32a *p, int n, const p8x32a_dec *e, uint32_t ix, unsigned pc, unsigned *fl, uint64_t *t2, uint32_t *nix, uint64_t t, uint64_t lim, unsigned gen)
 {
 	p8x32a_cog *c = &p->cog[n];
 	p8x32a_loop *l = &p->loop[n];
-	uint64_t t2 = c->ev_t;
-	uint32_t ix = c->ix;
-	unsigned pc = c->p;
-	int cf = c->c, zf = c->z, cancel = c->cancel, idled = 0;
+	uint32_t *ram = c->ram, s, d, r;
+	unsigned op = OP(ix), f = *fl;
+	uint64_t now = *t2;
 
-	while (t2 <= t) {
-		uint32_t i = ix, s, d, r, nix;
-		unsigned op = OP(i), px, a;
-		int cond, jump, wr, co, zo, jc = 0;
-		if (op <= 3 || op >= 0x3C || (FWR(i) && DST(i) >= 0x1F0)) break;
-		if (FIM(i)) s = SRC(i);
-		else if ((a = SRC(i)) < 0x1F0) s = c->ram[a];
-		else if (a == 0x1F2) break;
+	if (p->sched_gen != gen || p->stop || l->state != LOOP_SEARCH || !((e->cond >> f) & 1)) return 0;
+	if (op <= 2) {
+		uint64_t latch = next_slot(p, n, now + 1), h = latch + 2, m3 = latch + 4;
+		if ((e->fl & F_INA) || h > t || (h << 4 | (uint64_t)n) >= lim || m3 + 1 >= c->disable_at) return 0;
+		if (e->fl & F_IMM) s = e->src;
+		else if (!(e->fl & F_SPEC)) s = ram[e->src];
 		else {
-			s = sread(p, n, a, t2);
-			if (a == 0x1F1 || a == 0x1FC || a == 0x1FD) l->dirty = 1;
+			s = sread(p, n, e->src, now);
+			if (e->src == 0x1F1 || e->src == 0x1FC || e->src == 0x1FD) l->dirty = 1;
 		}
-		cond = ((COND(i) >> ((cf << 1) | zf)) & 1) && !cancel;
-		d = c->ram[DST(i)];
-		jump = op == 0x17 || (op >= 0x39 && op <= 0x3B);
-		px = (cond && jump) ? (s & 511) : pc;
-		nix = c->ram[px];
-		if (t2 + 1 >= c->disable_at) { idled = 1; break; }
-		r = alu_run(op, s, d, pc, cf, zf, p->sys_c, &wr, &co, &zo);
-		if (cond) {
-			if (FWR(i) && wr && c->ram[DST(i)] != r) { c->ram[DST(i)] = r; l->dirty = 1; }
-			if (FWC(i)) cf = co;
-			if (FWZ(i)) zf = zo;
-			if (op == 0x39) jc = !(d >> 1) && (d & 1);
-			else if (op == 0x3A) jc = !(d >> 1) && !(d & 1);
-			else if (op == 0x3B) jc = !(!(d >> 1) && !(d & 1));
+		*nix = ram[pc];
+		p->now = h;
+		c->latch = latch;
+		f = hub_rw(p, n, ix, s, ram[e->dst], h, m3, f);
+		*t2 = m3 + 3;
+	} else {
+		int wr, ci, zi;
+		if (op == 3 || op > 0x3B || op == 0x17 || op >= 0x39) return 0;
+		if (((now << 4) | 8 | (uint64_t)n) >= lim || now + 2 >= c->disable_at) return 0;
+		p->now = now;
+		if (e->fl & F_IMM) s = e->src;
+		else if (e->fl & F_INA) s = ina(p, now);
+		else if (!(e->fl & F_SPEC)) s = ram[e->src];
+		else {
+			s = sread(p, n, e->src, now);
+			if (e->src == 0x1F1 || e->src == 0x1FC || e->src == 0x1FD) l->dirty = 1;
 		}
-		l->nins++;
-		if (cond && !jc && jump && px < pc) {
-			loop_edge(p, n, px, t2 + 1);
-			if (l->state == LOOP_RECORD) {
-				c->i = i; c->s = s; c->d = d; c->px = (uint16_t)px; c->nix = nix; c->cond = (uint8_t)cond;
+		d = ram[e->dst];
+		*nix = ram[pc];
+		r = alu_run(op, s, d, pc, (int)(f >> 1 & 1), (int)(f & 1), p->sys_c, (e->fl & F_WC) != 0, &wr, &ci, &zi);
+		if ((e->fl & F_WR) && wr && ram[e->dst] != r) { uint32_t o = ram[e->dst]; ram[e->dst] = r; l->dirty = 1; jit_write(p, n, e->dst, o); }
+		if ((e->fl & F_WR) && e->dst >= 0x1F0) { special_write(p, n, e->dst, r, now + 1); l->dirty = 1; }
+		if (e->fl & F_WC) f = (f & ~2u) | (unsigned)ci << 1;
+		if (e->fl & F_WZ) f = (f & ~1u) | (unsigned)zi;
+		*t2 = now + 4;
+	}
+	*fl = f;
+	return 1;
+}
+
+/* a write changed fixed code slot s of cog n from old: the blocks with it are dropped; its changed bits accumulate
+   in jvar, which decides whether the slot is read at run time or left to the interpreter */
+static void jit_written(p8x32a *p, int n, unsigned s, uint32_t old)
+{
+	int k;
+	p->jvar[n][s] |= old ^ p->cog[n].ram[s];
+	for (k = (int)s; k >= 0 && k > (int)s - P8X32A_JMAX; k--) {
+		p8x32a_jblk *b = p->jblk[n][k];
+		if (b && b->valid && (unsigned)k + b->len > s && !(b->dyn >> (s - (unsigned)k) & 1)) b->valid = 0;
+	}
+	p->jcode[n][s >> 3] &= (uint8_t)~(1u << (s & 7));
+}
+
+static void jit_write(p8x32a *p, int n, unsigned s, uint32_t old)
+{
+	if (p->jit_build && (p->jcode[n][s >> 3] >> (s & 7) & 1)) jit_written(p, n, s, old);
+}
+
+/* the translated block for ix at cog address a */
+static p8x32a_jblk *jit_get(p8x32a *p, int n, unsigned a, uint32_t ix)
+{
+	p8x32a_jblk *b = p->jblk[n][a];
+	uint32_t *var = p->jvar[n];
+	unsigned k;
+	if (var[a] & ~P8X32A_JDYN) return NULL;
+	if (b && b->valid) {
+		uint32_t x = (b->dyn & 1) ? (ix ^ b->words[0]) & ~P8X32A_JDYN : ix ^ b->words[0];
+		if (!x) return b;
+		var[a] |= x;
+		if (var[a] & ~P8X32A_JDYN) return NULL;
+	}
+	b = p->jit_build(p->jit, b, a, ix, p->cog[n].ram, var);
+	p->jblk[n][a] = b;
+	if (b && b->valid)
+		for (k = 0; k < b->len; k++)
+			if (!(b->dyn >> k & 1)) p->jcode[n][(a + k) >> 3] |= (uint8_t)(1u << ((a + k) & 7));
+	return b;
+}
+
+/* exec + complete for local instructions of cog n, kept in locals, until one is not local or t is passed.
+   fl holds Z (bit 0), C (bit 1) and cancel (bit 2); an instruction runs if bit fl of its condition mask is set.
+   Event instructions run here while the scheduler would take them next (event_run, with the key lim of the other
+   cogs' earliest event and gen); one that does not run is a no-op unless it reads INA; a hub read or write that
+   must wait is issued as exec issues it. A cog whose hub read or write is due (EV_HUB, the scheduler's next event)
+   first completes it as do_hub and complete would. Returns 0 if the cog did not move. */
+static int run_local(p8x32a *p, int n, uint64_t t, uint64_t lim, unsigned gen)
+{
+	p8x32a_cog *c = &p->cog[n];
+	p8x32a_loop *l = &p->loop[n];
+	p8x32a_dec *dec = p->dec[n], *e;
+	uint32_t *ram = c->ram;
+	uint64_t t2 = c->ev_t, dis = c->disable_at, tl = dis < 2 ? 0 : dis - 2 < t ? dis - 2 : t;
+	uint32_t ix = c->ix;
+	unsigned pc = c->p, fl = (unsigned)(c->c << 1 | c->z) | (unsigned)c->cancel << 2, nins = 0;
+	int idled = 0, done = 0;
+	uint64_t t2in = t2, hub = 0;
+	p8x32a_jst st;
+
+	st.ram = ram;
+	st.code = p->jcode[n];
+	st.tab = p->jblk[n];
+	st.loop = l;
+
+	if (c->ev == EV_HUB) {
+		uint64_t m3 = c->latch + 4;
+		if (OP(c->i) > 2 || m3 + 1 >= dis) return 0;
+		fl = hub_rw(p, n, c->i, c->s, c->d, t2, m3, fl);
+		nins++;
+		pc = (c->px + 1) & 511;
+		fl = (fl & 3) | (c->px == 511) << 2;
+		ix = c->nix;
+		t2 = m3 + 3;
+		done = 1;
+	}
+	if (t2 > tl || dis < 2) goto limit;
+	for (;;) {
+		uint32_t s, d, r, nix;
+		unsigned px = pc, jc = 0;
+		e = &dec[(pc - 1) & 511];
+		if (e->word != ix) dec_fill(e, ix);
+		/* event instructions are never translated */
+		if (p->jit_build && !(fl & 4) && e->kind != K_NL && !(e->fl & F_INA)) {
+			unsigned a = (pc - 1) & 511;
+			p8x32a_jblk *b = jit_get(p, n, a, ix);
+			unsigned k;
+			if (b && b->len && t2 + 4 * (uint64_t)(b->len - 1) <= tl) {
+				l->nins = (uint16_t)(l->nins + nins);
+				nins = 0;
+				st.t2 = t2;
+				st.budget = (uint32_t)((tl - t2) / 4 + 1);
+				st.ix = ix;
+				st.fl = fl & 3;
+				st.inv = st.edge = 0;
+				k = b->fn(&st);
+			} else
+				k = 0;
+			if (k) {
+				if (st.inv == ~0u) {
+					unsigned j;
+					for (j = 0; j < 512; j++)
+						if (p->jblk[n][j]) p->jblk[n][j]->valid = 0;
+					memset(p->jcode[n], 0, sizeof(p->jcode[n]));
+				} else if (st.inv)
+					jit_written(p, n, st.inv - 1, st.inv_old);
+				fl = st.fl;
+				px = st.px;
+				jc = st.jc;
+				nix = st.nix;
+				t2 = st.t2;
+				if (st.edge) {
+					loop_edge(p, n, px, t2 - 3);
+					if (l->state == LOOP_RECORD) {
+						c->i = st.w; c->s = st.s; c->d = st.d; c->px = (uint16_t)px; c->nix = nix; c->cond = 1;
+						pc = (px + 1) & 511;
+						fl |= (px == 511) << 2;
+						ix = nix;
+						break;
+					}
+				}
 				if (!jc) pc = (px + 1) & 511;
-				cancel = jc || px == 511;
+				else pc = st.pc;
+				fl |= (jc || px == 511) << 2;
 				ix = nix;
-				t2 += 4;
-				break;
+				if (t2 > tl) {
+					if (t2 - 2 >= dis) { idled = 1; break; }
+					goto limit;
+				}
+				continue;
 			}
 		}
+		if (e->kind == K_NL || (e->fl & F_INA)) {
+			if (!((e->cond >> fl) & 1)) {
+				if (e->fl & F_INA) break;
+				if ((e->fl & F_SPEC) && (e->src == 0x1F1 || e->src == 0x1FC || e->src == 0x1FD)) l->dirty = 1;
+				nix = ram[px];
+				nins++;
+				goto next;
+			}
+			if (!event_run(p, n, e, ix, pc, &fl, &t2, &nix, t, lim, gen)) {
+				if (OP(ix) <= 2 && !(e->fl & F_INA) && l->state == LOOP_SEARCH) {
+					/* a hub read or write waiting for its slot, as exec issues it */
+					c->i = ix;
+					c->cond = 1;
+					c->s = (e->fl & F_IMM) ? e->src : (e->fl & F_SPEC) ? sread(p, n, e->src, t2) : ram[e->src];
+					if ((e->fl & F_SPEC) && (e->src == 0x1F1 || e->src == 0x1FC || e->src == 0x1FD)) l->dirty = 1;
+					c->d = ram[e->dst];
+					c->px = (uint16_t)pc;
+					c->nix = ram[pc];
+					c->latch = next_slot(p, n, t2 + 1);
+					hub = c->latch + 2;
+				}
+				break;
+			}
+			nins++;
+			t2 -= 4;
+			goto next;
+		}
+		if (e->fl & F_IMM) s = e->src;
+		else if (!(e->fl & F_SPEC)) s = ram[e->src];
+		else {
+			s = sread(p, n, e->src, t2);
+			if (e->src == 0x1F1 || e->src == 0x1FC || e->src == 0x1FD) l->dirty = 1;
+		}
+		if ((e->cond >> fl) & 1) {
+			unsigned co = 0, zo;
+			d = ram[e->dst];
+			switch (e->kind) {
+			case K_JMP: px = s & 511; r = (d & 0xFFFFFE00u) | (pc & 511); co = d < s; break;
+			case K_DJNZ: px = s & 511; r = d - 1; co = !d; jc = d == 1; break;
+			case K_AND: r = d & s; if (e->fl & F_WC) co = (unsigned)parity(r); break;
+			case K_ANDN: r = d & ~s; if (e->fl & F_WC) co = (unsigned)parity(r); break;
+			case K_OR: r = d | s; if (e->fl & F_WC) co = (unsigned)parity(r); break;
+			case K_XOR: r = d ^ s; if (e->fl & F_WC) co = (unsigned)parity(r); break;
+			case K_ADD: r = d + s; co = r < d; break;
+			case K_SUB: r = d - s; co = d < s; break;
+			case K_MOV: r = s; co = s >> 31; break;
+			case K_SHL: r = d << (s & 31); co = d >> 31; break;
+			case K_SHR: r = d >> (s & 31); co = d & 1; break;
+			case K_MOVS: r = (d & 0xFFFFFE00u) | (s & 511); co = d < s; break;
+			case K_MOVD: r = (d & 0xFFFC01FFu) | ((s & 511) << 9); co = d < s; break;
+			case K_MOVI: r = ((s & 511) << 23) | (d & 0x007FFFFFu); co = d < s; break;
+			default: {
+				int wr, ci, zi;
+				unsigned op = OP(ix);
+				if (e->kind == K_TJ) px = s & 511;
+				nix = ram[px];
+				r = alu_run(op, s, d, pc, (int)(fl >> 1 & 1), (int)(fl & 1), p->sys_c, (e->fl & F_WC) != 0, &wr, &ci, &zi);
+				co = (unsigned)ci;
+				zo = (unsigned)zi;
+				if (op == 0x3A) jc = !d;
+				else if (op == 0x3B) jc = d != 0;
+				if ((e->fl & F_WR) && wr && ram[e->dst] != r) { uint32_t o = ram[e->dst]; ram[e->dst] = r; l->dirty = 1; jit_write(p, n, e->dst, o); }
+				goto flags;
+			}
+			}
+			nix = ram[px];
+			zo = !r;
+			if ((e->fl & F_WR) && ram[e->dst] != r) { uint32_t o = ram[e->dst]; ram[e->dst] = r; l->dirty = 1; jit_write(p, n, e->dst, o); }
+		flags:
+			if (e->fl & F_WC) fl = (fl & ~2u) | co << 1;
+			if (e->fl & F_WZ) fl = (fl & ~1u) | zo;
+			nins++;
+			if (!jc && px < pc && e->kind >= K_JMP && e->kind <= K_TJ) {
+				l->nins = (uint16_t)(l->nins + nins);
+				nins = 0;
+				loop_edge(p, n, px, t2 + 1);
+				if (l->state == LOOP_RECORD) {
+					c->i = ix; c->s = s; c->d = d; c->px = (uint16_t)px; c->nix = nix; c->cond = 1;
+					pc = (px + 1) & 511;
+					fl = (fl & 3) | (px == 511) << 2;
+					ix = nix;
+					t2 += 4;
+					break;
+				}
+			}
+		} else {
+			nix = ram[px];
+			nins++;
+		}
+	next:
 		if (!jc) pc = (px + 1) & 511;
-		cancel = jc || px == 511;
+		fl = (fl & 3) | (jc || px == 511) << 2;
 		ix = nix;
 		t2 += 4;
-		if (t2 - 2 >= c->disable_at) { idled = 2; break; }
+		if (t2 > tl) {
+			if (t2 - 2 >= dis) { idled = 1; break; }
+			goto limit;
+		}
 	}
+	goto out;
+limit:
+	/* t is passed, or the next instruction starts too late to run before the cog stops */
+	if (t2 <= t) {
+		e = &dec[(pc - 1) & 511];
+		if (e->word != ix) dec_fill(e, ix);
+		if (e->kind != K_NL && !(e->fl & F_INA)) {
+			if ((e->fl & F_SPEC)) {
+				(void)sread(p, n, e->src, t2);
+				if (e->src == 0x1F1 || e->src == 0x1FC || e->src == 0x1FD) l->dirty = 1;
+			}
+			idled = 1;
+		}
+	}
+out:
+	l->nins = (uint16_t)(l->nins + nins);
 	c->p = (uint16_t)pc;
 	c->ix = ix;
-	c->c = (uint8_t)cf;
-	c->z = (uint8_t)zf;
-	c->cancel = (uint8_t)cancel;
+	c->c = (uint8_t)(fl >> 1 & 1);
+	c->z = (uint8_t)(fl & 1);
+	c->cancel = (uint8_t)(fl >> 2 & 1);
 	c->t0 = t2 - 2;
 	c->ev_t = t2;
 	c->ev = EV_EXEC;
+	if (hub) {
+		c->ev = EV_HUB;
+		c->ev_t = hub;
+	}
 	if (idled) idle(p, n);
+	return done || t2 != t2in || hub || idled;
 }
 
 void p8x32a_run_until(p8x32a *p, uint64_t t)
 {
 	p->horizon = t;
 	for (;;) {
-		int n, best = -1;
+		int n, best;
+		uint64_t bk = P8X32A_NEVER, bk2 = P8X32A_NEVER;
+		unsigned gen;
 		p8x32a_cog *b;
+		/* the next event: earliest, then hub events, then the lowest cog; bk2 is the one after it */
 		for (n = 0; n < 8; n++) {
-			p8x32a_cog *c = &p->cog[n];
+			const p8x32a_cog *c = &p->cog[n];
+			uint64_t e = c->ev_t < ((uint64_t)1 << 59) ? c->ev_t : (uint64_t)1 << 59;
+			uint64_t k = e << 4 | (uint64_t)(c->ev != EV_HUB) << 3 | (uint64_t)n;
 			if (c->ev == EV_NONE) continue;
-			if (best < 0 || c->ev_t < p->cog[best].ev_t ||
-			    (c->ev_t == p->cog[best].ev_t && c->ev == EV_HUB && p->cog[best].ev != EV_HUB)) best = n;
+			if (k < bk) { bk2 = bk; bk = k; }
+			else if (k < bk2) bk2 = k;
 		}
-		if (best < 0 || p->cog[best].ev_t > t || p->stop) break;
+		if (bk == P8X32A_NEVER) break;
+		best = (int)(bk & 7);
+		if (p->cog[best].ev_t > t || p->stop) break;
 		b = &p->cog[best];
+		gen = p->sched_gen;
+	again:
 		p->now = b->ev_t;
 		switch (b->ev) {
-		case EV_HUB: do_hub(p, best); break;
-		case EV_EXEC: exec(p, best); break;
+		case EV_HUB:
+			if (!b->run || p->loop[best].state != LOOP_SEARCH || !run_local(p, best, t, bk2, gen)) do_hub(p, best);
+			break;
+		case EV_EXEC:
+			if (!b->run || p->loop[best].state != LOOP_SEARCH || !run_local(p, best, t, bk2, gen)) exec(p, best);
+			break;
 		case EV_WAITPIN: wait_pins(p, best); break;
 		case EV_RESTART: restart(p, best); break;
 		case EV_DONE:
@@ -901,10 +1394,15 @@ void p8x32a_run_until(p8x32a *p, uint64_t t)
 		}
 		if (p->loop[best].state == LOOP_RECORD) loop_post(p, best);
 		/* local instructions run on ahead of the other cogs: their order against them is unobservable */
-		while (b->ev == EV_EXEC && b->ev_t <= t && local(b)) {
-			if (p->loop[best].state == LOOP_RECORD) exec(p, best);
-			else run_local(p, best, t);
+		while (b->ev == EV_EXEC && b->ev_t <= t && (local(b) || issue_local(b))) {
+			if (p->loop[best].state == LOOP_RECORD || !local(b)) exec(p, best);
+			else run_local(p, best, t, bk2, gen);
 			if (p->loop[best].state == LOOP_RECORD) loop_post(p, best);
+		}
+		/* while no other cog's next event has changed, this cog goes again if it is still the earliest */
+		if (gen == p->sched_gen && b->ev != EV_NONE && b->ev_t <= t && !p->stop) {
+			uint64_t e = b->ev_t < ((uint64_t)1 << 59) ? b->ev_t : (uint64_t)1 << 59;
+			if ((e << 4 | (uint64_t)(b->ev != EV_HUB) << 3 | (uint64_t)best) < bk2) goto again;
 		}
 	}
 	flush(p, t);
@@ -932,6 +1430,10 @@ void p8x32a_reset(p8x32a *p, uint64_t t)
 	p->slot_base = t;
 	p->npend = 0;
 	p->ctr_ok = 0;
+	p->nco_mask = p->nco_ok = 0;
+	p->nco_n = 0;
+	memset(p->nco_lvl, 0, sizeof(p->nco_lvl));
+	p->pins_ok = 0;
 	p->sleepers = 0;
 	for (n = 0; n < 8; n++) loop_reset(&p->loop[n]);
 	p->flushed = t;
@@ -944,7 +1446,9 @@ void p8x32a_reset(p8x32a *p, uint64_t t)
 
 void p8x32a_init(p8x32a *p, const p8x32a_bus *bus)
 {
+	int n;
 	memset(p, 0, sizeof(*p));
 	p->bus = *bus;
+	for (n = 0; n < 8 * 512; n++) dec_fill(&p->dec[0][0] + n, 0);
 	p8x32a_reset(p, 0);
 }

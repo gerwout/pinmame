@@ -29,7 +29,7 @@ if [ "$PINHECK_SKIP_FIRMWARE" != 1 ] && [ -n "$PINHECK_UPDATE_DIR" ] && [ -n "$P
 	fi
 	cc $CF -I$S/wpc/pinheck -I$S/cpu/p8x32a -o $B/dispboot dispboot.c $S/wpc/pinheck/display.c $S/cpu/p8x32a/p8x32a.c \
 		$S/wpc/pinheck/eeprom.c $S/wpc/pinheck/sd.c $S/wpc/pinheck/vfat.c $S/wpc/pinheck/zipsrc.c -lz || exit 2
-	if timeout 600 ./$B/dispboot -rom "$P8X32A_ROM" -prp "$PINHECK_UPDATE_DIR/PRP_V008.BIN" -zip "$zip" > $B/dispboot.txt; then
+	if timeout -k 30 600 ./$B/dispboot -rom "$P8X32A_ROM" -prp "$PINHECK_UPDATE_DIR/PRP_V008.BIN" -zip "$zip" > $B/dispboot.txt; then
 		grep "^dispboot:" $B/dispboot.txt
 	else
 		echo "DISPBOOT FAIL"; grep -v "^[#.]*$" $B/dispboot.txt | tail -8; fail=$((fail + 1))

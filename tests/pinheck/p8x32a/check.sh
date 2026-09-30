@@ -22,6 +22,26 @@ if [ -f ../eeprom/eeprom_test.c ]; then
 fi
 [ -f $CORE/p8x32a.c ] || { echo "p8x32a: core not present yet"; exit 2; }
 $CC -I$CORE -I$DEV -o $B/p8run run.c $CORE/p8x32a.c $DEV/eeprom.c $DEV/sd.c $DEV/vfat.c $DEV/zipsrc.c -lz || exit 2
+# P8X32A_JIT=1: every test runs with local instruction runs translated (x86-64 only)
+if [ "$P8X32A_JIT" = 1 ]; then
+	ASMJIT=../../../ext/asmjit
+	JF="-O2 -std=c++17 -DASMJIT_STATIC -DASMJIT_NO_FOREIGN -DASMJIT_NO_UJIT -I$ASMJIT"
+	mkdir -p $B/asmjit
+	if [ ! -f $B/asmjit/libasmjit.a ]; then
+		for f in $ASMJIT/asmjit/core/*.cpp $ASMJIT/asmjit/x86/*.cpp $ASMJIT/asmjit/support/*.cpp; do
+			c++ $JF -c "$f" -o $B/asmjit/$(basename "$f" .cpp).o || exit 2
+		done
+		ar rcs $B/asmjit/libasmjit.a $B/asmjit/*.o || exit 2
+	fi
+	c++ $JF -Wall -Wextra -Werror -I$CORE -c $CORE/p8x32ajit.cpp -o $B/p8x32ajit.o || exit 2
+	for f in run.c $CORE/p8x32a.c $DEV/eeprom.c $DEV/sd.c $DEV/vfat.c $DEV/zipsrc.c; do
+		$CC -DP8X32A_JIT -I$CORE -I$DEV -c "$f" -o $B/jit-$(basename "$f" .c).o || exit 2
+	done
+	c++ -o $B/p8run $B/jit-*.o $B/p8x32ajit.o $B/asmjit/libasmjit.a -lz -lpthread || exit 2
+	c++ $JF -Wall -Wextra -Werror -I$CORE -o $B/jit_oom_test jit_oom_test.cpp $B/p8x32ajit.o $B/asmjit/libasmjit.a -lpthread || exit 2
+	./$B/jit_oom_test || fail=$((fail + 1))
+	echo "p8run: translated"
+fi
 if [ -f dasm_test.c ]; then
 	$CC -I$CORE -o $B/dasm_test dasm_test.c $CORE/p8x32adasm.c || exit 2
 	./$B/dasm_test || fail=$((fail + 1))
@@ -66,7 +86,7 @@ spin_case() {
 	python3 mkrom.py --launch "$o.binary" "$o.lrom" "$o.lram"
 	./$B/p8run -rom "$o.lrom" -ram "$o.lram" -halt -cycles 400000 -dump "$o.lhub" > /dev/null 2>&1
 	rm -f "$o.sdump"
-	SPINSIM_DUMP=6000,400,$o.sdump timeout 60 $SPINSIM "$o.binary" > /dev/null 2>&1
+	SPINSIM_DUMP=6000,400,$o.sdump timeout -k 5 60 $SPINSIM "$o.binary" > /dev/null 2>&1
 	dd if="$o.lhub" of="$o.lwin" bs=1024 skip=24 count=1 2> /dev/null
 	if cmp -s "$o.sdump" "$o.lwin"; then pass=$((pass + 1))
 	else echo "SPINSIM MISMATCH $1"; python3 cmpwin.py "$o.sdump" "$o.lwin"; fail=$((fail + 1)); fi

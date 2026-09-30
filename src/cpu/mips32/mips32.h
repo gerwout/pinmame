@@ -59,6 +59,7 @@ struct mips32_state {
 	int irq_chk;                  /* interrupt state may have changed */
 	uint32_t fva, fsize;          /* instructions at [fva, fva + fsize) come from fptr */
 	const uint8_t *fptr;
+	int dslot;                    /* direct region of the last fast load */
 };
 
 void mips32_init(mips32_state *s, const mips32_bus *bus, int shadow_sets, uint32_t prid);

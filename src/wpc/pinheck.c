@@ -3,6 +3,9 @@
 #include "core.h"
 #include "cpu/pic32mx/pic32mxcpu.h"
 #include "pinheck/prop.h"
+#ifdef PINMAME_JIT_ASMJIT
+#include "cpu/p8x32a/p8x32ajit.h"
+#endif
 #include "pinheck/rtc.h"
 #include "pinheck/bootldr.h"
 #include "pinheck/sd.h"
@@ -342,13 +345,19 @@ static int pinheck_spi(void *ctx, int cs, int sclk, int mosi) { (void)ctx; retur
 static void pinheck_boot_tx(void *ctx, uint64_t t, int level) { (void)ctx; prop_pic_pins(&prop, t, level ? 1u << 24 : 0); }
 static void pinheck_prop_tx(void *ctx, uint64_t t, int level) { (void)ctx; boot_rx(&boot, t, level); }
 
+/* once the bootloader stand-in has released the application it neither holds the PIC32 nor answers the
+   Propeller, so the Propeller's catch-up can run on its own thread without the PIC32 waiting for it */
 static uint64_t pinheck_hold(void *ctx, uint64_t cycle)
 {
 	(void)ctx;
 	prop_catch_up(&prop, cycle);
+	if (boot.state == BOOT_APP && prop.worker) return 0;
+	prop_sync(&prop);
 	boot_advance(&boot, cycle);
 	return boot_hold(&boot, cycle);
 }
+
+static uint64_t pinheck_pic_now(void *ctx) { (void)ctx; return pic32cpu_soc()->cpu.cycles; }
 
 static void pinheck_warn(const char *msg)
 {
@@ -456,7 +465,7 @@ static int disp_dirty;
 static void pinheck_disp_frame(void *ctx, const uint8_t *frame, uint64_t t)
 {
 	uint8_t stamp[20];
-	uint64_t pic = pic32cpu_soc()->cpu.cycles;
+	uint64_t pic = prop_stamp(&prop);
 	uint32_t at = 0xFFFFFFFFu, a;
 	int k;
 	(void)ctx;
@@ -506,6 +515,7 @@ static void pinheck_disp_init(void)
 	disp_log = path ? fopen(path, disp_opened ? "ab" : "wb") : NULL;
 	disp_opened = 1;
 	prop_set_pins(&prop, pinheck_disp_pins, NULL);
+	prop_set_pins_mask(&prop, DISPLAY_P17 | DISPLAY_P20 | DISPLAY_P21 | DISPLAY_P22);
 }
 
 static void pinheck_disp_reset(void)
@@ -527,6 +537,7 @@ PINMAME_VIDEO_UPDATE(pinheck_video)
 {
 	const int x0 = layout->left, y0 = layout->top;
 	int x, y;
+	prop_sync(&prop);
 	/* the core's visible area is larger than the panel: clear it so nothing stale shows */
 	fillbitmap(bitmap, get_black_pen(), cliprect);
 #if !defined(LIBPINMAME) && PINHECK_VIDEO_SCALE == 2
@@ -549,8 +560,12 @@ PINMAME_VIDEO_UPDATE(pinheck_video)
 #endif
 }
 
+/* test hook: PINHECK_TIME_LOG gets the emulated and the host time at each vblank, in seconds */
+static FILE *time_log;
+
 static INTERRUPT_GEN(pinheck_vblank)
 {
+	if (time_log) fprintf(time_log, "%.6f %.6f\n", timer_get_time(), (double)osd_cycles() / (double)osd_cycles_per_second());
 	/* the system set refuses to run: leave its on-screen message up, then stop with an error */
 	if (locals.idle && timer_get_time() >= PINHECK_REFUSE_SECS) mame_schedule_error_exit();
 	if (!locals.idle) pinheck_brd_vblank();
@@ -657,6 +672,11 @@ static MACHINE_INIT(pinheck)
 	pic32mx_board board = { NULL, pinheck_port_write, pinheck_port_read, pinheck_uart_tx, pinheck_i2c_pins, pinheck_unmapped, pinheck_exception, pinheck_hold };
 	const char *log = getenv("PINHECK_UART1_LOG"), *plog = getenv("PINHECK_PROP_LOG");
 
+	prop_stop_thread(&prop);
+#ifdef PINMAME_JIT_ASMJIT
+	p8x32a_jit_free(prop.chip.jit);
+	prop.chip.jit = NULL;
+#endif
 	if (locals.uart1) fclose(locals.uart1);
 	if (locals.proplog) fclose(locals.proplog);
 	memset(&locals, 0, sizeof(locals));
@@ -673,6 +693,10 @@ static MACHINE_INIT(pinheck)
 	}
 	memcpy(propmem, memory_region(PINHECK_PROPREGION), 0x8000);
 	prop_init(&prop, memory_region(PINHECK_BIOSREGION), propmem);
+#ifdef PINMAME_JIT_ASMJIT
+	if ((!getenv("PINHECK_JIT") || atoi(getenv("PINHECK_JIT")) != 0) && (prop.chip.jit = p8x32a_jit_new()) != NULL)
+		prop.chip.jit_build = p8x32a_jit_build;
+#endif
 	prop_set_log(&prop, pinheck_prop_log, NULL);
 	prop_set_tx(&prop, pinheck_prop_tx, NULL);
 	if (sndl.started) prop_set_sound(&prop, pinheck_snd_ctr, pinheck_snd_pins, NULL);
@@ -688,7 +712,10 @@ static MACHINE_INIT(pinheck)
 	pinheck_disp_init();
 	pinheck_brd_init();
 	if (!link_log && getenv("PINHECK_LINK_LOG")) link_log = fopen(getenv("PINHECK_LINK_LOG"), "w");
+	if (!time_log && getenv("PINHECK_TIME_LOG")) time_log = fopen(getenv("PINHECK_TIME_LOG"), "w");
 	pic32cpu_set_board(&board);
+	prop_set_clock(&prop, pinheck_pic_now, NULL);
+	if (!getenv("PINHECK_THREADS") || atoi(getenv("PINHECK_THREADS")) != 0) prop_start_thread(&prop);
 }
 
 static MACHINE_RESET(pinheck)
@@ -713,6 +740,7 @@ static NVRAM_HANDLER(pinheck)
 {
 	const int first = !read_or_write && !file;
 	if (locals.idle) return;
+	prop_sync(&prop);
 	core_nvram(file, read_or_write, u13mem, sizeof(u13mem), 0xFF);
 	core_nvram(file, read_or_write, propmem + 0x8000, sizeof(propmem) - 0x8000, 0xFF);
 	if (first && getenv("PINHECK_INSERVICE")) pinheck_in_service(propmem, core_gameData->hw.gameSpecific1);
@@ -720,6 +748,12 @@ static NVRAM_HANDLER(pinheck)
 
 static MACHINE_STOP(pinheck)
 {
+	prop_stop_thread(&prop);
+#ifdef PINMAME_JIT_ASMJIT
+	p8x32a_jit_free(prop.chip.jit);
+	prop.chip.jit = NULL;
+	prop.chip.jit_build = NULL;
+#endif
 	if (locals.uart1) fclose(locals.uart1);
 	if (locals.proplog) fclose(locals.proplog);
 	locals.uart1 = locals.proplog = NULL;
@@ -728,6 +762,8 @@ static MACHINE_STOP(pinheck)
 	locals.have_vol = locals.have_zip = 0;
 	pinheck_disp_stop();
 	pinheck_brd_stop();
+	if (time_log) fclose(time_log);
+	time_log = NULL;
 }
 
 static MEMORY_READ32_START(pinheck_readmem)
