@@ -361,6 +361,8 @@ static void ctr_mask(p8x32a *p, int n, int k)
 	if (nco(c->ctr[k]) || nco(c->ctr_old[k])) p->nco_mask |= b;
 	else p->nco_mask &= (uint16_t)~b;
 	if (p->nco_mask == m) return;
+	/* a counter joining was not an NCO before: no level until its write takes effect */
+	if (p->nco_mask & b) p->nco_lvl[2 * n + k] = 0;
 	p->nco_n = 0;
 	for (j = 0; j < 16; j++)
 		if (p->nco_mask >> j & 1) p->nco_list[p->nco_n++] = (uint8_t)j;
