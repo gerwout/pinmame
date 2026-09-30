@@ -134,6 +134,7 @@ if [ "$1" = contention ]; then
 	command -v taskset > /dev/null || { echo "bench: taskset not found"; exit 2; }
 	A=${BENCH_CPU_A:-2} C=${BENCH_CPU_B:-4} fail=0 hog= stopper=
 	trap '[ -n "$hog" ] && kill $hog 2> /dev/null; [ -n "$stopper" ] && kill $stopper 2> /dev/null' EXIT
+	trap 'exit 1' INT TERM
 	export BENCH_MACHINE=opt
 	shift
 	[ $# -eq 0 ] && set -- one busy flip stall
