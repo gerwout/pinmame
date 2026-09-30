@@ -1,4 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
+#ifdef __linux__
+#define _GNU_SOURCE /* sched_setaffinity */
+#endif
 #include "../../../src/wpc/pinheck/prop.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +11,9 @@
 #include <windows.h>
 #else
 #include <time.h>
+#endif
+#ifdef __linux__
+#include <sched.h>
 #endif
 
 #define CLK  (1u << 25)
@@ -245,12 +251,12 @@ static void pins_mask(void)
 	CHECK(calls[0] > 2 && calls[1] == calls[0] && calls[2] == 1);
 }
 
-static volatile int host_go;
+static int host_go; /* atomic */
 
 static void *host_sync(void *arg)
 {
 	(void)arg;
-	while (host_go) prop_sync(&p);
+	while (__atomic_load_n(&host_go, __ATOMIC_ACQUIRE)) prop_sync(&p);
 	return NULL;
 }
 
@@ -263,11 +269,11 @@ static void foreign_sync(void)
 		uint64_t pic = 200000;
 		boot();
 		CHECK(prop_start_thread(&p) == 0);
-		host_go = 1;
+		__atomic_store_n(&host_go, 1, __ATOMIC_RELEASE);
 		CHECK(pthread_create(&h, NULL, host_sync, NULL) == 0);
 		for (k = 0; k < 200; k++) { prop_catch_up(&p, pic); pulse(&pic, k & 1); }
 		prop_stop_thread(&p);
-		host_go = 0;
+		__atomic_store_n(&host_go, 0, __ATOMIC_RELEASE);
 		pthread_join(h, NULL);
 	}
 }
@@ -353,6 +359,81 @@ static void blocking_sync(void)
 	prop_stop_thread(&p);
 }
 
+#ifndef _WIN32
+static int nap_calls;
+
+static void nap_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
+{
+	(void)ctx; (void)t; (void)out; (void)dir;
+	if (nap_calls > 0) { nap_calls--; nap_ms(2); }
+}
+
+/* waits longer than the spin bound cost the waiting thread about 50 us of CPU each, not the whole wait */
+static void spin_bound(void)
+{
+	uint64_t pic = 200000;
+	double c0, w0;
+	int b;
+	boot();
+	prop_set_pins(&p, nap_pins, NULL);
+	CHECK(prop_start_thread(&p) == 0);
+	prop_catch_up(&p, pic);
+	prop_sync(&p);
+	nap_calls = 1000;
+	c0 = cpu_s();
+	w0 = wall_s();
+	for (b = 0; b < 50; b++) {
+		pulse(&pic, b & 1);
+		prop_catch_up(&p, pic);
+		prop_sync(&p);
+	}
+	CHECK(wall_s() - w0 > 0.1);
+	CHECK(cpu_s() - c0 < 0.01);
+	nap_calls = 0;
+	prop_stop_thread(&p);
+}
+#endif
+
+/* with one CPU allowed the worker does not start and the calls run inline */
+static void one_cpu(void)
+{
+	uint64_t pic = 200000;
+	int b;
+#ifdef __linux__
+	cpu_set_t all, one;
+	CHECK(sched_getaffinity(0, sizeof(all), &all) == 0);
+	CPU_ZERO(&one);
+	for (b = 0; b < CPU_SETSIZE; b++)
+		if (CPU_ISSET(b, &all)) { CPU_SET(b, &one); break; }
+	CHECK(sched_setaffinity(0, sizeof(one), &one) == 0);
+#elif defined(_WIN32)
+	DWORD_PTR all, sys;
+	CHECK(GetProcessAffinityMask(GetCurrentProcess(), &all, &sys));
+	CHECK(SetProcessAffinityMask(GetCurrentProcess(), all & (0 - all)));
+#endif
+	boot();
+#if defined(__linux__) || defined(_WIN32)
+	CHECK(prop_start_thread(&p) == -1 && p.worker == NULL);
+#endif
+	prop_catch_up(&p, pic);
+	for (b = 0; b < BITS; b++) pulse(&pic, (b * 7 + 3) % 5 < 2);
+	prop_catch_up(&p, pic);
+	prop_sync(&p);
+	CHECK(count() == BITS);
+#ifdef __linux__
+	CHECK(sched_setaffinity(0, sizeof(all), &all) == 0);
+	if (CPU_COUNT(&all) >= 2) {
+#elif defined(_WIN32)
+	CHECK(SetProcessAffinityMask(GetCurrentProcess(), all));
+	if (all & (all - 1)) {
+#else
+	{
+#endif
+		CHECK(prop_start_thread(&p) == 0);
+		prop_stop_thread(&p);
+	}
+}
+
 #ifdef _WIN32
 /* the worker runs at the priority of the thread that started it */
 static void priority(void)
@@ -403,6 +484,10 @@ int main(int argc, char **argv)
 	pins_mask();
 	foreign_sync();
 	blocking_sync();
+#ifndef _WIN32
+	spin_bound();
+#endif
+	one_cpu();
 #ifdef _WIN32
 	priority();
 #endif

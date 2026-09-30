@@ -1,3 +1,6 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE /* sched_getaffinity */
+#endif
 #include "prop.h"
 #include <stdio.h>
 #include <string.h>
@@ -298,7 +301,7 @@ int prop_p24(pinheck_prop *p, uint64_t pic_cycle)
    would inline, each with the PIC32 cycle at which it was made. The caller waits for the queue to drain before
    it reads Propeller state (prop_sync). */
 #define PROP_Q 4096
-#define PROP_SPIN 20000
+#define PROP_SPIN_NS 50000 /* a wait spins this long, then blocks */
 
 enum { CMD_PINS, CMD_CATCH_UP, CMD_QUIT };
 
@@ -321,8 +324,26 @@ static uint64_t self_id(void) { return GetCurrentThreadId(); }
 #define CPU_RELAX_ANY() YieldProcessor()
 static unsigned get_sc(volatile unsigned *v) { MemoryBarrier(); return *v; }
 static void put_sc(volatile unsigned *v, unsigned x) { InterlockedExchange((volatile LONG *)v, (LONG)x); }
+static uint64_t now_ns(void)
+{
+	static LARGE_INTEGER f;
+	LARGE_INTEGER c;
+	if (!f.QuadPart) QueryPerformanceFrequency(&f);
+	QueryPerformanceCounter(&c);
+	return (uint64_t)((double)c.QuadPart * 1e9 / (double)f.QuadPart);
+}
+static int cpus_allowed(void)
+{
+	DWORD_PTR pm, sm;
+	int n = 0;
+	if (!GetProcessAffinityMask(GetCurrentProcess(), &pm, &sm) || !pm) return 2;
+	for (; pm; pm &= pm - 1) n++;
+	return n;
+}
 #else
 #include <pthread.h>
+#include <sched.h>
+#include <time.h>
 typedef struct prop_os { pthread_t th; pthread_mutex_t m; pthread_cond_t c, sc; int wake; } prop_os;
 static unsigned get_acq(volatile unsigned *v) { return __atomic_load_n(v, __ATOMIC_ACQUIRE); }
 static void put_rel(volatile unsigned *v, unsigned x) { __atomic_store_n(v, x, __ATOMIC_RELEASE); }
@@ -344,7 +365,36 @@ static uint64_t self_id(void)
 #define CPU_RELAX_ANY() CPU_RELAX()
 static unsigned get_sc(volatile unsigned *v) { return __atomic_load_n(v, __ATOMIC_SEQ_CST); }
 static void put_sc(volatile unsigned *v, unsigned x) { __atomic_store_n(v, x, __ATOMIC_SEQ_CST); }
+static uint64_t now_ns(void)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
+static int cpus_allowed(void)
+{
+#ifdef __linux__
+	cpu_set_t s;
+	if (sched_getaffinity(0, sizeof(s), &s)) return 2;
+	return CPU_COUNT(&s);
+#else
+	return 2;
 #endif
+}
+#endif
+
+/* one step of a bounded spin; 1 when it has lasted PROP_SPIN_NS (the clock is read every 64 steps) */
+static int spin(uint64_t *t0, unsigned *k)
+{
+	if (!(*k & 63)) {
+		uint64_t n = now_ns();
+		if (!*k) *t0 = n;
+		else if (n - *t0 >= PROP_SPIN_NS) return 1;
+	}
+	++*k;
+	CPU_RELAX_ANY();
+	return 0;
+}
 
 typedef struct prop_worker {
 	prop_os os;
@@ -386,10 +436,11 @@ static void wake(prop_worker *w)
 /* the poster waits for head to reach want: a bounded spin, then it blocks until the worker gets there */
 static void wait_head(prop_worker *w, unsigned want)
 {
-	int k;
-	for (k = 0; k < PROP_SPIN; k++) {
+	uint64_t t0 = 0;
+	unsigned k = 0;
+	for (;;) {
 		if ((int)(get_acq(&w->head) - want) >= 0) return;
-		CPU_RELAX_ANY();
+		if (spin(&t0, &k)) break;
 	}
 #ifdef _WIN32
 	w->want = want;
@@ -435,13 +486,12 @@ static void *worker(void *arg)
 {
 	pinheck_prop *p = (pinheck_prop *)arg;
 	prop_worker *w = (prop_worker *)p->worker;
-	unsigned h = w->head;
-	int k = 0;
+	unsigned h = w->head, k = 0;
+	uint64_t t0 = 0;
 	for (;;) {
 		unsigned t = get_acq(&w->tail);
 		if (h == t) {
-			if (++k < PROP_SPIN) CPU_RELAX_ANY();
-			else { idle_wait(w, h); k = 0; }
+			if (spin(&t0, &k)) { idle_wait(w, h); k = 0; }
 			continue;
 		}
 		k = 0;
@@ -480,6 +530,11 @@ int prop_start_thread(pinheck_prop *p)
 {
 	prop_worker *w;
 	if (p->worker) return 0;
+	/* two threads time-sliced on one CPU wait for each other at every handoff */
+	if (cpus_allowed() < 2) {
+		if (p->log) p->log(p->log_ctx, "prop: one CPU allowed, no worker thread");
+		return -1;
+	}
 	w = (prop_worker *)calloc(1, sizeof(*w));
 	if (!w) return -1;
 	p->worker = w;
