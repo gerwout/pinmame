@@ -1,9 +1,11 @@
 /* Uncertain reads (mips32_uncertain): random programs load a device word whose bits in a mask are known only later;
    each runs once with the true word and once with wrong bits there, settled through bus.settle (at once or after
-   some instructions), with a timer-like interrupt whose handler stores every register. Registers, HI/LO, PC and
-   memory must end the same. */
+   some instructions), with a timer-like interrupt whose handler stores every register, and traps and overflows whose
+   handler returns past them. The programs mix ALU, shift, HI/LO, SPECIAL2/3, branch, jump-register, load and store
+   (LWL/LWR, LL/SC) instructions. Registers, HI/LO, PC and memory must end the same. */
 #include "mips32.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define DEV 0xF000u   /* the device word, physical */
@@ -30,7 +32,7 @@ static uint32_t rd(void *ctx, uint32_t pa, int size, int fetch, int *err)
 		if (uncertain && ((dev_mask >> sh) & sm)) { mips32_uncertain(&cpu, (dev_mask >> sh) & sm, sh); asked = 0; }
 		return (w >> sh) & sm;
 	}
-	if (pa + (unsigned)size > sizeof(kmem)) { *err = 1; return 0; }
+	if (pa >= sizeof(kmem) || pa + (unsigned)size > sizeof(kmem)) { *err = 1; return 0; }
 	for (i = 0; i < size; i++) v |= (uint32_t)kmem[pa + i] << (8 * i);
 	return v;
 }
@@ -41,7 +43,7 @@ static void wr(void *ctx, uint32_t pa, uint32_t v, int size, int *err)
 	(void)ctx;
 	if (pa == CLR) { mips32_set_eic(&cpu, 0, 0, 0); return; }
 	if (pa >= DEV && pa < DEV + 4) return;
-	if (pa + (unsigned)size > sizeof(kmem)) { *err = 1; return; }
+	if (pa >= sizeof(kmem) || pa + (unsigned)size > sizeof(kmem)) { *err = 1; return; }
 	for (i = 0; i < size; i++) kmem[pa + i] = (uint8_t)(v >> (8 * i));
 }
 
@@ -61,42 +63,96 @@ static void put(uint32_t pa, uint32_t w) { kmem[pa] = (uint8_t)w; kmem[pa + 1] =
 
 static unsigned reg(void) { return 1 + rnd() % 12; }
 
-/* one random instruction at slot k of NPROG; base registers: 24 = the device (kseg0), 25 = scratch RAM */
-static uint32_t insn(int k)
+#define SP3(rs, rt, rd, sa, fn) R(0x1F, rs, rt, rd, sa, fn)
+
+/* random instructions from slot k of NPROG into p; returns how many. Base registers: 24 = the device (kseg0),
+   25 = scratch RAM, 13 = jump targets */
+static int insn(int k, uint32_t *p)
 {
-	static const uint8_t fn[] = { 0x21, 0x23, 0x24, 0x24, 0x24, 0x25, 0x26, 0x27, 0x2A, 0x2B, 0x0A, 0x0B, 0x04, 0x06 };
+	static const uint8_t fn[] = { 0x20, 0x21, 0x22, 0x23, 0x24, 0x24, 0x24, 0x25, 0x26, 0x27, 0x2A, 0x2B, 0x0A, 0x0B, 0x04, 0x06, 0x07 };
 	static const uint8_t ld[] = { 0x20, 0x21, 0x23, 0x24, 0x25 };
-	switch (rnd() % 13) {
-	case 12: return 0x41400000u | reg() << 16 | reg() << 11;                    /* rdpgpr (previous set = this one) */
-	case 0: case 1: return I(ld[rnd() % 5], 24, reg(), 0) | ((rnd() % 4) & 0);
-	case 2: { unsigned o = ld[rnd() % 5], off = o == 0x23 ? 0 : o == 0x21 || o == 0x25 ? (rnd() % 2) * 2 : rnd() % 4; return I(o, 24, reg(), off); }
-	case 3: case 4: case 5: return R(0, reg(), reg(), reg(), 0, fn[rnd() % sizeof(fn)]);
-	case 6: return I(0x0C, reg(), reg(), rnd() & 0xFFFF);                        /* andi */
-	case 7: return I(0x09 + rnd() % 6, reg(), reg(), rnd() & 0xFFFF);            /* addiu slti sltiu andi ori xori */
-	case 8: return R(0, 0, reg(), reg(), rnd() % 32, (rnd() % 2) ? 0x00 : 0x02);  /* sll, srl */
-	case 9: return I((rnd() % 2) ? 0x2B : 0x28, 25, reg(), (rnd() % 16) * 4);   /* sw, sb */
-	case 10: return I(0x23, 25, reg(), (rnd() % 16) * 4);                        /* lw scratch */
+	static const uint8_t md[] = { 0x18, 0x19, 0x1A, 0x1B, 0x11, 0x13 };
+	static const uint8_t s2[] = { 0x00, 0x01, 0x02, 0x04, 0x05, 0x20, 0x21 };
+	static const uint8_t bsh[] = { 0x02, 0x10, 0x18 };
+	static const uint8_t tr[] = { 0x30, 0x31, 0x32, 0x33, 0x34, 0x36 };
+	static const uint8_t tri[] = { 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0E };
+	static const uint8_t bz[] = { 0x00, 0x01, 0x10, 0x11 };
+	static const uint8_t sh[] = { 0x00, 0x02, 0x03 };
+	static const uint8_t st[] = { 0x2B, 0x28, 0x29 };
+	unsigned a, b;
+	switch (rnd() % 30) {
+	case 0: case 1: p[0] = I(ld[rnd() % 5], 24, reg(), 0); return 1;
+	case 2: { unsigned o = ld[rnd() % 5], off = o == 0x23 ? 0 : o == 0x21 || o == 0x25 ? (rnd() % 2) * 2 : rnd() % 4; p[0] = I(o, 24, reg(), off); return 1; }
+	case 3: case 4: case 5: p[0] = R(0, reg(), reg(), reg(), 0, fn[rnd() % sizeof(fn)]); return 1;
+	case 6: p[0] = I(0x0C, reg(), reg(), rnd() & 0xFFFF); return 1;                         /* andi */
+	case 7: p[0] = I(0x08 + rnd() % 7, reg(), reg(), rnd() & 0xFFFF); return 1;             /* addi addiu slti sltiu andi ori xori */
+	case 8: p[0] = R(0, (rnd() % 4) ? 0 : 1, reg(), reg(), rnd() % 32, sh[rnd() % 3]); return 1; /* sll, srl or rotr, sra */
+	case 9: p[0] = I(st[rnd() % 3], 25, reg(), (rnd() % 16) * 4 + (rnd() % 2) * 2); return 1; /* sw, sb, sh */
+	case 10: p[0] = I(0x23, 25, reg(), (rnd() % 16) * 4); return 1;                          /* lw scratch */
+	case 11: p[0] = R(0, reg(), reg(), 0, 0, md[rnd() % sizeof(md)]); return 1;              /* mult(u) div(u) mthi mtlo */
+	case 12: p[0] = R(0, 0, 0, reg(), 0, (rnd() % 2) ? 0x10 : 0x12); return 1;               /* mfhi mflo */
+	case 13: p[0] = R(0x1C, reg(), reg(), reg(), 0, s2[rnd() % sizeof(s2)]); return 1;       /* madd(u) mul msub(u) clz clo */
+	case 14: p[0] = SP3(0, reg(), reg(), bsh[rnd() % 3], 0x20); return 1;                    /* wsbh seb seh */
+	case 15: a = rnd() % 32; b = rnd() % (32 - a); p[0] = SP3(reg(), reg(), b, a, 0x00); return 1; /* ext: pos a, size b + 1 */
+	case 16: a = rnd() % 32; b = a + rnd() % (32 - a); p[0] = SP3(reg(), reg(), b, a, 0x04); return 1; /* ins: lsb a, msb b */
+	case 17: p[0] = I((rnd() % 2) ? 0x22 : 0x26, (rnd() % 2) ? 24 : 25, reg(), rnd() % 4); return 1; /* lwl lwr, device or scratch */
+	case 18: p[0] = I(0x0F, 0, reg(), rnd() & 0xFFFF); return 1;                            /* lui */
+	case 19: p[0] = R(0, reg(), reg(), 0, 0, tr[rnd() % sizeof(tr)]); return 1;           /* teq tne tge tgeu tlt tltu */
+	case 20: p[0] = I(0x01, reg(), tri[rnd() % sizeof(tri)], rnd() & 0xFFFF); return 1;     /* tgei tgeiu tlti tltiu teqi tnei */
+	case 21: p[0] = I(0x30, 25, reg(), (rnd() % 16) * 4); return 1;                          /* ll */
+	case 22: p[0] = I(0x38, 25, reg(), (rnd() % 16) * 4); return 1;                          /* sc */
+	case 23: case 24: {
+		/* lui/ori r13, a forward target; jr r13 or jalr rd, r13 */
+		uint32_t t = 0x80000000u + PROG + 4 * (uint32_t)(k + 4 + (int)(rnd() % 4));
+		if (k + 8 >= NPROG) return 0;
+		p[0] = I(0x0F, 0, 13, t >> 16);
+		p[1] = I(0x0D, 13, 13, t & 0xFFFF);
+		p[2] = (rnd() % 2) ? R(0, 13, 0, 0, 0, 0x08) : R(0, 13, 0, reg(), 0, 0x09);
+		return 3;
+	}
+	case 25: {
+		int fwd = 2 + (int)(rnd() % 6);
+		if (k + fwd + 1 >= NPROG) return 0;
+		p[0] = (rnd() % 2) ? I(0x01, reg(), bz[rnd() % 4], fwd) : I(0x06 + rnd() % 2, reg(), 0, fwd); /* bltz bgez bltzal bgezal; blez bgtz */
+		return 1;
+	}
+	case 26: p[0] = 0x41400000u | reg() << 16 | reg() << 11; return 1;                       /* rdpgpr (previous set = this one) */
 	default: {
 		int fwd = 2 + (int)(rnd() % 6);
 		if (k + fwd + 1 >= NPROG) return 0;
-		return I(0x04 + rnd() % 2, reg(), reg(), fwd);                              /* beq, bne */
+		p[0] = I(0x04 + rnd() % 2, reg(), reg(), fwd);                                     /* beq, bne */
+		return 1;
 	}
 	}
 }
 
 static void load_program(void)
 {
-	int k;
+	int k, n, j;
+	uint32_t w[4];
 	memset(kmem, 0, sizeof(kmem));
-	/* the handler at 0x180: store registers 1-12 (base 26), drop the request (base 27), return; in shadow set 1
-	   it reads them from the interrupted set with RDPGPR */
+	/* the handler at 0x180: store registers 1-12 (base 26), drop the request (base 27); in shadow set 1 it reads
+	   them from the interrupted set with RDPGPR. An exception (ExcCode not 0) returns past the instruction. */
 	for (k = 1; k <= 12; k++) {
 		put(0x180 + 8 * (uint32_t)(k - 1), shadow ? 0x41400000u | (uint32_t)k << 16 | 13u << 11 : 0);
 		put(0x184 + 8 * (uint32_t)(k - 1), I(0x2B, 26, shadow ? 13 : k, 4 * k));
 	}
 	put(0x180 + 96, I(0x2B, 27, 0, 0));
-	put(0x180 + 100, 0x42000018u);
-	for (k = 0; k < NPROG; k++) put(PROG + 4 * (uint32_t)k, insn(k));
+	put(0x180 + 100, 0x40000000u | 14u << 16 | 13u << 11);  /* mfc0 r14, Cause */
+	put(0x180 + 104, I(0x0C, 14, 14, 0x7C));
+	put(0x180 + 108, I(0x04, 14, 0, 4));                      /* beq r14, r0, eret */
+	put(0x180 + 112, 0);
+	put(0x180 + 116, 0x40000000u | 14u << 16 | 14u << 11);  /* mfc0 r14, EPC */
+	put(0x180 + 120, I(0x09, 14, 14, 4));
+	put(0x180 + 124, 0x40800000u | 14u << 16 | 14u << 11);  /* mtc0 r14, EPC */
+	put(0x180 + 128, 0x42000018u);
+	for (k = 0; k < NPROG; k += n) {
+		n = insn(k, w);
+		if (!n) { w[0] = 0; n = 1; }
+		while (n > 0 && k + n > NPROG) n--;
+		for (j = 0; j < n; j++) put(PROG + 4 * (uint32_t)(k + j), w[j]);
+		if (!n) n = 1;
+	}
 	put(PROG + 4 * NPROG, 0x1000FFFFu); /* b . */
 	put(PROG + 4 * NPROG + 4, 0);
 }
@@ -122,12 +178,35 @@ static void reset_cpu(void)
 	asked = 0;
 }
 
-int main(void)
+/* a reset keeps the registers: a load still uncertain then holds its true value */
+static int reset_settles(void)
+{
+	memset(kmem, 0, sizeof(kmem));
+	put(PROG, I(0x23, 24, 1, 0));
+	put(PROG + 4, 0x1000FFFFu);
+	put(PROG + 8, 0);
+	rng = 1;
+	reset_cpu();
+	dev_true = 0x12345678u;
+	dev_mask = 0x00F00000u;
+	dev_guess = ~dev_true;
+	settle_after = 1000;
+	uncertain = 1;
+	mips32_run(&cpu, 10);
+	mips32_reset(&cpu);
+	if (mips32_regs(&cpu)[1] == dev_true) return 0;
+	printf("UNCERTAIN FAIL reset: r1 %08x, true %08x\n", (unsigned)mips32_regs(&cpu)[1], (unsigned)dev_true);
+	return 1;
+}
+
+/* uncertain_test [programs [first]]: programs from number first on (default 20000 from 0) */
+int main(int argc, char **argv)
 {
 	static uint8_t mem_a[sizeof(kmem)];
 	uint32_t regs_a[32], seed;
-	int t, fails = 0, ints = 0;
-	for (t = 0; t < 20000; t++) {
+	int t, fails = reset_settles(), ints = 0, count = argc > 1 ? atoi(argv[1]) : 20000, first = argc > 2 ? atoi(argv[2]) : 0;
+	unsigned long excs = 0;
+	for (t = first; t < first + count; t++) {
 		uint32_t s0, irq_at, k;
 		int pass, slices;
 		uint64_t cyc_a = 0;
@@ -151,6 +230,7 @@ int main(void)
 				mips32_run(&cpu, 1 + (int)((cpu.cycles * 7) % 5));
 			}
 			mips32_settle(&cpu);
+			if (pass) excs += cpu.exc_seq;
 			if (!pass) {
 				memcpy(mem_a, kmem, sizeof(kmem));
 				memcpy(regs_a, mips32_regs(&cpu), sizeof(regs_a));
@@ -167,6 +247,6 @@ int main(void)
 			}
 		}
 	}
-	printf("uncertain: 20000 programs, %d interrupt raises, %d differ\n", ints, fails);
+	printf("uncertain: %d programs from %d, %d interrupt raises, %lu exceptions, %d differ\n", count, first, ints, excs, fails);
 	return fails != 0;
 }

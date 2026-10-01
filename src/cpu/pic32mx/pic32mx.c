@@ -545,7 +545,8 @@ static int soc_settle(void *ctx, uint32_t token, int wait, uint32_t *bits)
 	uint32_t in = 0;
 	int r;
 	if (!p->board.port_settle) return 1;
-	r = p->board.port_settle(p->board.ctx, token >> 2, wait, &in);
+	/* token = the read's token (its low 30 bits) << 2 | byte: the whole token is the latest one's or before it */
+	r = p->board.port_settle(p->board.ctx, p->unc_tok - ((p->unc_tok - (token >> 2)) & 0x3FFFFFFFu), wait, &in);
 	*bits = in >> ((token & 3) * 8);
 	return r;
 }

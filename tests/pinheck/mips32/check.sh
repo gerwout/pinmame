@@ -30,6 +30,8 @@ run_diff() {
 [ -x $B/unit_test ] && { ./$B/unit_test || fail=$((fail + 1)); }
 cc -O2 -std=c99 -Wall -Wextra -Werror -pedantic -I../../../src/cpu/mips32 -o $B/uncertain_test uncertain_test.c ../../../src/cpu/mips32/mips32.c || exit 2
 ./$B/uncertain_test || fail=$((fail + 1))
+./$B/uncertain_test 200000 20000 || fail=$((fail + 1))
+./mutate.sh || fail=$((fail + 1))
 for f in diff/*.S; do [ -e "$f" ] && run_diff "$f" $B/diff; done
 if [ -f gen.py ]; then
 	rm -rf $B/random && python3 gen.py --out $B/random --count "$SEEDS"

@@ -76,6 +76,7 @@ const char *pic32cpu_info(void *context, int regnum)
 {
 	static char buf[32];
 	(void)context;
+	if (regnum < CPU_INFO_FLAGS) mips32_settle(&soc.cpu);
 	switch (regnum) {
 	case CPU_INFO_NAME: return "PIC32MX";
 	case CPU_INFO_FAMILY: return "MIPS32 M4K";

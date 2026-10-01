@@ -328,6 +328,43 @@ static void host_icount(void)
 	CHECK(host.n == 3 && ic <= 0 && ran <= (int)host.at[2] + 4);
 }
 
+/* Uncertain port reads: the token a port read was marked with reaches port_settle whole, also past 2^30 and 2^32 */
+static struct { uint32_t next, n, got[16], issued[16]; } unc;
+
+static uint32_t b_unc_read(void *c, int port, uint64_t cy)
+{
+	(void)c; (void)cy;
+	if (port == PIC32MX_PORTF) {
+		if (unc.n < 16) unc.issued[unc.n] = unc.next;
+		pic32mx_uncertain(&soc, 1u << 13, unc.next++);
+	}
+	return 0;
+}
+
+static int b_unc_settle(void *c, uint32_t token, int wait, uint32_t *bits)
+{
+	(void)c; (void)wait;
+	if (unc.n < 16) unc.got[unc.n] = token;
+	unc.n++;
+	*bits = (token & 1) << 13;
+	return 1;
+}
+
+static void uncertain_token(uint32_t first)
+{
+	uint32_t k;
+	setup();
+	/* lui t0, 0xBF88; loop: lbu t1, 0x6151(t0) (PORTF byte 1); addu t2, t1, zero; b loop */
+	put(0x1000, 0x3C08BF88u); put(0x1004, 0x91096151u); put(0x1008, 0x01205021u); put(0x100C, 0x1000FFFDu); put(0x1010, 0);
+	soc.board.port_read = b_unc_read;
+	soc.board.port_settle = b_unc_settle;
+	memset(&unc, 0, sizeof(unc));
+	unc.next = first;
+	pic32mx_run(&soc, 200);
+	CHECK(unc.n >= 8);
+	for (k = 0; k < 8; k++) CHECK(unc.got[k] == unc.issued[k]);
+}
+
 int main(void)
 {
 	port_set_clr_inv();
@@ -347,6 +384,8 @@ int main(void)
 	reserved_instruction();
 	board_hold();
 	host_icount();
+	uncertain_token(0x3FFFFFFCu);
+	uncertain_token(0xFFFFFFFCu);
 	printf("soc: %s\n", fails ? "FAIL" : "ok");
 	return fails != 0;
 }

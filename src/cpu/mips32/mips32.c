@@ -1016,7 +1016,7 @@ int mips32_soft_irq(const mips32_state *s) { return (int)((s->cause >> 8) & 3); 
 
 void mips32_reset(mips32_state *s)
 {
-	s->prov = 0;
+	mips32_settle(s); /* the registers stay */
 	s->unc = 0;
 	s->pc = 0xBFC00000u;
 	s->npc = s->pc + 4;
