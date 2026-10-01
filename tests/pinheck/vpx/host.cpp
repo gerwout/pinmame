@@ -6,7 +6,8 @@
      -s  file of "frame switch state" lines applied with PinmameSetSwitch; -P  physical outputs (SolMask(2) = 2);
      -R  stop after FRAMES, copy $PINHECK_LINK_LOG to DIR/link1.log, run FRAMES more in a new session
    host -T: messages broadcast from a second thread while this one subscribes (for a ThreadSanitizer build)
-   DIR gets api.log, frames.bin (VIDEO frames: uint32 frame, then the pixels) and audio.raw (int16 stereo). */
+   DIR gets api.log, frames.bin (VIDEO and DMD frames: uint32 frame, then the pixels; the plugin's with the top bit
+   set) and audio.raw (int16 stereo). */
 #include "libpinmame.h"
 #include "plugins/ControllerPlugin.h"
 #include <atomic>
@@ -223,6 +224,10 @@ static void PINMAMECALLBACK OnDisplayUpdated(int index, void *data, PinmameDispl
 		uint32_t tag = (uint32_t)f;
 		fwrite(&tag, 4, 1, framef);
 		fwrite(data, 1, (size_t)l->width * l->height * (l->depth == 16 ? 2 : 3), framef);
+	} else if (data && (l->type & PINMAME_DISPLAY_TYPE_SEGMASK) == PINMAME_DISPLAY_TYPE_DMD) {
+		uint32_t tag = (uint32_t)f;                  /* one byte per dot: luminance 0-255 */
+		fwrite(&tag, 4, 1, framef);
+		fwrite(data, 1, (size_t)l->width * l->height, framef);
 	}
 	auto it = switches.find(f);
 	if (it != switches.end()) for (auto &s : it->second) PinmameSetSwitch(s.first, s.second);

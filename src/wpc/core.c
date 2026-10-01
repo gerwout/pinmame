@@ -1074,7 +1074,7 @@ static void core_dmd_send_vpm(const int width, const int height, const float* co
   const float perc33 = hasPercents ? (float)pmoptions.dmd_perc33 : 33.f;
   const float perc66 = hasPercents ? (float)pmoptions.dmd_perc66 : 67.f;
 
-  if ((core_gameData->gen & (GEN_SAM | GEN_SPA | GEN_ALVG_DMD2)) || (strncasecmp(Machine->gamedrv->name, "smb", 3) == 0) || (strncasecmp(Machine->gamedrv->name, "cueball", 7) == 0)) {
+  if ((core_gameData->gen & (GEN_SAM | GEN_SPA | GEN_ALVG_DMD2 | GEN_PINHECK)) || (strncasecmp(Machine->gamedrv->name, "smb", 3) == 0) || (strncasecmp(Machine->gamedrv->name, "cueball", 7) == 0)) { // pinHeck: the raw DMD's 16 levels
     // Backward compatibility: 16 shades mode has no colorization and fixed lighting levels ranging from 0 to 100
     //static const UINT8 levelgts3[16] = {0/*5*/, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100}; // GTS3 and AlvinG brightness seems okay
     //static const UINT8 levelsam[16]  = {0/*5*/, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 90, 100}; // SAM brightness seems okay
