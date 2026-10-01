@@ -8,7 +8,7 @@
 #define PINHECK_PROPREGION REGION_USER1
 #define PINHECK_BIOSREGION REGION_USER2
 
-/* the 128x32 panel is drawn 2x2 per dot in the PinMAME and VPinMAME windows; libpinmame hosts
+/* the panel is drawn 2x2 per dot in the PinMAME and VPinMAME windows; libpinmame hosts
    draw their own dots, so they get the panel as sent */
 #ifdef LIBPINMAME
 #define PINHECK_VIDEO_SCALE 1
@@ -17,6 +17,7 @@
 #endif
 #define PINHECK_VIDEO_W (128 * PINHECK_VIDEO_SCALE)
 #define PINHECK_VIDEO_H (32 * PINHECK_VIDEO_SCALE)
+#define PINHECK_VIDEO_H64 (64 * PINHECK_VIDEO_SCALE) /* the 128x64 module */
 
 #define PINHECK_SWLFLIP  4
 #define PINHECK_SWRFLIP  3
@@ -57,7 +58,7 @@
 /* per-game data: a pinHeck game's core_gameData points at the core member of one of these */
 typedef struct {
   core_tGameData core;
-  int width, height;      /* display module in dots; the driver supports 128 x 32 */
+  int width, height;      /* display module in dots: 128 x 32 (drawn in its look) or 128 x 64 (as sent) */
   int aligned;            /* the POSITION the look draws unshifted: the game's factory POSITION */
   int servoMin, servoMax; /* servo pulse widths in us drawn as servo levels 0 and 255 */
   int rgbInverted;        /* WS2801 lines inverted on the board; the driver supports 0 */

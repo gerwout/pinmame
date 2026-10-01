@@ -5,14 +5,14 @@
 static display d;
 static uint64_t now;
 static uint32_t pins;
-static uint8_t last_frame[DISPLAY_FRAME], last_cfg[DISPLAY_CFG_MAX];
+static uint8_t last_frame[DISPLAY_FRAME_MAX], last_cfg[DISPLAY_CFG_MAX];
 static int frames, configs, cfg_n, logs;
 static char last_log[128];
 static int fails;
 
 #define CHECK(c) do { if (!(c)) { printf("DISPLAY FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
 
-static void on_frame(void *ctx, const uint8_t *f, uint64_t t) { (void)ctx; (void)t; memcpy(last_frame, f, DISPLAY_FRAME); frames++; }
+static void on_frame(void *ctx, const uint8_t *f, uint64_t t) { (void)ctx; (void)t; memcpy(last_frame, f, (size_t)d.frame); frames++; }
 static void on_config(void *ctx, const uint8_t *b, int n, uint64_t t) { (void)ctx; (void)t; memcpy(last_cfg, b, (size_t)n); cfg_n = n; configs++; }
 static void on_log(void *ctx, const char *m) { (void)ctx; strncpy(last_log, m, sizeof(last_log) - 1); logs++; }
 
@@ -70,6 +70,32 @@ static void frame_and_bit_order(void)
 	bits((DISPLAY_FRAME - 1) * 8);
 	strobe();
 	CHECK(frames == 1 && last_frame[0] == 0x80 && last_frame[1] == 0x00);
+}
+
+/* the 128x64 module: 8192-byte frames; a 128x32 frame or a 1024-byte burst on its own is discarded */
+static void frame_128x64(void)
+{
+	int i;
+	reset();
+	CHECK(pinheck_display_size(&d, 128, 48) == 0 && pinheck_display_size(&d, 256, 32) == 0 && d.frame == DISPLAY_FRAME);
+	CHECK(pinheck_display_size(&d, 128, 64) == 1 && d.frame == 8192);
+	for (i = 0; i < 8192; i++) byte((unsigned)(i * 5 + 3) & 0xFF);
+	strobe();
+	CHECK(frames == 1 && logs == 0);
+	for (i = 0; i < 8192 && last_frame[i] == ((i * 5 + 3) & 0xFF); i++) ;
+	CHECK(i == 8192);
+	for (i = 0; i < DISPLAY_FRAME; i++) byte(0x11);
+	strobe();
+	CHECK(frames == 1 && strcmp(last_log, "display: frame of 4096 bytes discarded") == 0);
+	for (i = 0; i < 8193; i++) byte(0x22);
+	strobe();
+	CHECK(frames == 1);
+	for (i = 0; i < 1024; i++) byte(0x33);
+	strobe();
+	for (i = 0; i < 8192; i++) byte(0x44);
+	strobe();
+	CHECK(frames == 2 && last_frame[0] == 0x44 && last_frame[8191] == 0x44);
+	CHECK(pinheck_display_size(&d, 128, 32) == 1 && d.frame == DISPLAY_FRAME);
 }
 
 static void config_packet(void)
@@ -274,6 +300,7 @@ static void look_position(void)
 int main(void)
 {
 	frame_and_bit_order();
+	frame_128x64();
 	config_packet();
 	short_and_long_frames();
 	partial_byte_and_mode_change();

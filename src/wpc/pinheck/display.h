@@ -10,6 +10,8 @@ extern "C" {
 #define DISPLAY_W       128
 #define DISPLAY_H       32
 #define DISPLAY_FRAME   (DISPLAY_W * DISPLAY_H)
+#define DISPLAY_FRAME_MAX (DISPLAY_W * 2 * DISPLAY_H) /* the 128 x 64 module */
+#define DISPLAY_SIZE_OK(w, h) ((w) == DISPLAY_W && ((h) == DISPLAY_H || (h) == 2 * DISPLAY_H))
 #define DISPLAY_CFG_MAX 64
 
 #define DISPLAY_P17 (1u << 17)
@@ -32,7 +34,7 @@ typedef struct display_look {
 	int bar;        /* BAR BRIGHT: 0-62 in the menu, the light between round dots */
 } display_look;
 
-typedef void (*display_frame_fn)(void *ctx, const uint8_t *frame4096, uint64_t t);
+typedef void (*display_frame_fn)(void *ctx, const uint8_t *frame, uint64_t t); /* frame: d->frame bytes */
 typedef void (*display_config_fn)(void *ctx, const uint8_t *bytes, int n, uint64_t t);
 typedef void (*display_log_fn)(void *ctx, const char *msg);
 
@@ -42,13 +44,15 @@ typedef struct display {
 	display_config_fn on_config;
 	display_log_fn log;
 	uint32_t level;
-	uint8_t buf[DISPLAY_FRAME];
+	uint8_t buf[DISPLAY_FRAME_MAX];
+	long frame;     /* bytes in a frame: DISPLAY_FRAME, or as pinheck_display_size set it */
 	long nbits;
 	int mode;
 	int logged_bits, logged_frame, logged_mixed, logged_cfg;
 } display;
 
 void pinheck_display_init(display *d, void *ctx, display_frame_fn on_frame, display_config_fn on_config, display_log_fn log);
+int pinheck_display_size(display *d, int w, int h);
 void pinheck_display_pins(display *d, uint64_t t, uint32_t out, uint32_t dir);
 int pinheck_display_look(display_look *look, const uint8_t *cfg, int n);
 void pinheck_display_render(const display_look *look, const uint8_t *frame, uint8_t *rgb);

@@ -77,7 +77,7 @@ static void pinheck_unsupported(void)
 		fprintf(stderr, "pinheck: %s: inverted WS2801 lines are not supported, the RGB outputs are as sent\n", Machine->gamedrv->name);
 		logerror("pinheck: %s: inverted WS2801 lines are not supported\n", Machine->gamedrv->name);
 	}
-	if (g->width != DISPLAY_W || g->height != DISPLAY_H) {
+	if (!DISPLAY_SIZE_OK(g->width, g->height)) {
 		fprintf(stderr, "pinheck: %s: a %dx%d display is not supported, frames are taken as 128x32\n", Machine->gamedrv->name, g->width, g->height);
 		logerror("pinheck: %s: a %dx%d display is not supported\n", Machine->gamedrv->name, g->width, g->height);
 	}
@@ -476,7 +476,7 @@ static void pinheck_tick(int param)
 }
 
 static display disp;
-static uint8_t disp_shown[DISPLAY_FRAME], disp_cfg[DISPLAY_CFG_MAX];
+static uint8_t disp_shown[DISPLAY_FRAME_MAX], disp_cfg[DISPLAY_CFG_MAX];
 static int disp_cfg_n, disp_opened;
 static FILE *disp_log;
 static UINT32 disp_rgb32[256];
@@ -490,18 +490,19 @@ static void pinheck_disp_frame(void *ctx, const uint8_t *frame, uint64_t t)
 	uint8_t stamp[20];
 	uint64_t pic = prop_stamp(&prop);
 	uint32_t at = 0xFFFFFFFFu, a;
+	const size_t n = (size_t)disp.frame;
 	int k;
 	(void)ctx;
-	memcpy(disp_shown, frame, DISPLAY_FRAME);
+	memcpy(disp_shown, frame, n);
 	disp_dirty = 1;
 	if (!disp_log) return;
-	for (a = 0; a + DISPLAY_FRAME <= 0x8000; a++)
-		if (prop.chip.hub[a] == frame[0] && !memcmp(prop.chip.hub + a, frame, DISPLAY_FRAME)) { at = a; break; }
+	for (a = 0; a + n <= 0x8000; a++)
+		if (prop.chip.hub[a] == frame[0] && !memcmp(prop.chip.hub + a, frame, n)) { at = a; break; }
 	for (k = 0; k < 8; k++) stamp[k] = (uint8_t)(t >> (8 * k));
 	for (k = 0; k < 8; k++) stamp[8 + k] = (uint8_t)(pic >> (8 * k));
 	for (k = 0; k < 4; k++) stamp[16 + k] = (uint8_t)(at >> (8 * k));
 	fwrite(stamp, 1, 20, disp_log);
-	fwrite(frame, 1, DISPLAY_FRAME, disp_log);
+	fwrite(frame, 1, n, disp_log);
 }
 
 static void pinheck_disp_config(void *ctx, const uint8_t *bytes, int n, uint64_t t)
@@ -545,6 +546,7 @@ static void pinheck_disp_init(void)
 static void pinheck_disp_reset(void)
 {
 	pinheck_display_init(&disp, NULL, pinheck_disp_frame, pinheck_disp_config, pinheck_prop_log);
+	pinheck_display_size(&disp, pinheck_game()->width, pinheck_game()->height); /* any other size is named at start */
 	memset(disp_shown, 0, sizeof(disp_shown));
 	disp_cfg_n = 0;
 	pinheck_display_look(&disp_look, NULL, 0);
@@ -559,28 +561,30 @@ static void pinheck_disp_stop(void)
 
 PINMAME_VIDEO_UPDATE(pinheck_video)
 {
-	const int x0 = layout->left, y0 = layout->top;
+	const int x0 = layout->left, y0 = layout->top, h = (int)(disp.frame / DISPLAY_W);
 	int x, y;
 	prop_sync(&prop);
 	(void)cliprect;
 #if !defined(LIBPINMAME) && PINHECK_VIDEO_SCALE == 2
-	/* the module's look (dot shape, brightness, position); libpinmame hosts get the frame as sent */
-	if (disp_dirty) pinheck_display_render(&disp_look, disp_shown, disp_img);
-	disp_dirty = 0;
-	for (y = 0; y < DISPLAY_LOOK_H && y0 + y < bitmap->height; y++)
-		for (x = 0; x < DISPLAY_LOOK_W && x0 + x < bitmap->width; x++) {
-			const uint8_t *p = disp_img + (y * DISPLAY_LOOK_W + x) * 3;
-			if (bitmap->depth == 32) ((UINT32 *)bitmap->line[y0 + y])[x0 + x] = MAKE_RGB(p[0], p[1], p[2]);
-			else ((UINT16 *)bitmap->line[y0 + y])[x0 + x] = (UINT16)(((p[0] >> 3) << 10) | ((p[1] >> 3) << 5) | (p[2] >> 3));
-		}
-#else
-	for (y = 0; y < DISPLAY_H * PINHECK_VIDEO_SCALE && y0 + y < bitmap->height; y++)
+	/* the 128x32 module's look (dot shape, brightness, position); the 128x64 module and libpinmame hosts get the frame as sent */
+	if (h == DISPLAY_H) {
+		if (disp_dirty) pinheck_display_render(&disp_look, disp_shown, disp_img);
+		disp_dirty = 0;
+		for (y = 0; y < DISPLAY_LOOK_H && y0 + y < bitmap->height; y++)
+			for (x = 0; x < DISPLAY_LOOK_W && x0 + x < bitmap->width; x++) {
+				const uint8_t *p = disp_img + (y * DISPLAY_LOOK_W + x) * 3;
+				if (bitmap->depth == 32) ((UINT32 *)bitmap->line[y0 + y])[x0 + x] = MAKE_RGB(p[0], p[1], p[2]);
+				else ((UINT16 *)bitmap->line[y0 + y])[x0 + x] = (UINT16)(((p[0] >> 3) << 10) | ((p[1] >> 3) << 5) | (p[2] >> 3));
+			}
+		return;
+	}
+#endif
+	for (y = 0; y < h * PINHECK_VIDEO_SCALE && y0 + y < bitmap->height; y++)
 		for (x = 0; x < DISPLAY_W * PINHECK_VIDEO_SCALE && x0 + x < bitmap->width; x++) {
 			const uint8_t v = disp_shown[(y / PINHECK_VIDEO_SCALE) * DISPLAY_W + x / PINHECK_VIDEO_SCALE];
 			if (bitmap->depth == 32) ((UINT32 *)bitmap->line[y0 + y])[x0 + x] = disp_rgb32[v];
 			else ((UINT16 *)bitmap->line[y0 + y])[x0 + x] = disp_rgb15[v];
 		}
-#endif
 }
 
 /* test hook: PINHECK_TIME_LOG gets the emulated and the host time at each vblank, in seconds */
