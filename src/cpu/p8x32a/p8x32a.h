@@ -23,7 +23,7 @@ typedef struct p8x32a_bus {
 	void (*ctr_state)(void *ctx, uint64_t t, int cog, int ctr, uint32_t ctr_reg, uint32_t frq); /* ctr: 0 = A, 1 = B; t = cycle the change takes effect */
 	uint32_t pure_in; /* input pins that change only at pins_next edges, never inside pins_out; 0 = none */
 	void (*lazy)(void *ctx, uint64_t t, uint32_t mask, uint32_t out, uint32_t dir); /* from t a lazy cog has pins mask (0: none) */
-	void (*lazy_pins)(void *ctx, uint64_t t, uint32_t out, uint32_t dir);   /* a change of the lazy cog's pins (only those) */
+	void (*lazy_pins)(void *ctx, uint64_t t, uint32_t out, uint32_t dir);   /* a change of the lazy cog's pins (only those); hub RAM at t: p8x32a_hub_at */
 } p8x32a_bus;
 
 typedef struct p8x32a_reg {

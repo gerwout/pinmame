@@ -24,13 +24,15 @@ Add `-DSDL3PINMAME_MAME_DEBUG=ON` to compile in the classic MAME debugger. Start
 begin in the debugger, which gets its own window next to the game one, or press the tilde key (left of 1)
 while the game runs to break into it. F1 lists the debugger keys.
 
-### A faster build for the pinHeck games (optional, GCC or Clang)
+### A faster build for the pinHeck games (optional, Linux, GCC or Clang)
 
 The Spooky Pinball pinHeck games (`dominos`, `rzspook`, `jetsons`, `amh`) emulate both of the board's processors
 instruction by instruction, and America's Most Haunted and The Jetsons need all of a recent laptop's speed. A
-profile-guided build runs them about 5–10% faster. It needs the Propeller's 32 KB mask ROM (`p8x32a.rom`) and a
-romset to train on (Domino's, or another pinHeck game with `PINHECK_GAME=amh`, `jetsons` or `rzspook`); the
-training plays it for about two minutes:
+profile-guided build runs them about 4–8% faster. It needs the Propeller's 32 KB mask ROM (`p8x32a.rom`) and a
+romset to train on: train on Domino's, which measured best for every game (`PINHECK_GAME=amh`, `jetsons` or
+`rzspook` selects another); the training plays it for about two minutes. The scripts are Linux only. For Clang set
+`CC=clang CXX=clang++`, and `LLVM_PROFDATA` if `llvm-profdata` has a versioned name (e.g. `llvm-profdata-18`).
+Running the build needs `pinheck.zip` (the mask ROM) in the rompath, as any pinHeck game does:
 
 ```shell
 cp cmake/sdl3pinmame/CMakeLists.txt CMakeLists.txt

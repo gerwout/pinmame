@@ -1524,8 +1524,8 @@ out:
 
 /* Lazy cogs. A cog whose code from its next instruction on reads hub RAM, PAR and CNT only, computes in cog RAM,
    jumps to fixed addresses and writes OUTA, on pins no other cog or counter drives and that only the host's
-   bus.lazy_pins watches (lazy_ok), leaves the schedule and runs behind the others: it catches up before another
-   cog's hub write that changes a byte (so it reads hub RAM as it was), before an INA read and at the end of
+   bus.lazy_pins watches (lazy_ok), leaves the schedule and runs behind the others: other cogs' hub writes go to a
+   journal it reads hub RAM through (a full or disabled journal makes it catch up first), it catches up before an INA read and at the end of
    run_until, and its pin changes go to bus.lazy_pins in time order instead of the pending points. A wait or a sleep
    on its pins, another cog driving them, or a cog operation on it makes it run as the others again. */
 
