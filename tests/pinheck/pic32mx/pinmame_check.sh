@@ -14,7 +14,7 @@ cp "$P8X32A_ROM" $B/p8x32a.rom && (cd $B && zip -q -j roms/pinheck.zip p8x32a.ro
 if [ -n "$PINHECK_ZIP" ]; then
 	ln -s "$PINHECK_ZIP" $B/roms/$GAME.zip || exit 2
 else
-	(cd "$PINHECK_UPDATE_DIR" && zip -q -0 -r "$OLDPWD/$B/roms/$GAME.zip" $PRG PRP_V008.BIN DMD SFX) || exit 2
+	(cd "$PINHECK_UPDATE_DIR" && zip -q -0 -r "$OLDPWD/$B/roms/$GAME.zip" $PRG $PRP DMD SFX) || exit 2
 fi
 launch() {
 	(cd $B && PINHECK_UART1_LOG=$PWD/uart$1.log PINHECK_PROP_LOG=$PWD/prop$1.log timeout -k 30 3000 "$SDL3PINMAME" $GAME -rompath roms -nvram_directory nvram -cfg_directory cfg \
@@ -24,10 +24,12 @@ launch() {
 PINHECK_RESET_AT=$UPDATED_AT launch 1 $(((UPDATED_AT + 12) * 60))
 PINHECK_UART1_SEND_AT=11.5 PINHECK_UART1_SEND='[E97000]' launch 2 900
 fail=0
-for want in "boot: sign-on 0" "boot: leave, $PROGRAMMED bytes programmed" "prop: CLKSET 6f"; do
+for want in "boot: sign-on 0" "boot: $UPDATE_END, $PROGRAMMED bytes programmed" "prop: CLKSET 6f"; do
 	grep -qF "$want" $B/prop1.log || { echo "PINMAME FAIL: launch 1 lacks '$want'"; fail=1; }
 done
 grep -q "boot: sign-on" $B/prop2.log && { echo "PINMAME FAIL: launch 2 ran the update again"; fail=1; }
+n=$(grep -c "prop: CLKSET 80" $B/prop2.log)
+[ "$n" = "$REBOOTS" ] || { echo "PINMAME FAIL: the Propeller rebooted $n times before the sync of launch 2, expected $REBOOTS"; fail=1; }
 grep -aq "PROPELLER SYNC CHECK\.*OK" $B/uart1.log || { echo "PINMAME FAIL: no sync after the update and reset"; fail=1; }
 python3 banner.py uart $B/uart2.log "PROPELLER SYNC CHECK|$STORED|$BANNER|Ball Search: DISABLED" || fail=1
 grep -aq "PROPELLER SYNC CHECK\.*OK" $B/uart2.log || { echo "PINMAME FAIL: launch 2 sync check did not pass"; fail=1; }

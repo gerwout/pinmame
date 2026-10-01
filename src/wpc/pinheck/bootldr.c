@@ -210,6 +210,12 @@ void boot_advance(pic32_boot *b, uint64_t now)
 	}
 }
 
+/* the machine stops (a restart or the end of a run) with the PIC32 held for programming */
+void boot_stop(pic32_boot *b)
+{
+	if (b->state == BOOT_HOST && !b->app_at) logf1(b, "boot: stopped in programming mode, %lu bytes programmed", b->programmed);
+}
+
 uint64_t boot_hold(const pic32_boot *b, uint64_t now)
 {
 	uint64_t end, byte = now + BOOT_BIT * 9u + BOOT_BIT / 2u;

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 import argparse
+import os
 import struct
 import sys
 
-FRAME = 4096
+# the module PINHECK_GAME has: 128x32, or The Jetsons' 128x64, whose firmware keeps no whole frame in hub RAM
+W, H = 128, 64 if os.environ.get('PINHECK_GAME') == 'jetsons' else 32
+FRAME = W * H
 PROP_HZ = 104e6
 PIC_HZ = 80e6
 
@@ -27,7 +30,7 @@ def read_vid(path):
 
 
 def ascii(f):
-    return '\n'.join(''.join('#' if f[y * 128 + x] else '.' for x in range(128)) for y in range(32))
+    return '\n'.join(''.join('#' if f[y * W + x] else '.' for x in range(W)) for y in range(H))
 
 
 def main():
@@ -47,9 +50,14 @@ def main():
     hub = sorted(set(at for _, _, at, f in recs if f.count(f[0]) != FRAME))
     if not hub:
         sys.exit('frames: FAIL, every frame is uniform')
-    if hub != [hub[0]] or hub[0] == 0xFFFFFFFF:
+    if H == 64:
+        if hub != [0xFFFFFFFF]:
+            sys.exit('frames: FAIL, a 128x64 frame is whole in hub RAM at %s' % ['$%04x' % h for h in hub if h != 0xFFFFFFFF])
+        print('frames: no 128x64 frame is whole in hub RAM (the firmware sends it from two 1024-byte pages)')
+    elif hub != [hub[0]] or hub[0] == 0xFFFFFFFF:
         sys.exit('frames: FAIL, decoded frames are not the firmware framebuffer (hub addresses %s)' % ['none' if h == 0xFFFFFFFF else '$%04x' % h for h in hub])
-    print('frames: every non-uniform frame equals the firmware framebuffer at hub $%04x when latched' % hub[0])
+    else:
+        print('frames: every non-uniform frame equals the firmware framebuffer at hub $%04x when latched' % hub[0])
     if a.show is not None:
         print(ascii(log[a.show][1]))
     if a.vid:

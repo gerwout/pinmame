@@ -18,7 +18,7 @@ launch() {
 		|| { echo "SIM FAIL: launch $1 exited $?"; tail -5 $B/run$1.out; exit 1; }
 }
 launch 1 1200
-grep -q ' W .*12=1' $B/out1.log || { echo "SIM FAIL: launch 1 logged no ball in the trough (PINHECK_OUT_LOG 'W' lines)"; exit 1; }
+grep -qE " W (.* )?$TROUGH1=1" $B/out1.log || { echo "SIM FAIL: launch 1 logged no ball in the trough (PINHECK_OUT_LOG 'W' lines)"; exit 1; }
 PINHECK_UART1_SEND_AT=$(cat $B/send_at) PINHECK_UART1_SEND_GAP=$(cat $B/send_gap) PINHECK_UART1_SEND="$(cat $B/send)" \
 	launch 2 "$(cat $B/frames)" "-key_script keys.txt"
 S=../../../src

@@ -1,20 +1,22 @@
 #!/bin/sh
-# Domino's through libpinmame (spec M10 4.1): display, sound, outputs, switches and mechanics as a host receives them
+# Domino's through libpinmame (spec M10 4.1): display, sound, outputs, switches and mechanics as a host receives them;
+# with PINHECK_GAME=jetsons The Jetsons' 128x64 display and its sound only
 : "${LIBPINMAME:?set LIBPINMAME to the built libpinmame.so}"
-: "${PINHECK_UPDATE_DIR:?set PINHECK_UPDATE_DIR to the unzipped Domino's update}"
+: "${PINHECK_UPDATE_DIR:?set PINHECK_UPDATE_DIR to the game's unzipped update}"
 : "${P8X32A_ROM:?set P8X32A_ROM to the 32 KB Propeller mask ROM (crc32 f99b3070)}"
-: "${PINHECK_ZIP:?set PINHECK_ZIP to a Domino's romset zip}"
+: "${PINHECK_ZIP:?set PINHECK_ZIP to the game's romset zip}"
 LIBPINMAME=$(realpath "$LIBPINMAME") || exit 2
 PINHECK_UPDATE_DIR=$(realpath "$PINHECK_UPDATE_DIR") || exit 2
 P8X32A_ROM=$(realpath "$P8X32A_ROM") || exit 2
 PINHECK_ZIP=$(realpath "$PINHECK_ZIP") || exit 2
 cd "$(dirname "$0")" || exit 2
+. ../games.sh
 S=../../../src
 B=build/pinmame
 rm -rf $B && mkdir -p $B/boot/roms $B/boot/nvram $B/boot/cfg || exit 2
 c++ -std=c++20 -O1 -Wall -Wextra -Werror -I$S/libpinmame host.cpp "$LIBPINMAME" -Wl,-rpath,"$(dirname "$LIBPINMAME")" -pthread -o $B/host || exit 2
 cp "$P8X32A_ROM" $B/p8x32a.rom && (cd $B && zip -q -j boot/roms/pinheck.zip p8x32a.rom && rm p8x32a.rom) || exit 2
-ln -s "$PINHECK_ZIP" $B/boot/roms/dominos.zip || exit 2
+ln -s "$PINHECK_ZIP" $B/boot/roms/$GAME.zip || exit 2
 launch() {
 	name=$1
 	shift
@@ -25,9 +27,18 @@ launch() {
 }
 fail=0
 # the first boot writes the NVRAM every other launch starts from
-launch boot dominos 1200 .
+launch boot $GAME 1200 .
 python3 vpx.py displays $B/boot || fail=1
 python3 vpx.py media $B/boot $B/boot/capture.wav || fail=1
+if [ $GAME = jetsons ]; then
+	# a video clip through the plugin message API, after The Jetsons' later sync
+	PINHECK_UART1_SEND_AT=14 PINHECK_UART1_SEND="[V00$CLIP]" launch media -p $GAME 1500 .
+	grep -aq "Playing Video" $B/media/uart.log || { echo "VPX FAIL: [V00$CLIP] not acknowledged"; fail=1; }
+	python3 vpx.py media $B/media $B/media/capture.wav || fail=1
+	[ $fail -eq 0 ] || exit 1
+	echo "pinmame vpx: ok ($GAME: display and sound)"
+	exit 0
+fi
 # a video clip, then a sound effect, through the plugin message API
 PINHECK_UART1_SEND_AT=12 PINHECK_UART1_SEND="[V00LT5]~~~~[F00Z00]~~~[F00IR0]" launch media -p dominos 2100 .
 grep -aq "Playing Video" $B/media/uart.log || { echo "VPX FAIL: [V00LT5] not acknowledged"; fail=1; }

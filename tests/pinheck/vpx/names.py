@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """A game's names (src/wpc/pinheck_names.h) against the driver's numbering, and the pinHeck system script for VPX.
   names.py check SRC [GAME]   every name has a number the driver gives that device; GAME.c and pinheck.c agree
-  names.py vbs SRC [GAME]     the system script a table loads with LoadVPM (to stdout): pinheck.vbs for dominos
-GAME is dominos (the default) or rzspook."""
+  names.py vbs SRC [GAME]     the system script a table loads with LoadVPM (to stdout): pinheck.vbs for dominos,
+                              GAME.vbs (rzspook.vbs, ...) for the others, which say so in their first line
+GAME is dominos (the default), rzspook or jetsons."""
 import re
 import sys
 
 TABLES = ('switch', 'lamp', 'solenoid')
-TITLE = {'dominos': "Domino's Spectacular Pinball Adventure", 'rzspook': "Rob Zombie's Spookshow International"}
+TITLE = {'dominos': "Domino's Spectacular Pinball Adventure", 'rzspook': "Rob Zombie's Spookshow International",
+         'jetsons': 'The Jetsons'}
 # the ids of servo 0 and the external LED's first channel
-ROLES = {'dominos': ('sNoid', 'sExtR'), 'rzspook': ('sGate', 'sLDGR')}
+ROLES = {'dominos': ('sNoid', 'sExtR'), 'rzspook': ('sGate', 'sLDGR'), 'jetsons': ('sOrbitty', 'sExtR')}
 
 
 def read(src, game='dominos'):
@@ -44,6 +46,15 @@ def check(src, game='dominos'):
                 fails.append('id %s repeats (VBScript ignores case)' % i)
             lower.add(i.lower())
             ids[i] = n
+    # the header's "Not listed: switches ... and lamps a-b" must give unnamed numbers the driver has
+    sec = open(src + '/wpc/pinheck_names.h').read().split('(pinheck_%s_*)' % game, 1)[1].split('(pinheck_', 1)[0].split('*/', 1)[0]
+    m = re.search(r'Not listed: switches ([\d,\sand]+?),?\s+and lamps\s+(\d+)-(\d+)', sec)
+    if m:
+        unlisted = [('switch', int(n)) for n in re.findall(r'\d+', m.group(1))]
+        unlisted += [('lamp', n) for n in range(int(m.group(2)), int(m.group(3)) + 1)]
+        for t, n in unlisted:
+            if n not in valid[t] or n in [k for k, _, _ in names[t]]:
+                fails.append('the comment calls %s %d unlisted; it is %s' % (t, n, 'listed' if n in valid[t] else 'no %s the driver has' % t))
     sim = dict((i, int(n)) for i, n in re.findall(r'#define (s\w+)\s+(\d+)', open(src + '/wpc/sims/pinheck/%s.c' % game).read()))
     for i, n in sim.items():
         if ids.get(i) != n:
@@ -134,6 +145,8 @@ vpmSystemHelp = "pinHeck keys:" & vbNewLine &_
 def vbs(src, game='dominos'):
     names = read(src, game)
     out = [HEAD.lstrip('\n') % TITLE[game]]
+    if game != 'dominos':
+        out.insert(0, "' %s.vbs: save under this name (pinheck.vbs is Domino's); its table loads it with LoadVPM\n" % game)
     for t in TABLES:
         out.append("\n' %s\n" % {'switch': 'Switches', 'lamp': 'Lamps', 'solenoid': 'Solenoid outputs'}[t])
         out += ['Const %-20s = %3d  \' %s\n' % (i, n, name) for n, i, name in names[t]]

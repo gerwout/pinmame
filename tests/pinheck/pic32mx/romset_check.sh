@@ -10,7 +10,7 @@ cd "$(dirname "$0")" || exit 2
 B=build/romset
 rm -rf $B && mkdir -p $B/bios $B/nomedia $B/nvram $B/cfg || exit 2
 cp "$P8X32A_ROM" $B/p8x32a.rom && (cd $B && zip -q -j bios/pinheck.zip p8x32a.rom && cp bios/pinheck.zip nomedia/ && rm p8x32a.rom) || exit 2
-(cd "$PINHECK_UPDATE_DIR" && zip -q -0 "$OLDPWD/$B/nomedia/$GAME.zip" $PRG PRP_V008.BIN) || exit 2
+(cd "$PINHECK_UPDATE_DIR" && zip -q -0 "$OLDPWD/$B/nomedia/$GAME.zip" $PRG $PRP) || exit 2
 fail=0
 run() {
 	name=$1 path=$2 out=$3
@@ -26,6 +26,10 @@ fi
 rc=$(run $GAME nomedia nomedia -frames_to_run 120)
 if [ "$rc" -gt 128 ] || ! grep -qF "pinheck: the SD card from $GAME.zip has no DMD/ and no SFX/" $B/nomedia.out; then
 	echo "ROMSET FAIL: $GAME without media exited $rc"; tail -3 $B/nomedia.out; fail=1
+fi
+# the driver supports everything the game's data asks for
+if grep -F "not supported" $B/nomedia.out; then
+	echo "ROMSET FAIL: $GAME's game data asks for something the driver does not support"; fail=1
 fi
 [ $fail -eq 0 ] && echo "romset: ok"
 exit $fail

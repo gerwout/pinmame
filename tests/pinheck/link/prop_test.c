@@ -21,7 +21,7 @@
 #define BITS 64
 
 static pinheck_prop p;
-static uint8_t rom[0x8000], ram[0x8000], eemem[131072];
+static uint8_t rom[0x8000], ram[0x8000], eemem[131072], rom80[0x8000], ram80[0x8000];
 static int fails;
 
 #define CHECK(c) do { if (!(c)) { printf("PROP FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
@@ -157,6 +157,28 @@ static void clkset_reset_bit(void)
 	pulse(&pic, 1);
 	prop_catch_up(&p, pic);
 	CHECK(count() == 1);
+}
+
+static int clkset80_logged, unmodelled_logged;
+
+static void reboot_log(void *ctx, const char *msg)
+{
+	(void)ctx;
+	if (strcmp(msg, "prop: CLKSET ef") == 0) clkset80_logged++;
+	if (strstr(msg, "not modelled")) unmodelled_logged++;
+}
+
+/* echo with CLKSET $EF: prop.c restarts the chip, so the core does not call the reset bit unmodelled */
+static void clkset_reboot_log(void)
+{
+	memset(eemem, 0xFF, sizeof(eemem));
+	prop_init(&p, rom80, eemem);
+	memcpy(p.chip.hub, ram80, sizeof(ram80));
+	prop_set_log(&p, reboot_log, NULL);
+	prop_catch_up(&p, 2000000);
+	CHECK(clkset80_logged >= 2);
+	CHECK(unmodelled_logged == 0);
+	prop_set_log(&p, NULL, NULL);
 }
 
 static uint64_t clock_now;
@@ -618,8 +640,8 @@ static int load(const char *path, uint8_t *dst)
 
 int main(int argc, char **argv)
 {
-	if (argc != 3 || !load(argv[1], rom) || !load(argv[2], ram)) {
-		fprintf(stderr, "usage: prop_test echo.rom echo.ram\n");
+	if (argc != 5 || !load(argv[1], rom) || !load(argv[2], ram) || !load(argv[3], rom80) || !load(argv[4], ram80)) {
+		fprintf(stderr, "usage: prop_test echo.rom echo.ram echo80.rom echo80.ram\n");
 		return 2;
 	}
 	rates();
@@ -629,6 +651,7 @@ int main(int argc, char **argv)
 	reset_rebases(1);
 	reset_rebases(0);
 	clkset_reset_bit();
+	clkset_reboot_log();
 	threaded();
 	pins_mask();
 	foreign_sync();

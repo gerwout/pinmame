@@ -30,9 +30,11 @@ static void latch(display *d, uint64_t t, int cfg)
 			n = DISPLAY_CFG_MAX;
 		}
 		if (d->on_config) d->on_config(d->ctx, d->buf, (int)n, t);
-	} else if (n != DISPLAY_FRAME) {
+	} else if (n != d->frame) {
 		sprintf(msg, "display: frame of %ld bytes discarded", n);
-		say(d, &d->logged_frame, msg);
+		if (d->logged_frame < DISPLAY_LOG_FRAMES && d->log) d->log(d->ctx, msg);
+		else if (d->logged_frame == DISPLAY_LOG_FRAMES && d->log) d->log(d->ctx, "display: further discarded frames not logged");
+		if (d->logged_frame <= DISPLAY_LOG_FRAMES) d->logged_frame++;
 	} else if (d->on_frame)
 		d->on_frame(d->ctx, d->buf, t);
 	d->nbits = 0;
@@ -45,6 +47,15 @@ void pinheck_display_init(display *d, void *ctx, display_frame_fn on_frame, disp
 	d->on_frame = on_frame;
 	d->on_config = on_config;
 	d->log = log;
+	d->frame = DISPLAY_FRAME;
+}
+
+/* the 128 x 32 or the 128 x 64 module: frames of w * h bytes; 0 (frames stay 128 x 32) for any other size */
+int pinheck_display_size(display *d, int w, int h)
+{
+	if (!DISPLAY_SIZE_OK(w, h)) return 0;
+	d->frame = (long)w * h;
+	return 1;
 }
 
 void pinheck_display_pins(display *d, uint64_t t, uint32_t out, uint32_t dir)
@@ -59,7 +70,7 @@ void pinheck_display_pins(display *d, uint64_t t, uint32_t out, uint32_t dir)
 	if ((now & DISPLAY_P22) && !(old & DISPLAY_P22) && !(now & DISPLAY_P20)) {
 		long i = d->nbits >> 3;
 		if (d->nbits == 0) d->mode = (now & DISPLAY_P17) != 0;
-		if (i < DISPLAY_FRAME) {
+		if (i < d->frame) {
 			if ((d->nbits & 7) == 0) d->buf[i] = 0;
 			if (now & DISPLAY_P21) d->buf[i] |= (uint8_t)(0x80 >> (d->nbits & 7));
 		}

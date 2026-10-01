@@ -8,7 +8,7 @@
 #define PINHECK_PROPREGION REGION_USER1
 #define PINHECK_BIOSREGION REGION_USER2
 
-/* the 128x32 panel is drawn 2x2 per dot in the PinMAME and VPinMAME windows; libpinmame hosts
+/* the panel is drawn 2x2 per dot in the PinMAME and VPinMAME windows; libpinmame hosts
    draw their own dots, so they get the panel as sent */
 #ifdef LIBPINMAME
 #define PINHECK_VIDEO_SCALE 1
@@ -17,6 +17,7 @@
 #endif
 #define PINHECK_VIDEO_W (128 * PINHECK_VIDEO_SCALE)
 #define PINHECK_VIDEO_H (32 * PINHECK_VIDEO_SCALE)
+#define PINHECK_VIDEO_H64 (64 * PINHECK_VIDEO_SCALE) /* the 128x64 module */
 
 #define PINHECK_SWLFLIP  4
 #define PINHECK_SWRFLIP  3
@@ -57,15 +58,16 @@
 /* per-game data: a pinHeck game's core_gameData points at the core member of one of these */
 typedef struct {
   core_tGameData core;
-  int width, height;      /* display module in dots; the driver supports 128 x 32 */
+  int width, height;      /* display module in dots: 128 x 32 (drawn in its look) or 128 x 64 (as sent) */
   int aligned;            /* the POSITION the look draws unshifted: the game's factory POSITION */
   int servoMin, servoMax; /* servo pulse widths in us drawn as servo levels 0 and 255 */
   int rgbInverted;        /* WS2801 lines inverted on the board; the driver supports 0 */
   int inService;          /* PINHECK_INSERVICE seeds the update record (version: core.hw.gameSpecific1) */
 } pinheck_tGameData;
 
-/* Domino's values: 128 x 32, POSITION 340, servo levels 1.0-2.0 ms, WS2801 as sent, PINHECK_INSERVICE applies */
-#define PINHECK_GAME_DEFAULTS 128, 32, 340, 1000, 2000, 0, 1
+/* Domino's values: 128 x 32, POSITION 340, servo levels 1.0-2.0 ms, WS2801 as sent, PINHECK_INSERVICE applies.
+   Only Domino's and the system set use them; every other game spells out its own */
+#define PINHECK_DOMINOS_DATA 128, 32, 340, 1000, 2000, 0, 1
 
 extern PINMAME_VIDEO_UPDATE(pinheck_video);
 extern int pinheck_getsol(int solNo);

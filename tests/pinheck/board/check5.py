@@ -4,16 +4,21 @@ PinMAME lamps, solenoids and switches of spec 4.5.
   check5.py plan DIR      write DIR/send, send_at, send_gap, keys.txt, frames
   check5.py timing LOG    board edges in one CPU slice carry distinct PinMAME times
   check5.py verify DIR    check DIR/out2.log and DIR/frames2.bin against the plan
-PINHECK_GAME (dominos, rzspook) selects the game's servo and RGB tests and its resting balls."""
+  check5.py selftest      the verifier's helpers
+PINHECK_GAME (dominos, rzspook, jetsons) selects the game's servo and RGB tests, its menu, its switch-test
+screen and its resting balls."""
 import os
 import struct
 import sys
 
 FPS = 60
+GAME = os.environ.get('PINHECK_GAME', 'dominos')
 MENU_AT = 10.5                                      # attract mode runs light shows: test from the service menu
 SEND_AT, GAP = 11.5, 0.25
 KEYS_AT = 39.0
-FRAME = 4096
+if GAME == 'jetsons':                               # its Propeller reboots once before the sync (games.sh REBOOTS)
+    MENU_AT, SEND_AT, KEYS_AT = 16.0, 17.0, 44.5
+FRAME = 128 * (64 if os.environ.get('PINHECK_GAME') == 'jetsons' else 32)   # The Jetsons' module is 128x64
 COLS, ROWS = 'QWERTYUI', 'ASDFGHJK'
 
 
@@ -26,10 +31,13 @@ LAMPS = ['L%d' % lamp(n) for n in range(64)]
 COILS = ['S%d' % (c + 1) for c in range(24)]
 GI = ['S%d' % s for s in list(range(25, 33)) + list(range(37, 45))]
 RGB = ['S%d' % s for s in range(51, 57)]
-GAME = os.environ.get('PINHECK_GAME', 'dominos')
 if GAME == 'rzspook':
     RGB += ['S62', 'S63', 'S64']                    # the LDG light, the external WS2801 LED
-SERVO_US = (544, 2400) if GAME == 'rzspook' else (1000, 2000)   # the game's servo levels 0 and 255
+SERVO_US = (544, 2400) if GAME in ('rzspook', 'jetsons') else (1000, 2000)   # the game's servo levels 0 and 255
+# the switch test: the matrix's and the cabinet columns' x; cabinet inputs closed at rest (the coin door, and
+# The Jetsons' trough opto under the ball the tests leave in the trough)
+MX, CX = (8, 0) if GAME == 'jetsons' else (0, 32)
+CAB_REST = (1, 10) if GAME == 'jetsons' else (1,)
 
 
 def uart_plan():
@@ -59,8 +67,11 @@ def key_plan():
         tap('0', 1.5 if c == 1 else 0.5, ('fire', c))   # the shaker test ignores keys for a second
         tap('RSHIFT', 0.5)
     tap('7', 1.0)                                   # back to SOLENOID
-    tap('RSHIFT', 1.0)                              # SERVO
-    if GAME == 'rzspook':
+    if GAME != 'jetsons':                           # The Jetsons has no servo test
+        tap('RSHIFT', 1.0)                          # SERVO
+    if GAME == 'jetsons':
+        pass
+    elif GAME == 'rzspook':
         tap('0', 1.0)                               # SERVO TEST: GATE OPEN
         tap('0', 1.5, ('position', 0, 2222))        # the Spaulding gate opens
         tap('RSHIFT', 1.0)                          # GATE CLOSE
@@ -76,7 +87,8 @@ def key_plan():
         tap('0', 1.0)                               # Enter: pulses stop
         tap('RSHIFT', 1.0)                          # NOID LEFT
         tap('0', 1.5, ('servo', 0, 255))            # servo 0 runs at 180 deg
-    tap('7', 1.0)                                   # back to SERVO
+    if GAME != 'jetsons':
+        tap('7', 1.0)                               # back to SERVO
     tap('RSHIFT', 1.0)                              # LAMP
     tap('0', 0.5, ('gi', ()))                       # LAMP TEST: ALL OFF
     for n in range(8):
@@ -105,22 +117,22 @@ def key_plan():
         for v in [(255, 0, 0), (0, 0, 255), (0, 255, 0), (255, 255, 255)]:
             tap('RSHIFT', 1.0, ('rgb', (0, 0, 0) * 2 + v))
     tap('7', 1.0)                                   # back to RGB LIGHTING
-    for i in range(5):
+    for i in range(4 if GAME == 'jetsons' else 5):
         tap('LSHIFT', 1.0)                          # back to SWITCH EDGE
     tap('DEL', 0.5)                                 # simulator keys off: column/row keys reach the matrix
     tap('0', 1.5)                                   # SWITCH TEST
     for n in range(64):
         k = 'KEYCODE_%s KEYCODE_%s' % (COLS[n // 8], ROWS[n % 8])
-        tap(k, 16 / FPS, ('switch', (n,), (1,)), hold=4)
-        tap(k, 16 / FPS, ('switch', (), (1,)), hold=4)
+        tap(k, 16 / FPS, ('switch', (n,), CAB_REST), hold=4)
+        tap(k, 16 / FPS, ('switch', (), CAB_REST), hold=4)
     for key, cab in (('1', 12), ('5', 7), ('INSERT', 8), ('9', 2), ('0', 6)):
-        tap(key, 16 / FPS, ('switch', (), (1, cab)), hold=12)
-        tap(None, 16 / FPS, ('switch', (), (1,)))
-    tap('END', 32 / FPS, ('switch', (), ()), hold=4)
-    tap('END', 32 / FPS, ('switch', (), (1,)), hold=4)
+        tap(key, 16 / FPS, ('switch', (), tuple(sorted(CAB_REST + (cab,)))), hold=12)
+        tap(None, 16 / FPS, ('switch', (), CAB_REST))
+    tap('END', 32 / FPS, ('switch', (), CAB_REST[1:]), hold=4)
+    tap('END', 32 / FPS, ('switch', (), CAB_REST), hold=4)
     for key, cab in (('LSHIFT', 4), ('RSHIFT', 3)):
-        tap(key, 16 / FPS, ('switch', (), (1, cab)), hold=12)
-        tap(None, 16 / FPS, ('switch', (), (1,)))
+        tap(key, 16 / FPS, ('switch', (), tuple(sorted(CAB_REST + (cab,)))), hold=12)
+        tap(None, 16 / FPS, ('switch', (), CAB_REST))
     tap('7', 1.0, ('exit',))                        # Back (cabinet switch 5) leaves the switch test
     return ev, t + 0.5
 
@@ -193,20 +205,37 @@ class Out:
 
 
 def grid(f):
-    """switch test screen: closed matrix switches (column 0 drawn on the right) and cabinet inputs (0-7 right, 8-15 left)"""
+    """switch test screen: closed matrix switches (column 0 drawn on the right) and cabinet inputs (0-7 right, 8-15 left);
+    the matrix at x = MX, the cabinet columns at x = CX"""
     px = lambda x, y: f[y * 128 + x]
-    g, c2 = px(0, 0), px(32, 0)
+    g, c2 = px(MX, 0), px(CX, 0)
     if not g or not c2:
         return None
     for y in range(32):
         for x in range(40):
-            if (x % 4 in (0, 3) or y % 4 in (0, 3)) and px(x, y) != (g if x < 32 else c2):
+            if (x % 4 in (0, 3) or y % 4 in (0, 3)) and px(x, y) != (g if MX <= x < MX + 32 else c2):
                 return None
-    if any(px(x, y) == g for x in range(1, 31, 4) for y in range(1, 31, 4)):
+    if any(px(x, y) == g for x in range(MX + 1, MX + 31, 4) for y in range(1, 31, 4)):
         return None
-    sw = tuple(c * 8 + r for c in range(8) for r in range(8) if px((7 - c) * 4 + 1, r * 4 + 1))
-    cab = tuple(k for k in range(16) if px(37 if k < 8 else 33, (k % 8) * 4 + 1))
+    sw = tuple(c * 8 + r for c in range(8) for r in range(8) if px(MX + (7 - c) * 4 + 1, r * 4 + 1))
+    cab = tuple(k for k in range(16) if px(CX + (5 if k < 8 else 1), (k % 8) * 4 + 1))
     return sw, cab
+
+
+def shown_states(grids):
+    """the switch-test screens shown; a first screen with nothing closed is drawn before the inputs are read"""
+    return set(grids[1:] if grids and grids[0] == ((), ()) else grids)
+
+
+def selftest():
+    fails = 0
+    a, b = ((0, 1), (1, 10)), ((0, 1, 5), (1, 10))
+    for got, want in ((shown_states([a, b]), {a, b}), (shown_states([((), ()), a]), {a}), (shown_states([]), set())):
+        if got != want:
+            print('CHECK5 FAIL: shown_states gave %s, expected %s' % (sorted(got), sorted(want)))
+            fails += 1
+    print('check5 selftest: %s' % ('FAIL' if fails else 'ok'))
+    return 1 if fails else 0
 
 
 def verify(d):
@@ -221,9 +250,22 @@ def verify(d):
             fails.append(what)
     # attract mode: blinking start lamp 91, external WS2801 LED white; Domino's flashes GI_14, Rob Zombie
     # lights the playfield GI but its flashers GI_12 and GI_13
-    check(o.rises('L91', 5, MENU_AT), 'start lamp 91 never lit in attract')
-    check([o.at('S%d' % s, MENU_AT) for s in (62, 63, 64)] == [255] * 3, 'external LED 0 is not white on 62-64')
-    if GAME == 'rzspook':
+    if GAME == 'jetsons':
+        # the start lamp stays lit; the external LED is never written; servos 0 (the Orbitty) and 1 at 90 degrees,
+        # 1,476 us, in the game's range
+        check(o.at('L91', MENU_AT) >= 128, 'start lamp 91 is not lit in attract')
+        check([o.at('S%d' % s, MENU_AT) for s in (62, 63, 64)] == [0] * 3, 'external LED 0 on 62-64 is lit')
+        for n, us in ((0, 1476), (1, 1476)):
+            w = sorted(set(round(u) for tt, u in o.servo.get(n, []) if MENU_AT - 1.0 <= tt < MENU_AT))
+            level = round((us - SERVO_US[0]) * 255 / (SERVO_US[1] - SERVO_US[0]))
+            check(w and all(abs(u - us) < 10 for u in w), 'attract servo %d pulses %s us, expected %d' % (n, w, us))
+            check(abs(o.at('S%d' % (57 + n), MENU_AT) - level) <= 1, 'attract servo output %d is %d, expected %d' % (57 + n, o.at('S%d' % (57 + n), MENU_AT), level))
+    else:
+        check(o.rises('L91', 5, MENU_AT), 'start lamp 91 never lit in attract')
+        check([o.at('S%d' % s, MENU_AT) for s in (62, 63, 64)] == [255] * 3, 'external LED 0 is not white on 62-64')
+    if GAME == 'jetsons':
+        pass
+    elif GAME == 'rzspook':
         gi = [o.at('S%d' % s, MENU_AT) for s in range(37, 45)]
         check(gi == [255] * 4 + [0, 0] + [255] * 2, 'attract playfield GI 37-44 is %s, expected all on but the flashers 41 and 42' % gi)
     else:
@@ -254,8 +296,10 @@ def verify(d):
     t0 = min(t for t, k, hold, e in ev if e and e[0] == 'switch')
     rest = [g for g in (grid(f) for tt, f in frames if t0 - 1.0 <= tt < t0 - 0.1) if g]
     base = set(rest[-1][0]) if rest else set()
-    want = {0, 1, 2, 3, 4, 5} if GAME == 'rzspook' else {0, 1}
-    check(rest and base - {39} == want and rest[-1][1] == (1,), 'switch test at rest shows %s, expected switches %s, maybe Noid Home (39), and the closed coin door' % (rest[-1:], sorted(want)))
+    # The Jetsons: the console's load and launch and the solenoid test's LOAD COIL and PLUNGER put two balls on the
+    # playfield; the third rests on trough opto 1 (cabinet 10)
+    want = {0, 1, 2, 3, 4, 5} if GAME == 'rzspook' else set() if GAME == 'jetsons' else {0, 1}
+    check(rest and base - {39} == want and rest[-1][1] == CAB_REST, 'switch test at rest shows %s, expected switches %s, maybe Noid Home (39), and cabinet inputs %s' % (rest[-1:], sorted(want), CAB_REST))
     for i, (t, k, hold, e) in enumerate(ev):
         if not e:
             continue
@@ -299,7 +343,7 @@ def verify(d):
         elif e[0] == 'exit':
             after = [grid(f) for tt, f in frames if tt >= t + 0.1]
             check(after and after[-1] is None, 'Back did not leave the switch test')
-    shown = set(g for g in (grid(f) for tt, f in frames if tt >= KEYS_AT) if g)
+    shown = shown_states([g for g in (grid(f) for tt, f in frames if tt >= KEYS_AT) if g])
     check(shown <= wanted, 'switch test showed unexpected states %s' % sorted(shown - wanted))
     for f in fails:
         print('BOARD FAIL: ' + f)
@@ -308,6 +352,8 @@ def verify(d):
 
 
 if __name__ == '__main__':
+    if sys.argv[1:] == ['selftest']:
+        sys.exit(selftest())
     if len(sys.argv) != 3 or sys.argv[1] not in ('plan', 'timing', 'verify'):
         sys.exit(__doc__)
     if sys.argv[1] == 'plan':

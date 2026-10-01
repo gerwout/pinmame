@@ -5,16 +5,22 @@
 static display d;
 static uint64_t now;
 static uint32_t pins;
-static uint8_t last_frame[DISPLAY_FRAME], last_cfg[DISPLAY_CFG_MAX];
+static uint8_t last_frame[DISPLAY_FRAME_MAX], last_cfg[DISPLAY_CFG_MAX];
 static int frames, configs, cfg_n, logs;
-static char last_log[128];
+static char last_log[128], log_lines[24][64];
 static int fails;
 
 #define CHECK(c) do { if (!(c)) { printf("DISPLAY FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
 
-static void on_frame(void *ctx, const uint8_t *f, uint64_t t) { (void)ctx; (void)t; memcpy(last_frame, f, DISPLAY_FRAME); frames++; }
+static void on_frame(void *ctx, const uint8_t *f, uint64_t t) { (void)ctx; (void)t; memcpy(last_frame, f, (size_t)d.frame); frames++; }
 static void on_config(void *ctx, const uint8_t *b, int n, uint64_t t) { (void)ctx; (void)t; memcpy(last_cfg, b, (size_t)n); cfg_n = n; configs++; }
-static void on_log(void *ctx, const char *m) { (void)ctx; strncpy(last_log, m, sizeof(last_log) - 1); logs++; }
+static void on_log(void *ctx, const char *m)
+{
+	(void)ctx;
+	strncpy(last_log, m, sizeof(last_log) - 1);
+	if (logs < 24) strncpy(log_lines[logs], m, sizeof(log_lines[0]) - 1);
+	logs++;
+}
 
 static void set(uint32_t mask, int on)
 {
@@ -51,6 +57,7 @@ static void reset(void)
 	pins = 0;
 	frames = configs = cfg_n = logs = 0;
 	last_log[0] = 0;
+	memset(log_lines, 0, sizeof(log_lines));
 	memset(last_frame, 0, sizeof(last_frame));
 }
 
@@ -70,6 +77,32 @@ static void frame_and_bit_order(void)
 	bits((DISPLAY_FRAME - 1) * 8);
 	strobe();
 	CHECK(frames == 1 && last_frame[0] == 0x80 && last_frame[1] == 0x00);
+}
+
+/* the 128x64 module: 8192-byte frames; a 128x32 frame or a 1024-byte burst on its own is discarded */
+static void frame_128x64(void)
+{
+	int i;
+	reset();
+	CHECK(pinheck_display_size(&d, 128, 48) == 0 && pinheck_display_size(&d, 256, 32) == 0 && d.frame == DISPLAY_FRAME);
+	CHECK(pinheck_display_size(&d, 128, 64) == 1 && d.frame == 8192);
+	for (i = 0; i < 8192; i++) byte((unsigned)(i * 5 + 3) & 0xFF);
+	strobe();
+	CHECK(frames == 1 && logs == 0);
+	for (i = 0; i < 8192 && last_frame[i] == ((i * 5 + 3) & 0xFF); i++) ;
+	CHECK(i == 8192);
+	for (i = 0; i < DISPLAY_FRAME; i++) byte(0x11);
+	strobe();
+	CHECK(frames == 1 && strcmp(last_log, "display: frame of 4096 bytes discarded") == 0);
+	for (i = 0; i < 8193; i++) byte(0x22);
+	strobe();
+	CHECK(frames == 1);
+	for (i = 0; i < 1024; i++) byte(0x33);
+	strobe();
+	for (i = 0; i < 8192; i++) byte(0x44);
+	strobe();
+	CHECK(frames == 2 && last_frame[0] == 0x44 && last_frame[8191] == 0x44);
+	CHECK(pinheck_display_size(&d, 128, 32) == 1 && d.frame == DISPLAY_FRAME);
 }
 
 static void config_packet(void)
@@ -99,7 +132,7 @@ static void short_and_long_frames(void)
 	CHECK(logs == 1 && strcmp(last_log, "display: frame of 100 bytes discarded") == 0);
 	for (i = 0; i < 200; i++) byte(0xAA);
 	strobe();
-	CHECK(logs == 1);
+	CHECK(logs == 2 && strcmp(last_log, "display: frame of 200 bytes discarded") == 0);
 	reset();
 	for (i = 0; i < DISPLAY_FRAME + 1; i++) byte(0x11);
 	strobe();
@@ -107,6 +140,34 @@ static void short_and_long_frames(void)
 	for (i = 0; i < DISPLAY_FRAME; i++) byte(0x22);
 	strobe();
 	CHECK(frames == 1 && last_frame[0] == 0x22 && last_frame[DISPLAY_FRAME - 1] == 0x22);
+}
+
+static void burst(int n)
+{
+	int i;
+	for (i = 0; i < n; i++) byte(0x5A);
+	strobe();
+}
+
+/* The Jetsons' start: each discarded frame is logged, up to DISPLAY_LOG_FRAMES, then one line says so */
+static void discards_logged(void)
+{
+	int i;
+	reset();
+	pinheck_display_size(&d, 128, 64);
+	burst(1024);
+	burst(7168);
+	burst(8192);
+	burst(1024);
+	CHECK(frames == 1 && logs == 3);
+	CHECK(strcmp(log_lines[0], "display: frame of 1024 bytes discarded") == 0);
+	CHECK(strcmp(log_lines[1], "display: frame of 7168 bytes discarded") == 0);
+	CHECK(strcmp(log_lines[2], "display: frame of 1024 bytes discarded") == 0);
+	for (i = 3; i < DISPLAY_LOG_FRAMES + 5; i++) burst(10);
+	CHECK(logs == DISPLAY_LOG_FRAMES + 1);
+	CHECK(strcmp(log_lines[DISPLAY_LOG_FRAMES], "display: further discarded frames not logged") == 0);
+	burst(8192);
+	CHECK(frames == 2);
 }
 
 static void partial_byte_and_mode_change(void)
@@ -274,8 +335,10 @@ static void look_position(void)
 int main(void)
 {
 	frame_and_bit_order();
+	frame_128x64();
 	config_packet();
 	short_and_long_frames();
+	discards_logged();
 	partial_byte_and_mode_change();
 	latch_clock_and_undriven();
 	look_decode();
