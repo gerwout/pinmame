@@ -88,8 +88,10 @@ typedef struct p8x32a_jst {
 	uint64_t tl, slot;     /* a lazy cog's blocks: the last time an instruction or hub read may start; its first hub slot */
 	uint64_t latch;        /* and the slot of the last hub read they ran, 0 if none */
 	const uint8_t *hub;
+	const uint8_t *jmap;   /* hub longs with a journal entry (p8x32a.jmap): a block stops before reading one */
 } p8x32a_jst;
 #define P8X32A_JOUT 256 /* the OUTA writes a run of blocks may leave */
+#define P8X32A_JN 64    /* journal entries */
 #ifndef P8X32A_LZH
 #define P8X32A_LZH 8    /* a lazy cog's pin changes after its catch-up end (at most 2: writes 4 cycles apart, in effect 1-5 cycles on) */
 #endif
@@ -140,6 +142,13 @@ typedef struct p8x32a {
 	uint64_t lz_at, lz_to, lz_evt, lz_ht[P8X32A_LZH], lz_try[8]; /* lz_evt: its next event (its ev_t is out of the schedule) */
 	uint32_t lz_wait[8];
 	uint64_t lazies;            /* lazy cogs entered */
+	/* the journal: other cogs' hub writes the lazy cog has not reached, with the bytes they replaced, in time order */
+	uint8_t jn, jn_off;         /* entries; 1: none (the lazy cog catches up before each such write) */
+	uint8_t jn_sz[P8X32A_JN], jn_old[P8X32A_JN][4];
+	uint16_t jn_a[P8X32A_JN];
+	uint64_t jn_t[P8X32A_JN];
+	uint8_t jmap[2048];         /* bit a / 4: hub long a has an entry */
+	uint64_t jn_full, jn_writes; /* catch-ups at a write because the journal was full; entries made */
 	unsigned sched_gen; /* counts changes one cog makes to another cog's next event */
 	uint64_t sleeps; /* idle loops entered */
 	p8x32a_loop loop[8];
@@ -157,6 +166,7 @@ void p8x32a_init(p8x32a *p, const p8x32a_bus *bus);
 void p8x32a_reset(p8x32a *p, uint64_t t);
 void p8x32a_run_until(p8x32a *p, uint64_t t);
 uint32_t p8x32a_pins(p8x32a *p, uint64_t t, uint32_t *dir);
+uint8_t p8x32a_hub_at(const p8x32a *p, uint32_t a, uint64_t t); /* hub RAM as the lazy cog reads it at t */
 unsigned p8x32a_dasm(char *buf, uint32_t op);
 
 #ifdef __cplusplus

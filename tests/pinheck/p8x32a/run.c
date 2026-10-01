@@ -340,6 +340,7 @@ int main(int argc, char **argv)
 	printf("E %llu\n", end);
 	if (sleeps) fprintf(stderr, "p8run: %llu idle-loop sleeps\n", (unsigned long long)chip.sleeps);
 	if (lazies) fprintf(stderr, "p8run: %llu lazy cogs\n", (unsigned long long)chip.lazies);
+	if (lazies) fprintf(stderr, "p8run: %llu journal entries, %llu catch-ups with it full\n", (unsigned long long)chip.jn_writes, (unsigned long long)chip.jn_full);
 	if (dump) {
 		FILE *f = fopen(dump, "wb");
 		if (!f) { perror(dump); return 2; }

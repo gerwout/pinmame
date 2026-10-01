@@ -31,6 +31,7 @@ typedef struct pinheck_dmd {
 	dmd_sub_fn on_sub;
 	dmd_frame_fn on_frame;
 	const uint8_t *hub;  /* row model: hub RAM */
+	uint8_t (*hub_at)(void *ctx, uint32_t a, uint64_t t); /* row model: hub RAM as at t, if set (else hub) */
 	uint32_t buf;        /* row model: hub address of the 4 bpp frame (two dots a byte, the left one high) */
 	uint32_t level;      /* pins as last seen */
 	int full;            /* 1: dots from the shifted bits (P16/P17), 0: from hub RAM at the latch */

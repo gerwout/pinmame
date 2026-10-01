@@ -596,7 +596,7 @@ static void pinheck_dmd_frame(void *ctx, const uint8_t *shades, uint64_t t)
 	int k;
 	(void)ctx;
 	for (k = 0; k < DMD_W * DMD_H && at != 0xFFFFFFFFu; k += 2)
-		if (prop.chip.hub[(at + k / 2) & 0xFFFF] != (shades[k] << 4 | shades[k + 1])) at = 0xFFFFFFFFu;
+		if (p8x32a_hub_at(&prop.chip, (at + k / 2) & 0xFFFF, t) != (shades[k] << 4 | shades[k + 1])) at = 0xFFFFFFFFu;
 	for (k = 0; k < 8; k++) stamp[k] = (uint8_t)(t >> (8 * k));
 	for (k = 0; k < 8; k++) stamp[8 + k] = (uint8_t)(pic >> (8 * k));
 	for (k = 0; k < 4; k++) stamp[16 + k] = (uint8_t)(at >> (8 * k));
@@ -631,6 +631,9 @@ static void pinheck_ser_pins(uint64_t t, uint32_t out, uint32_t dir)
 	ser.level = level;
 	ser.edge = t;
 }
+
+/* hub RAM as the scan cog read it at t (it runs behind, the writes since in its journal) */
+static uint8_t pinheck_dmd_hub_at(void *ctx, uint32_t a, uint64_t t) { (void)ctx; return p8x32a_hub_at(&prop.chip, a, t); }
 
 static void pinheck_dmd_pins_cb(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 {
@@ -721,6 +724,7 @@ static void pinheck_disp_reset(void)
 	if (dmd_on) {
 		pinheck_dmd_init(&dmd, 1, NULL, 0, NULL, pinheck_dmd_sub, disp_log ? pinheck_dmd_frame : NULL);
 		pinheck_dmd_init(&dmd_row, 0, prop.chip.hub, (uint32_t)pinheck_game()->dmdHub, NULL, pinheck_dmd_row_sub, NULL);
+		dmd_row.hub_at = pinheck_dmd_hub_at;
 		dmd_head = dmd_tail = 0;
 		return;
 	}
@@ -936,6 +940,7 @@ static MACHINE_INIT(pinheck)
 	pinheck_unsupported();
 	memcpy(propmem, memory_region(PINHECK_PROPREGION), 0x8000);
 	prop_init(&prop, memory_region(PINHECK_BIOSREGION), propmem);
+	prop.chip.jn_off = getenv("PINHECK_JOURNAL") && atoi(getenv("PINHECK_JOURNAL")) == 0;
 #ifdef PINMAME_JIT_ASMJIT
 	if ((!getenv("PINHECK_JIT") || atoi(getenv("PINHECK_JIT")) != 0) && (prop.chip.jit = p8x32a_jit_new()) != NULL)
 		prop.chip.jit_build = p8x32a_jit_build;
