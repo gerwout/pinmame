@@ -4,9 +4,13 @@ import os
 import struct
 import sys
 
-# the module PINHECK_GAME has: 128x32, or The Jetsons' 128x64, whose firmware keeps no whole frame in hub RAM
+# the module PINHECK_GAME has: 128x32, or The Jetsons' 128x64, whose firmware keeps no whole frame in hub RAM;
+# America's Most Haunted's raw DMD logs each cycle of 16 subframes, one byte per dot (0-15), and its .VID frames
+# are 4 bpp (two dots a byte, the left one high)
 W, H = 128, 64 if os.environ.get('PINHECK_GAME') == 'jetsons' else 32
 FRAME = W * H
+DMD = os.environ.get('PINHECK_GAME') == 'amh'
+TORN = 0xFFFFFFFF  # a raw DMD cycle the firmware's frame copy crossed: no whole frame
 PROP_HZ = 104e6
 PIC_HZ = 80e6
 
@@ -24,9 +28,12 @@ def read_log(path):
 
 def read_vid(path):
     d = open(path, 'rb').read()
-    if len(d) < 512 or (len(d) - 512) % FRAME:
+    n = FRAME // 2 if DMD else FRAME
+    if len(d) < 512 or (len(d) - 512) % n:
         sys.exit('frames: %s is not a .VID file' % path)
-    return [d[i:i + FRAME] for i in range(512, len(d), FRAME)]
+    if DMD:
+        return [bytes(x for b in d[i:i + n] for x in (b >> 4, b & 15)) for i in range(512, len(d), n)]
+    return [d[i:i + n] for i in range(512, len(d), n)]
 
 
 def ascii(f):
@@ -50,7 +57,14 @@ def main():
     hub = sorted(set(at for _, _, at, f in recs if f.count(f[0]) != FRAME))
     if not hub:
         sys.exit('frames: FAIL, every frame is uniform')
-    if H == 64:
+    if DMD:
+        whole = [at for _, _, at, _ in recs if at != TORN]
+        if hub != [hub[0], TORN][:len(hub)] or hub[0] == TORN or len(whole) < len(recs) // 2:
+            sys.exit('frames: FAIL, raw DMD cycles at hub addresses %s, %d of %d whole' % (['none' if h == TORN else '$%04x' % h for h in hub], len(whole), len(recs)))
+        print('frames: %d of %d cycles equal the firmware framebuffer at hub $%04x at their end, the others the frame copy crossed' % (len(whole), len(recs), hub[0]))
+        recs = [r for r in recs if r[2] != TORN]
+        log = [(t, f) for t, _, _, f in recs]
+    elif H == 64:
         if hub != [0xFFFFFFFF]:
             sys.exit('frames: FAIL, a 128x64 frame is whole in hub RAM at %s' % ['$%04x' % h for h in hub if h != 0xFFFFFFFF])
         print('frames: no 128x64 frame is whole in hub RAM (the firmware sends it from two 1024-byte pages)')
