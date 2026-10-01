@@ -24,6 +24,22 @@ Add `-DSDL3PINMAME_MAME_DEBUG=ON` to compile in the classic MAME debugger. Start
 begin in the debugger, which gets its own window next to the game one, or press the tilde key (left of 1)
 while the game runs to break into it. F1 lists the debugger keys.
 
+### A faster build for the pinHeck games (optional, GCC or Clang)
+
+The Spooky Pinball pinHeck games (`dominos`, `rzspook`, `jetsons`, `amh`) emulate both of the board's processors
+instruction by instruction, and America's Most Haunted and The Jetsons need all of a recent laptop's speed. A
+profile-guided build runs them about 5–10% faster. It needs the Propeller's 32 KB mask ROM (`p8x32a.rom`) and a
+romset to train on (Domino's, or another pinHeck game with `PINHECK_GAME=amh`, `jetsons` or `rzspook`); the
+training plays it for about two minutes:
+
+```shell
+cp cmake/sdl3pinmame/CMakeLists.txt CMakeLists.txt
+P8X32A_ROM=/path/to/p8x32a.rom PINHECK_ZIP=~/.pinmame/roms/dominos.zip tests/pinheck/perf/pgo.sh -DPLATFORM=linux -DARCH=x64
+./build/pgo-use/sdl3pinmame -rompath ~/.pinmame/roms amh
+```
+
+The profile stays in `build/pgo-profile`; the emulation's output is the same as without it.
+
 ## Windows builds
 
 Use the `create_vc2026_from_vc2012.bat` in the `vcproj` folder (or its older cousins) to convert the existing
