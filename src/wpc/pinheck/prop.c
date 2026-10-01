@@ -100,7 +100,13 @@ static uint64_t pins_next(void *ctx, uint64_t t)
 static void pins_out(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 {
 	pinheck_prop *p = (pinheck_prop *)ctx;
-	uint32_t ch = p->po_ok ? (out ^ p->po_out) | (dir ^ p->po_dir) : 0xFFFFFFFFu;
+	uint32_t ch;
+	/* a lazy cog's pins: as last sent on the lazy path */
+	if (p->lz_mask) {
+		out = (out & ~p->lz_mask) | p->lz_out;
+		dir = (dir & ~p->lz_mask) | p->lz_dir;
+	}
+	ch = p->po_ok ? (out ^ p->po_out) | (dir ^ p->po_dir) : 0xFFFFFFFFu;
 	p->po_out = out;
 	p->po_dir = dir;
 	p->po_ok = 1;
@@ -124,6 +130,36 @@ static void pins_out(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 		p->sd_do = p->sd(p->sd_ctx, cs, sclk, mosi) != 0;
 	}
 	if (p->pins && (ch & p->pins_mask)) p->pins(p->pins_ctx, t, out, dir);
+}
+
+static void lazy(void *ctx, uint64_t t, uint32_t mask, uint32_t out, uint32_t dir)
+{
+	pinheck_prop *p = (pinheck_prop *)ctx;
+	(void)t;
+	if (p->log && p->chip.lazies <= 16 && mask != p->lz_mask) {
+		char msg[48];
+		if (mask) sprintf(msg, "prop: a cog runs lazily on pins %08x", (unsigned)mask);
+		else strcpy(msg, "prop: the lazy cog runs as the others");
+		p->log(p->log_ctx, msg);
+	}
+	p->lz_mask = mask;
+	p->lz_out = out & mask;
+	p->lz_dir = dir & mask;
+}
+
+static void lazy_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
+{
+	pinheck_prop *p = (pinheck_prop *)ctx;
+	p->lz_out = out;
+	p->lz_dir = dir;
+	if (p->pins_lazy) p->pins_lazy(p->pins_lazy_ctx, t, out, dir);
+}
+
+/* a cog may run lazily on pins that no device but pins_lazy watches */
+static void lazy_update(pinheck_prop *p)
+{
+	const uint32_t dev = PIN_DO | PIN_SCLK | PIN_DI | PIN_CS | PIN_SND | PIN_P24 | PIN_P25 | (1u << 26) | PIN_SCL | PIN_SDA;
+	p->chip.lazy_ok = p->pins_lazy ? ~(dev | (p->pins_mask & ~p->lazy_mask)) : 0;
 }
 
 static void ctr_state(void *ctx, uint64_t t, int cog, int ctr, uint32_t ctr_reg, uint32_t frq)
@@ -171,6 +207,7 @@ void prop_init(pinheck_prop *p, const uint8_t *rom32k, uint8_t *eemem)
 {
 	p8x32a_bus bus;
 	memset(p, 0, sizeof(*p));
+	memset(&bus, 0, sizeof(bus));
 	bus.ctx = p;
 	bus.pins_in = pins_in;
 	bus.pins_next = pins_next;
@@ -180,6 +217,8 @@ void prop_init(pinheck_prop *p, const uint8_t *rom32k, uint8_t *eemem)
 	bus.log = logmsg;
 	bus.ctr_state = ctr_state;
 	bus.pure_in = ~(PIN_DO | PIN_SDA); /* SD DO and EEPROM SDA answer inside pins_out */
+	bus.lazy = lazy;
+	bus.lazy_pins = lazy_pins;
 	p8x32a_init(&p->chip, &bus);
 	memcpy(p->chip.hub + 0x8000, rom32k, 0x8000);
 	p->eemem = eemem;
@@ -218,12 +257,23 @@ void prop_set_pins(pinheck_prop *p, prop_pins_fn fn, void *ctx)
 	p->pins = fn;
 	p->pins_ctx = ctx;
 	p->pins_mask = 0xFFFFFFFFu;
+	lazy_update(p);
 }
 
 void prop_set_pins_mask(pinheck_prop *p, uint32_t mask)
 {
 	p->pins_mask = mask;
 	p->po_ok = 0;
+	lazy_update(p);
+}
+
+/* set before the Propeller runs: fn gets the changes of a lazy cog's pins, which must all be in mask; NULL: none */
+void prop_set_pins_lazy(pinheck_prop *p, prop_pins_fn fn, void *ctx, uint32_t mask)
+{
+	p->pins_lazy = fn;
+	p->pins_lazy_ctx = ctx;
+	p->lazy_mask = mask;
+	lazy_update(p);
 }
 
 void prop_set_sound(pinheck_prop *p, prop_ctr_fn ctr, prop_pins_fn pins, void *ctx)

@@ -18,6 +18,7 @@ struct P8Jit {
 	JitRuntime rt;
 	std::vector<p8x32a_jblk *> blocks;
 	uint64_t tail, tail_ret; // the code a block leaves through, and its return to run_local
+	uint64_t ltail, ltail_ret; // the same for a lazy cog's blocks
 };
 
 enum { OP_ROR = 0x08, OP_ROL, OP_SHR, OP_SHL, OP_RCR, OP_RCL, OP_SAR, OP_MOVS = 0x14, OP_MOVD, OP_MOVI, OP_JMP,
@@ -39,12 +40,16 @@ bool op_ok(unsigned op)
 	       (op >= OP_DJNZ && op <= OP_TJZ);
 }
 
-// a fixed word run_local() would run as a local instruction
-bool supported(uint32_t i)
+// a fixed word run_local() would run as a local instruction; with outa, also a write to OUTA or a hub read without
+// WC (a lazy cog's)
+bool supported(uint32_t i, int outa)
 {
-	if (!op_ok(op_of(i))) return false;
+	unsigned op = op_of(i);
+	if (outa && op <= 2) return fwr(i) && !fwc(i) && dst_of(i) < 0x1F0 && (fim(i) || src_of(i) < 0x1F0);
+	if (!op_ok(op)) return false;
 	if (!fim(i) && src_of(i) >= 0x1F0) return false;
-	if (fwr(i) && dst_of(i) >= 0x1F0) return false;
+	if (fwr(i) && dst_of(i) >= 0x1F0)
+		return outa && dst_of(i) == 0x1F4 && ((op >= OP_ROR && op <= OP_SAR) || (op >= OP_MOVS && op <= OP_MOVI) || (op >= OP_AND && op <= OP_SUB) || op == OP_MOV);
 	return true;
 }
 
@@ -153,6 +158,38 @@ struct Emit {
 			a.mov(x86::edx, cog(dst_of(i)));
 		}
 		switch (op) {
+		case 0: case 1: case 2: {
+			// a lazy cog's hub read: it waits for the cog's slot (next_slot), which must come by st.tl
+			Label late = a.new_label(), sb = a.new_label(), got = a.new_label(), on = a.new_label();
+			a.lea(x86::rax, x86::ptr(T2, (int)(4 * k + 1)));
+			a.mov(x86::rdi, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, slot)));
+			a.cmp(x86::rax, x86::rdi);
+			a.jbe(sb);
+			a.sub(x86::rax, x86::rdi);
+			a.add(x86::rax, 15);
+			a.and_(x86::rax, -16);
+			a.add(x86::rax, x86::rdi);
+			a.jmp(got);
+			a.bind(sb);
+			a.mov(x86::rax, x86::rdi);
+			a.bind(got);
+			a.lea(x86::rdi, x86::ptr(x86::rax, 2));
+			a.cmp(x86::rdi, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, tl)));
+			a.jbe(on);
+			a.bind(late);
+			a.mov(x86::esi, i);
+			stop_before(k, x86::esi);
+			a.bind(on);
+			// the next instruction starts at latch + 7
+			a.mov(x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, latch)), x86::rax);
+			a.lea(T2, x86::ptr(x86::rax, (int)(7 - 4 * (k + 1))));
+			a.and_(x86::ecx, 0xFFFF);
+			a.mov(x86::rdi, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, hub)));
+			if (op == 0) a.movzx(x86::eax, x86::byte_ptr(x86::rdi, x86::rcx));
+			else if (op == 1) { a.and_(x86::ecx, 0xFFFE); a.movzx(x86::eax, x86::word_ptr(x86::rdi, x86::rcx)); }
+			else { a.and_(x86::ecx, 0xFFFC); a.mov(x86::eax, x86::dword_ptr(x86::rdi, x86::rcx)); }
+			break;
+		}
 		case OP_ROR: a.mov(x86::eax, x86::edx); a.ror(x86::eax, x86::cl); a.mov(x86::r11d, x86::edx); a.and_(x86::r11d, 1); break;
 		case OP_ROL: a.mov(x86::eax, x86::edx); a.rol(x86::eax, x86::cl); a.mov(x86::r11d, x86::edx); a.shr(x86::r11d, 31); break;
 		case OP_SHR: a.mov(x86::eax, x86::edx); a.shr(x86::eax, x86::cl); a.mov(x86::r11d, x86::edx); a.and_(x86::r11d, 1); break;
@@ -259,6 +296,16 @@ struct Emit {
 			a.add(x86::esi, x86::esi);
 			a.or_(FL, x86::esi);
 		}
+		if (!dyn && fwr(i) && dst_of(i) == 0x1F4) {
+			// a lazy cog's OUTA write: its time (this instruction's + 2) and value go to st's list
+			a.mov(x86::rsi, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, ot)));
+			a.mov(x86::edi, stf(offsetof(p8x32a_jst, on)));
+			a.lea(x86::r11, x86::ptr(T2, (int)(4 * k + 2)));
+			a.mov(x86::qword_ptr(x86::rsi, x86::rdi, 3), x86::r11);
+			a.mov(x86::rsi, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, ov)));
+			a.mov(x86::dword_ptr(x86::rsi, x86::rdi, 2), x86::eax);
+			a.inc(stf(offsetof(p8x32a_jst, on)));
+		}
 		if (jump) leave(k + 1);
 		a.bind(skip);
 	end:
@@ -279,7 +326,7 @@ struct Emit {
 
 // After a block: account for the k (eax) instructions it ran, do run_local's loop_edge search step for a backward
 // jump, and continue in the block at the next address when nothing needs run_local.
-bool build_tail(P8Jit *j)
+bool build_tail(P8Jit *j, bool lazy)
 {
 	CodeHolder code;
 	code.init(j->rt.environment());
@@ -294,6 +341,11 @@ bool build_tail(P8Jit *j)
 	a.add(TOTAL, x86::eax);
 	a.lea(T2, x86::ptr(T2, x86::rax, 2));
 	a.sub(BUDGET, x86::eax);
+	if (lazy) {
+		// a block that stopped before its first slot, at its time limit
+		a.test(x86::eax, x86::eax);
+		a.jz(ret);
+	}
 	a.mov(L, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, loop)));
 	a.add(x86::word_ptr(L, (int)offsetof(p8x32a_loop, nins)), x86::ax);
 	// a backward jump: the loop search state (loop_edge in SEARCH)
@@ -335,6 +387,10 @@ bool build_tail(P8Jit *j)
 	a.jne(ret);
 	a.cmp(stf(offsetof(p8x32a_jst, jc)), 0);
 	a.jne(ret);
+	if (lazy) {
+		a.cmp(stf(offsetof(p8x32a_jst, on)), P8X32A_JOUT - P8X32A_JMAX);
+		a.jae(ret);
+	}
 	a.mov(x86::ecx, stf(offsetof(p8x32a_jst, px)));
 	a.cmp(x86::ecx, 511);
 	a.je(ret);
@@ -368,8 +424,13 @@ bool build_tail(P8Jit *j)
 	a.emit_epilog(frame);
 	void *fn = NULL;
 	if (j->rt.add(&fn, &code) != kErrorOk) return false;
-	j->tail = (uint64_t)(uintptr_t)fn;
-	j->tail_ret = j->tail + code.label_offset(ret);
+	if (lazy) {
+		j->ltail = (uint64_t)(uintptr_t)fn;
+		j->ltail_ret = j->ltail + code.label_offset(ret);
+	} else {
+		j->tail = (uint64_t)(uintptr_t)fn;
+		j->tail_ret = j->tail + code.label_offset(ret);
+	}
 	return true;
 }
 
@@ -378,7 +439,7 @@ bool build_tail(P8Jit *j)
 extern "C" void *p8x32a_jit_new(void)
 {
 	P8Jit *j = new (std::nothrow) P8Jit();
-	if (j && !build_tail(j)) { delete j; j = NULL; }
+	if (j && (!build_tail(j, false) || !build_tail(j, true))) { delete j; j = NULL; }
 	return j;
 }
 
@@ -393,7 +454,7 @@ extern "C" void p8x32a_jit_free(void *jit)
 	delete j;
 }
 
-extern "C" p8x32a_jblk *p8x32a_jit_build(void *jit, p8x32a_jblk *old, unsigned a, uint32_t ix, const uint32_t *ram, const uint32_t *var)
+extern "C" p8x32a_jblk *p8x32a_jit_build(void *jit, p8x32a_jblk *old, unsigned a, uint32_t ix, const uint32_t *ram, const uint32_t *var, int outa)
 {
 	P8Jit *j = (P8Jit *)jit;
 	p8x32a_jblk *b = old;
@@ -416,14 +477,15 @@ extern "C" p8x32a_jblk *p8x32a_jit_build(void *jit, p8x32a_jblk *old, unsigned a
 	b->len = 0;
 	b->valid = 1;
 	b->dyn = 0;
+	b->part = outa != 0;
 	b->words[0] = ix;
 	// the run: translatable words below the special registers, ending at an unconditional jump or a slot whose D field may point
 	// anywhere; a slot whose op, flags or condition have changed is not translated
 	while (len < P8X32A_JMAX && a + len < 0x1F0) {
 		uint32_t w = len ? ram[a + len] : ix, v = var[a + len];
 		bool dyn = v != 0;
-		if ((v & ~P8X32A_JDYN) || !op_ok(op_of(w))) break;
-		if (!dyn && !supported(w)) break;
+		if ((v & ~P8X32A_JDYN) || !(op_ok(op_of(w)) || (outa && op_of(w) <= 2 && !dyn))) break;
+		if (!dyn && !supported(w, outa)) break;
 		b->words[len] = w;
 		if (dyn) b->dyn |= 1u << len;
 		len++;
@@ -457,9 +519,22 @@ extern "C" p8x32a_jblk *p8x32a_jit_build(void *jit, p8x32a_jblk *old, unsigned a
 	as.mov(BUDGET, stf(offsetof(p8x32a_jst, budget)));
 	as.xor_(TOTAL, TOTAL);
 	as.bind(body);
-	Emit e = { as, frame, a, j->tail, j->tail_ret };
+	Emit e = { as, frame, a, outa ? j->ltail : j->tail, outa ? j->ltail_ret : j->tail_ret };
 	for (k = 0; k < len; k++) {
 		bool last = k + 1 == len, next_dyn = !last && (b->dyn >> (k + 1) & 1);
+		if (outa) {
+			// a lazy cog's block runs while its instructions start by st.tl
+			Label go = as.new_label();
+			as.lea(x86::rsi, x86::ptr(T2, (int)(4 * k)));
+			as.cmp(x86::rsi, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, tl)));
+			as.jbe(go);
+			if (b->dyn >> k & 1) e.stop_before(k, NEXTW);
+			else {
+				as.mov(x86::esi, b->words[k]);
+				e.stop_before(k, x86::esi);
+			}
+			as.bind(go);
+		}
 		e.insn(k, b->words[k], (b->dyn >> k & 1) != 0, last, last || next_dyn);
 	}
 	uint32_t (*fn)(p8x32a_jst *) = NULL;
@@ -472,9 +547,9 @@ extern "C" p8x32a_jblk *p8x32a_jit_build(void *jit, p8x32a_jblk *old, unsigned a
 #else
 extern "C" void *p8x32a_jit_new(void) { return NULL; }
 extern "C" void p8x32a_jit_free(void *jit) { (void)jit; }
-extern "C" p8x32a_jblk *p8x32a_jit_build(void *jit, p8x32a_jblk *old, unsigned a, uint32_t ix, const uint32_t *ram, const uint32_t *var)
+extern "C" p8x32a_jblk *p8x32a_jit_build(void *jit, p8x32a_jblk *old, unsigned a, uint32_t ix, const uint32_t *ram, const uint32_t *var, int outa)
 {
-	(void)jit; (void)old; (void)a; (void)ix; (void)ram; (void)var;
+	(void)jit; (void)old; (void)a; (void)ix; (void)ram; (void)var; (void)outa;
 	return NULL;
 }
 #endif

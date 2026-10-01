@@ -22,6 +22,8 @@ typedef struct p8x32a_bus {
 	void (*log)(void *ctx, const char *msg);
 	void (*ctr_state)(void *ctx, uint64_t t, int cog, int ctr, uint32_t ctr_reg, uint32_t frq); /* ctr: 0 = A, 1 = B; t = cycle the change takes effect */
 	uint32_t pure_in; /* input pins that change only at pins_next edges, never inside pins_out; 0 = none */
+	void (*lazy)(void *ctx, uint64_t t, uint32_t mask, uint32_t out, uint32_t dir); /* from t a lazy cog has pins mask (0: none) */
+	void (*lazy_pins)(void *ctx, uint64_t t, uint32_t out, uint32_t dir);   /* a change of the lazy cog's pins (only those) */
 } p8x32a_bus;
 
 typedef struct p8x32a_reg {
@@ -80,18 +82,26 @@ typedef struct p8x32a_jst {
 	uint64_t t2;
 	uint32_t budget, ix, fl, pc, px, nix, jmp, jc, edge, w, s, d; /* pc: of the last instruction run */
 	uint32_t inv, inv_old; /* 0, or the slot + 1 and its old word; ~0: more than one */
+	uint32_t on;           /* OUTA writes of a lazy cog's block: their times and values, in order */
+	uint64_t *ot;
+	uint32_t *ov;
+	uint64_t tl, slot;     /* a lazy cog's blocks: the last time an instruction or hub read may start; its first hub slot */
+	uint64_t latch;        /* and the slot of the last hub read they ran, 0 if none */
+	const uint8_t *hub;
 } p8x32a_jst;
+#define P8X32A_JOUT 256 /* the OUTA writes a run of blocks may leave */
 
 struct p8x32a_jblk {
 	uint32_t (*fn)(p8x32a_jst *st);
 	const void *body; /* entry for a block reached from another */
-	unsigned len, valid;
+	unsigned len, valid, part; /* part: stops before the slot its budget does not reach (a lazy cog's block) */
 	uint32_t words[P8X32A_JMAX], dyn; /* dyn: bit k set, slot k is read at run time */
 };
 
 /* translate the run at cog address a: ix, then the words after it in ram; var[k] holds the bits in which slot k
-   has changed (0: fixed, only S/D: read at run time, else not translated); old is the block this one replaces */
-typedef p8x32a_jblk *(*p8x32a_jit_fn)(void *jit, p8x32a_jblk *old, unsigned a, uint32_t ix, const uint32_t *ram, const uint32_t *var);
+   has changed (0: fixed, only S/D: read at run time, else not translated); old is the block this one replaces;
+   outa: OUTA writes are translated too, each left in st's ot/ov (a lazy cog) */
+typedef p8x32a_jblk *(*p8x32a_jit_fn)(void *jit, p8x32a_jblk *old, unsigned a, uint32_t ix, const uint32_t *ram, const uint32_t *var, int outa);
 
 /* a decoded instruction word, valid while word matches the instruction being run */
 typedef struct p8x32a_dec {
@@ -120,6 +130,13 @@ typedef struct p8x32a {
 	uint32_t reg_out, reg_dir, cog_dir[8], cog_out[8], nco_lvl[16];
 	uint64_t nco_from[16], nco_nt[16];
 	uint8_t sleepers;
+	uint8_t lz_on, lz, lz_nh;   /* the lazy cog; its pin changes waiting for their time */
+	uint32_t lazy_ok;           /* pins a lazy cog may drive (host: only bus.lazy_pins watches them); 0 = none */
+	uint32_t lz_pins, lz_out, lz_hout[4];
+	p8x32a_reg lz_reg;          /* the lazy cog's OUTA */
+	uint64_t lz_at, lz_to, lz_evt, lz_ht[4], lz_try[8]; /* lz_evt: its next event (its ev_t is out of the schedule) */
+	uint32_t lz_wait[8];
+	uint64_t lazies;            /* lazy cogs entered */
 	unsigned sched_gen; /* counts changes one cog makes to another cog's next event */
 	uint64_t sleeps; /* idle loops entered */
 	p8x32a_loop loop[8];
@@ -129,6 +146,8 @@ typedef struct p8x32a {
 	p8x32a_jblk *jblk[8][512];
 	uint32_t jvar[8][512];
 	uint8_t jcode[8][64];
+	uint64_t jot[P8X32A_JOUT];
+	uint32_t jov[P8X32A_JOUT];
 } p8x32a;
 
 void p8x32a_init(p8x32a *p, const p8x32a_bus *bus);

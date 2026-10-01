@@ -14,7 +14,7 @@
 static p8x32a chip;
 static cat24m01 ee;
 static uint8_t eemem[0x20000];
-static int have_ee, have_sd, notrace, sleeps;
+static int have_ee, have_sd, notrace, sleeps, nolazy, lazies;
 static sd_card sd;
 static vfat vf;
 static zipsrc zs;
@@ -64,7 +64,8 @@ static uint64_t pins_next(void *ctx, uint64_t t)
 	return P8X32A_NEVER;
 }
 
-static int rank(const struct ev *e) { return e->line[0] == 'P' ? 0 : e->line[0] == 'K' ? 1 : 2; }
+/* N, L, M: the core's pin changes outside a lazy cog's pins, that cog's pin changes, its pins from then on; merged into P */
+static int rank(const struct ev *e) { return strchr("PNLM", e->line[0]) ? 0 : e->line[0] == 'K' ? 1 : 2; }
 
 static int evcmp(const void *a, const void *b)
 {
@@ -93,9 +94,27 @@ static void pins_out(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 	if (notrace) return;
 	{
 		char b[48];
-		sprintf(b, "P %llu %08x %08x", (unsigned long long)t, (unsigned)out, (unsigned)dir);
+		sprintf(b, "N %llu %08x %08x", (unsigned long long)t, (unsigned)out, (unsigned)dir);
 		emit(t, b);
 	}
+}
+
+static void lazy(void *ctx, uint64_t t, uint32_t mask, uint32_t out, uint32_t dir)
+{
+	char b[64];
+	(void)ctx;
+	if (notrace) return;
+	sprintf(b, "M %llu %08x %08x %08x", (unsigned long long)t, (unsigned)mask, (unsigned)out, (unsigned)dir);
+	emit(t, b);
+}
+
+static void lazy_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
+{
+	char b[48];
+	(void)ctx;
+	if (notrace) return;
+	sprintf(b, "L %llu %08x %08x", (unsigned long long)t, (unsigned)out, (unsigned)dir);
+	emit(t, b);
 }
 
 static void node_path(int n, char *out)
@@ -209,7 +228,7 @@ static uint64_t halted(void)
 
 int main(int argc, char **argv)
 {
-	p8x32a_bus bus = { NULL, pins_in, pins_next, pins_out, cog_start, clkset, logmsg, ctr_state, ~0x30000001u };
+	p8x32a_bus bus = { NULL, pins_in, pins_next, pins_out, cog_start, clkset, logmsg, ctr_state, ~0x30000001u, lazy, lazy_pins };
 	const char *rom = NULL, *ram = NULL, *eep = NULL, *dump = NULL;
 	unsigned long long limit = 1000000, t, end, quantum = 4096;
 	int halt = 0, i;
@@ -225,7 +244,9 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "-stop") && i + 2 < argc) { stop_cog = atoi(argv[i + 1]); stop_ptr = (uint32_t)strtoul(argv[i + 2], NULL, 16); i += 2; }
 		else if (!strcmp(argv[i], "-halt")) halt = 1;
 		else if (!strcmp(argv[i], "-notrace")) notrace = 1;
+		else if (!strcmp(argv[i], "-nolazy")) nolazy = 1;
 		else if (!strcmp(argv[i], "-sleeps")) sleeps = 1;
+		else if (!strcmp(argv[i], "-lazies")) lazies = 1;
 		else if (!strcmp(argv[i], "-ctrlog") && i + 1 < argc) { if (!(ctrlog = fopen(argv[++i], "w"))) { perror(argv[i]); return 2; } }
 		else if (!strcmp(argv[i], "-uart") && i + 2 < argc) {
 			uint64_t t0 = strtoull(argv[i + 1], NULL, 0);
@@ -262,6 +283,8 @@ int main(int argc, char **argv)
 	if ((chip.jit = p8x32a_jit_new()) != NULL) chip.jit_build = p8x32a_jit_build;
 #endif
 	if (!load(rom, chip.hub + 0x8000, 0x8000, &n) || n != 0x8000) { fprintf(stderr, "p8run: rom must be 32768 bytes\n"); return 2; }
+	/* a cog may run lazily on any pin no device here watches */
+	chip.lazy_ok = nolazy ? 0 : ~((have_ee ? 0x30000000u : 0) | (have_sd ? 0xFu : 0));
 	if (ram && !load(ram, chip.hub, 0x8000, &n)) return 2;
 	if (eep) {
 		memset(eemem, 0xFF, sizeof(eemem));
@@ -282,12 +305,38 @@ int main(int argc, char **argv)
 	}
 	{
 		size_t k;
+		uint32_t no = 0, nd = 0, lm = 0, lo = 0, ld = 0, po = 0, pd = 0;
 		qsort(evs, nev, sizeof(*evs), evcmp);
-		for (k = 0; k < nev; k++)
-			if (evs[k].t < end) printf("%s\n", evs[k].line);
+		for (k = 0; k < nev; k++) {
+			const char *l = evs[k].line;
+			unsigned long long t;
+			unsigned a, b, c;
+			if (evs[k].t >= end) continue;
+			if (!strchr("NLM", l[0])) { printf("%s\n", l); continue; }
+			if (l[0] == 'N') { sscanf(l + 2, "%llu %x %x", &t, &a, &b); no = a; nd = b; }
+			else if (l[0] == 'L') { sscanf(l + 2, "%llu %x %x", &t, &a, &b); lo = a; ld = b; }
+			else {
+				/* a lazy cog's pins go back to the core's trace as they last were */
+				sscanf(l + 2, "%llu %x %x %x", &t, &a, &b, &c);
+				no = (no & ~lm) | lo;
+				nd = (nd & ~lm) | ld;
+				lm = a;
+				lo = b;
+				ld = c;
+			}
+			/* one P line for the pins at the end of each cycle that changes them */
+			if (k + 1 < nev && evs[k + 1].t == evs[k].t && strchr("NLM", evs[k + 1].line[0])) continue;
+			{
+				uint32_t o = (no & ~lm) | lo, d = (nd & ~lm) | ld;
+				if (o != po || d != pd) printf("P %llu %08x %08x\n", (unsigned long long)evs[k].t, (unsigned)o, (unsigned)d);
+				po = o;
+				pd = d;
+			}
+		}
 	}
 	printf("E %llu\n", end);
 	if (sleeps) fprintf(stderr, "p8run: %llu idle-loop sleeps\n", (unsigned long long)chip.sleeps);
+	if (lazies) fprintf(stderr, "p8run: %llu lazy cogs\n", (unsigned long long)chip.lazies);
 	if (dump) {
 		FILE *f = fopen(dump, "wb");
 		if (!f) { perror(dump); return 2; }

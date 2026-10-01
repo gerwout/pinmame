@@ -621,6 +621,14 @@ static void pinheck_dmd_pins_cb(void *ctx, uint64_t t, uint32_t out, uint32_t di
 	if (dmd_proof) pinheck_dmd_pins(&dmd_row, t, out, dir);
 }
 
+/* the scan cog running lazily (p8x32a.h): the changes of its pins */
+static void pinheck_dmd_lazy_cb(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
+{
+	(void)ctx;
+	pinheck_dmd_pins(&dmd, t, out, dir);
+	if (dmd_proof) pinheck_dmd_pins(&dmd_row, t, out, dir);
+}
+
 /* test hook PINHECK_DMD_LOG: at each vblank, the number of subframes the decoder queued since the last (uint32) and
    those subframes, as the core is to get them */
 static FILE *dmd_log;
@@ -681,8 +689,10 @@ static void pinheck_disp_init(void)
 		ser.level = 1;
 		ser.bit = -1;
 		prop_set_pins_mask(&prop, DMD_ALL_PINS | (ser_log ? PINHECK_SER_PIN : 0));
+		if (!getenv("PINHECK_LAZY") || atoi(getenv("PINHECK_LAZY")) != 0) prop_set_pins_lazy(&prop, pinheck_dmd_lazy_cb, NULL, DMD_ALL_PINS);
 		return;
 	}
+	prop_set_pins_lazy(&prop, NULL, NULL, 0);
 	prop_set_pins(&prop, pinheck_disp_pins, NULL);
 	prop_set_pins_mask(&prop, DISPLAY_P17 | DISPLAY_P20 | DISPLAY_P21 | DISPLAY_P22);
 }

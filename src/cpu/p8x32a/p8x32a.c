@@ -3,6 +3,18 @@
 #include <string.h>
 
 enum { EV_NONE, EV_HUB, EV_EXEC, EV_DONE, EV_WAITPIN, EV_RESTART, EV_SLEEP };
+
+/* run_local's helpers stay in its loop */
+#if defined(__GNUC__)
+#define P8_INLINE static __inline__ __attribute__((always_inline))
+#define P8_COLD static __attribute__((noinline))
+#elif defined(_MSC_VER)
+#define P8_INLINE static __forceinline
+#define P8_COLD static __declspec(noinline)
+#else
+#define P8_INLINE static
+#define P8_COLD static
+#endif
 enum { LOOP_SEARCH, LOOP_RECORD, LOOP_SLEEP };
 
 #define OP(i)   ((unsigned)((i) >> 26))
@@ -15,7 +27,7 @@ enum { LOOP_SEARCH, LOOP_RECORD, LOOP_SLEEP };
 #define SRC(i)  ((i) & 511)
 
 enum {
-	LOG_WAITVID = 1, LOG_CTR_MODE = 2, LOG_CTR_OUT = 4, LOG_REBOOT = 8
+	LOG_WAITVID = 1, LOG_CTR_MODE = 2, LOG_CTR_OUT = 4, LOG_REBOOT = 8, LOG_LAZY = 16
 };
 
 static const uint8_t unscr[32] = {
@@ -47,7 +59,26 @@ static uint32_t rd32(const p8x32a *p, uint32_t a)
 static uint32_t regval(const p8x32a_reg *r, uint64_t t) { return t >= r->at ? r->cur : r->prev; }
 
 static void loop_notify(p8x32a *p, uint64_t t, uint32_t pins);
-static void jit_write(p8x32a *p, int n, unsigned s, uint32_t old);
+static void jit_written(p8x32a *p, int n, unsigned s, uint32_t old);
+P8_INLINE void jit_write(p8x32a *p, int n, unsigned s, uint32_t old)
+{
+	if (p->jit_build && (p->jcode[n][s >> 3] >> (s & 7) & 1)) jit_written(p, n, s, old);
+}
+
+P8_COLD void lazy_run(p8x32a *p, uint64_t t);
+static void lazy_exit(p8x32a *p);
+/* the lazy cog catches up to t */
+#define lazy_catch(p, t) do { if ((p)->lz_on && (t) > (p)->lz_at) lazy_run((p), (t)); } while (0)
+
+/* a hub write at h that changes a byte: the lazy cog reads hub RAM as it was before it */
+P8_COLD void lazy_write(p8x32a *p, unsigned ha, unsigned sz, uint32_t v, uint64_t h)
+{
+	unsigned k;
+	for (k = 0; k < sz; k++)
+		if (p->hub[ha + k] != (uint8_t)(v >> (8 * k))) { lazy_catch(p, h - 1); return; }
+}
+static void jit_drop(p8x32a *p, int n);
+
 
 /* a pin change at t; pins = the pins it may change, what = the registers that change (P8X32A_PEND_COG(n): cog n's
    OUTA or DIRA, P8X32A_PEND_CTR(j): counter j = 2 * cog + A/B) */
@@ -150,6 +181,8 @@ uint32_t p8x32a_pins(p8x32a *p, uint64_t t, uint32_t *dir)
 {
 	uint32_t o = 0, d = 0;
 	int n;
+	lazy_catch(p, t);
+	if (p->lz_on) o = regval(&p->lz_reg, t) & p->lz_pins;
 	for (n = 0; n < 8; n++) {
 		p8x32a_cog *c = &p->cog[n];
 		uint32_t dd = regval(&c->dira, t), v;
@@ -294,9 +327,21 @@ static void flush(p8x32a *p, uint64_t t)
 }
 
 /* after flush(t) the pins at t are the last flushed state */
-static uint32_t ina(p8x32a *p, uint64_t t)
+/* INA with a lazy cog: its pins from its own register */
+P8_COLD uint32_t ina_lazy(p8x32a *p, uint64_t t)
 {
 	uint32_t ext;
+	lazy_catch(p, t);
+	flush(p, t);
+	ext = p->bus.pins_in ? p->bus.pins_in(p->bus.ctx, t) : 0;
+	return (((p->last_dir & p->last_out) | (~p->last_dir & ext)) & ~p->lz_pins) | (regval(&p->lz_reg, t) & p->lz_pins);
+}
+
+/* INA for a use that sees only the pins in m (AND/ANDN with D = m, a wait's mask): the lazy cog's pins only if m has them */
+static uint32_t ina(p8x32a *p, uint64_t t, uint32_t m)
+{
+	uint32_t ext;
+	if (p->lz_on && (m & p->lz_pins)) return ina_lazy(p, t);
 	flush(p, t);
 	ext = p->bus.pins_in ? p->bus.pins_in(p->bus.ctx, t) : 0;
 	return (p->last_dir & p->last_out) | (~p->last_dir & ext);
@@ -377,11 +422,48 @@ static void ctr_notify(p8x32a *p, int n, int k, uint64_t t)
 	if (p->bus.ctr_state) p->bus.ctr_state(p->bus.ctx, t, n, k, c->ctr[k], c->frq[k]);
 }
 
+/* the lazy cog's OUTA write taking effect at e: its pins go to bus.lazy_pins once the catch-up reaches e */
+static void lazy_outa(p8x32a *p, uint32_t v, uint64_t e)
+{
+	p8x32a_reg *r = &p->lz_reg;
+	uint32_t g = v & p->lz_pins;
+	if (e > r->at) r->prev = r->cur;
+	r->cur = v;
+	r->at = e;
+	if (g == (p->lz_nh ? p->lz_hout[p->lz_nh - 1] : p->lz_out)) return;
+	if (e > p->lz_to || p->lz_nh) {
+		if (p->lz_nh == 4) { log_once(p, LOG_LAZY, "p8x32a: lazy cog's pin changes overflow"); return; }
+		p->lz_ht[p->lz_nh] = e;
+		p->lz_hout[p->lz_nh++] = g;
+		return;
+	}
+	p->lz_out = g;
+	if (p->bus.lazy_pins) p->bus.lazy_pins(p->bus.ctx, e, g, p->lz_pins);
+}
+
+/* the waiting changes of the lazy cog's pins up to t */
+static void lazy_due(p8x32a *p, uint64_t t)
+{
+	int k = 0, j;
+	while (k < p->lz_nh && p->lz_ht[k] <= t) {
+		p->lz_out = p->lz_hout[k];
+		if (p->bus.lazy_pins) p->bus.lazy_pins(p->bus.ctx, p->lz_ht[k], p->lz_out, p->lz_pins);
+		k++;
+	}
+	for (j = k; j < p->lz_nh; j++) { p->lz_ht[j - k] = p->lz_ht[j]; p->lz_hout[j - k] = p->lz_hout[j]; }
+	p->lz_nh = (uint8_t)(p->lz_nh - k);
+}
+
 static void special_write(p8x32a *p, int n, unsigned a, uint32_t v, uint64_t m3)
 {
 	p8x32a_cog *c = &p->cog[n];
 	uint64_t e = m3 + 1;
 	int k = a & 1;
+	if (p->lz_on) {
+		if (n == p->lz && a == 0x1F4) { lazy_outa(p, v, e); return; }
+		/* another cog drives the lazy cog's pins: it runs as the others from here */
+		if ((a == 0x1F6 && (v & p->lz_pins)) || ((a == 0x1F8 || a == 0x1F9) && (nco_pins(v) & p->lz_pins))) lazy_exit(p);
+	}
 	switch (a) {
 	case 0x1F4: regset(p, n, &c->outa, v, e); break;
 	case 0x1F6: if (e < c->disable_at) regset(p, n, &c->dira, v, e); break;
@@ -399,7 +481,7 @@ static uint32_t sread(p8x32a *p, int n, unsigned a, uint64_t t)
 	switch (a) {
 	case 0x1F0: return (c->ptr >> 14) << 2;
 	case 0x1F1: return cnt(p, t);
-	case 0x1F2: return ina(p, t);
+	case 0x1F2: return ina(p, t, 0xFFFFFFFFu);
 	case 0x1FC: return phs_at(c, 0, t);
 	case 0x1FD: return phs_at(c, 1, t);
 	}
@@ -602,7 +684,9 @@ static int loop_same(p8x32a *p, int n, uint64_t t)
 	p8x32a_loop *l = &p->loop[n];
 	int k;
 	if (l->nin) {
-		uint32_t v = ina(p, t);
+		uint32_t v, m = 0;
+		for (k = 0; k < l->nin; k++) m |= l->in_mask[k];
+		v = ina(p, t, m);
 		for (k = 0; k < l->nin; k++)
 			if ((v & l->in_mask[k]) != l->in_val[k]) return 0;
 	}
@@ -674,7 +758,7 @@ static void loop_edge(p8x32a *p, int n, unsigned head, uint64_t t)
 		if (head == l->head || l->nins > P8X32A_PAT / 2) { l->edge = 1; l->edge_head = (uint16_t)head; l->edge_t = t; }
 		return;
 	}
-	if (head == l->head && !l->dirty && l->nins <= P8X32A_PAT / 2 && t > l->head_t) {
+	if (head == l->head && !l->dirty && l->nins <= P8X32A_PAT / 2 && t > l->head_t && !(p->lz_on && n == p->lz)) {
 		l->state = LOOP_RECORD;
 		l->period = t - l->head_t;
 		l->nins0 = l->nins;
@@ -719,6 +803,8 @@ static void loop_post(p8x32a *p, int n)
 	if (!same || !loop_same(p, n, p->now)) { loop_reset(l); return; }
 	for (k = 0; k < l->nin; k++) m |= l->in_mask[k];
 	l->wake = (m & ~p->bus.pure_in) ? 0xFFFFFFFFu : m;
+	/* the lazy cog's pin changes are no pending points */
+	if (p->lz_on && (l->wake & p->lz_pins)) { loop_reset(l); return; }
 	l->t0 = c->ev_t;
 	l->state = LOOP_SLEEP;
 	p->sleepers |= (uint8_t)(1u << n);
@@ -816,6 +902,7 @@ static void sys(p8x32a *p, int n, uint64_t h)
 	while (newx < 7 && (enc >> newx & 1)) newx++;
 	num = ((op == 2 && (dc & 8)) || op == 4) ? newx : (dc & 7);
 	bit = (uint8_t)(1u << num);
+	if (p->lz_on && (op == 2 || op == 3) && num == p->lz) lazy_exit(p);
 	if (op == 2 || op == 3) {
 		if (p->sleepers >> num & 1) loop_resume(p, (int)num, h);
 		loop_reset(&p->loop[num]);
@@ -833,6 +920,7 @@ static void sys(p8x32a *p, int n, uint64_t h)
 			p8x32a_cog *t = &p->cog[num];
 			t->ptr = dc >> 4;
 			if (p->bus.cog_start) p->bus.cog_start(p->bus.ctx, h, (int)num, t->ptr);
+			p->lz_try[num] = p->lz_wait[num] = 0;
 			stop_cog(p, (int)num, h + 1);
 			t->restart_at = h + 4;
 			if (!(t->ev == EV_HUB && t->latch <= h) && (int)num != n) idle(p, (int)num);
@@ -877,6 +965,7 @@ static void do_hub(p8x32a *p, int n)
 			uint32_t v = c->d;
 			unsigned sz = op == 2 ? 4 : op == 1 ? 2 : 1, ha = a & ~(sz - 1), k;
 			int changed = 0;
+			if (p->lz_on) lazy_write(p, ha, sz, v, h);
 			for (k = 0; k < sz; k++) {
 				changed |= p->hub[ha + k] != (uint8_t)(v >> (8 * k));
 				p->hub[ha + k] = (uint8_t)(v >> (8 * k));
@@ -900,13 +989,14 @@ static void wait_pins(p8x32a *p, int n)
 	int k, match;
 
 	if (t + 2 >= c->disable_at) { idle(p, n); return; }
-	match = ((ina(p, t) & c->s) == c->d) ^ (OP(c->i) == 0x3D);
+	if (p->lz_on && (c->s & p->lz_pins)) lazy_exit(p);
+	match = ((ina(p, t, c->s) & c->s) == c->d) ^ (OP(c->i) == 0x3D);
 	if (match) { c->ev = EV_DONE; c->ev_t = t + 2; return; }
 	for (k = 0; k < p->npend; k++)
 		if (p->pend[k] > t && p->pend[k] < nt) nt = p->pend[k];
 	if (ctr_next(p, t) < nt) nt = ctr_next(p, t);
 	for (k = 0; k < 8; k++)
-		if (k != n && p->cog[k].ev != EV_NONE && p->cog[k].ev_t + 1 < nt) nt = p->cog[k].ev_t + 1;
+		if (k != n && p->cog[k].ev != EV_NONE && !(p->lz_on && k == p->lz) && p->cog[k].ev_t + 1 < nt) nt = p->cog[k].ev_t + 1;
 	if (p->bus.pins_next) {
 		uint64_t e = p->bus.pins_next(p->bus.ctx, t);
 		if (e < nt) nt = e;
@@ -926,7 +1016,7 @@ static void exec(p8x32a *p, int n)
 
 	c->i = i;
 	c->cond = (uint8_t)(((COND(i) >> ((c->c << 1) | c->z)) & 1) && !c->cancel);
-	c->s = FIM(i) ? SRC(i) : sread(p, n, SRC(i), t2);
+	c->s = FIM(i) ? SRC(i) : SRC(i) == 0x1F2 ? ina(p, t2, (op == 0x18 || op == 0x19) ? c->ram[DST(i)] : 0xFFFFFFFFu) : sread(p, n, SRC(i), t2);
 	c->d = c->ram[DST(i)];
 	if (!c->run || (c->cond && (op == 3 || op >= 0x3C)) || (!FIM(i) && (SRC(i) == 0x1F1 || SRC(i) == 0x1FC || SRC(i) == 0x1FD)))
 		p->loop[n].dirty = 1;
@@ -987,7 +1077,7 @@ static int issue_local(const p8x32a_cog *c)
 }
 
 enum { K_NL, K_GEN, K_JMP, K_DJNZ, K_TJ, K_AND, K_ANDN, K_OR, K_XOR, K_ADD, K_SUB, K_MOV, K_SHL, K_SHR, K_MOVS, K_MOVD, K_MOVI };
-enum { F_IMM = 1, F_SPEC = 2, F_WR = 4, F_WC = 8, F_WZ = 16, F_INA = 32 };
+enum { F_IMM = 1, F_SPEC = 2, F_WR = 4, F_WC = 8, F_WZ = 16, F_INA = 32, F_OUTA = 64, F_HUBRD = 128 };
 
 /* decode for run_local: K_NL for an instruction it does not run as a local one; F_INA for an INA source */
 static void dec_fill(p8x32a_dec *e, uint32_t i)
@@ -1007,6 +1097,8 @@ static void dec_fill(p8x32a_dec *e, uint32_t i)
 	e->fl = (uint8_t)((FIM(i) ? F_IMM : (SRC(i) >= 0x1F0 ? F_SPEC : 0)) | (FWR(i) ? F_WR : 0) | (FWC(i) ? F_WC : 0) | (FWZ(i) ? F_WZ : 0));
 	if (!FIM(i) && SRC(i) == 0x1F2) e->fl |= F_INA;
 	if (FWR(i) && DST(i) >= 0x1F0) e->kind = K_NL;
+	if (FWR(i) && DST(i) == 0x1F4) e->fl |= F_OUTA;
+	if (op <= 2 && FWR(i) && !FWC(i)) e->fl |= F_HUBRD;
 }
 
 /* the hub access and completion of cog n's hub read or write i, with source s and destination d, due at h with
@@ -1019,6 +1111,7 @@ static unsigned hub_rw(p8x32a *p, int n, uint32_t i, uint32_t s, uint32_t d, uin
 	if (!FWR(i) && a < 0x8000) {
 		unsigned sz = op == 2 ? 4 : op == 1 ? 2 : 1, ha = a & ~(sz - 1), k;
 		int changed = 0;
+		if (p->lz_on) lazy_write(p, ha, sz, d, h);
 		for (k = 0; k < sz; k++) {
 			changed |= p->hub[ha + k] != (uint8_t)(d >> (8 * k));
 			p->hub[ha + k] = (uint8_t)(d >> (8 * k));
@@ -1044,7 +1137,7 @@ static unsigned hub_rw(p8x32a *p, int n, uint32_t i, uint32_t s, uint32_t d, uin
    special destination (not a jump, wait or system op). e decodes ix, at cog address pc - 1, due at *t2 with flags
    *fl. Returns 0 if it must wait for the scheduler; else 1, with *fl, *t2 (the next instruction's time) and *nix
    (the word fetched for the next instruction). */
-static int event_run(p8x32a *p, int n, const p8x32a_dec *e, uint32_t ix, unsigned pc, unsigned *fl, uint64_t *t2, uint32_t *nix, uint64_t t, uint64_t lim, unsigned gen)
+P8_INLINE int event_run(p8x32a *p, int n, const p8x32a_dec *e, uint32_t ix, unsigned pc, unsigned *fl, uint64_t *t2, uint32_t *nix, uint64_t t, uint64_t lim, unsigned gen)
 {
 	p8x32a_cog *c = &p->cog[n];
 	p8x32a_loop *l = &p->loop[n];
@@ -1073,7 +1166,7 @@ static int event_run(p8x32a *p, int n, const p8x32a_dec *e, uint32_t ix, unsigne
 		if (((now << 4) | 8 | (uint64_t)n) >= lim || now + 2 >= c->disable_at) return 0;
 		p->now = now;
 		if (e->fl & F_IMM) s = e->src;
-		else if (e->fl & F_INA) s = ina(p, now);
+		else if (e->fl & F_INA) s = ina(p, now, (op == 0x18 || op == 0x19) ? ram[e->dst] : 0xFFFFFFFFu);
 		else if (!(e->fl & F_SPEC)) s = ram[e->src];
 		else {
 			s = sread(p, n, e->src, now);
@@ -1105,13 +1198,9 @@ static void jit_written(p8x32a *p, int n, unsigned s, uint32_t old)
 	p->jcode[n][s >> 3] &= (uint8_t)~(1u << (s & 7));
 }
 
-static void jit_write(p8x32a *p, int n, unsigned s, uint32_t old)
-{
-	if (p->jit_build && (p->jcode[n][s >> 3] >> (s & 7) & 1)) jit_written(p, n, s, old);
-}
 
 /* the translated block for ix at cog address a */
-static p8x32a_jblk *jit_get(p8x32a *p, int n, unsigned a, uint32_t ix)
+P8_INLINE p8x32a_jblk *jit_get(p8x32a *p, int n, unsigned a, uint32_t ix)
 {
 	p8x32a_jblk *b = p->jblk[n][a];
 	uint32_t *var = p->jvar[n];
@@ -1123,7 +1212,7 @@ static p8x32a_jblk *jit_get(p8x32a *p, int n, unsigned a, uint32_t ix)
 		var[a] |= x;
 		if (var[a] & ~P8X32A_JDYN) return NULL;
 	}
-	b = p->jit_build(p->jit, b, a, ix, p->cog[n].ram, var);
+	b = p->jit_build(p->jit, b, a, ix, p->cog[n].ram, var, p->lz_on && n == p->lz);
 	p->jblk[n][a] = b;
 	if (b && b->valid)
 		for (k = 0; k < b->len; k++)
@@ -1173,19 +1262,34 @@ static int run_local(p8x32a *p, int n, uint64_t t, uint64_t lim, unsigned gen)
 		e = &dec[(pc - 1) & 511];
 		if (e->word != ix) dec_fill(e, ix);
 		/* event instructions are never translated */
-		if (p->jit_build && !(fl & 4) && e->kind != K_NL && !(e->fl & F_INA)) {
+		if (p->jit_build && !(fl & 4) && (e->kind != K_NL || ((e->fl & (F_OUTA | F_HUBRD)) && p->lz_on && n == p->lz)) && !(e->fl & F_INA)) {
 			unsigned a = (pc - 1) & 511;
 			p8x32a_jblk *b = jit_get(p, n, a, ix);
 			unsigned k;
-			if (b && b->len && t2 + 4 * (uint64_t)(b->len - 1) <= tl) {
+			if (b && b->len && (b->part ? t2 <= tl : t2 + 4 * (uint64_t)(b->len - 1) <= tl)) {
 				l->nins = (uint16_t)(l->nins + nins);
 				nins = 0;
 				st.t2 = t2;
-				st.budget = (uint32_t)((tl - t2) / 4 + 1);
+				st.budget = b->part ? 0x7FFFFFFFu : (uint32_t)((tl - t2) / 4 + 1);
 				st.ix = ix;
 				st.fl = fl & 3;
 				st.inv = st.edge = 0;
+				if (b->part) {
+					st.ot = p->jot;
+					st.ov = p->jov;
+					st.on = 0;
+					st.tl = tl;
+					st.slot = p->slot_base + 3 + 2 * (uint64_t)n;
+					st.hub = p->hub;
+					st.latch = 0;
+				}
 				k = b->fn(&st);
+				if (b->part) {
+					unsigned j;
+					if (st.latch) c->latch = st.latch;
+					for (j = 0; j < st.on; j++) lazy_outa(p, st.ov[j], st.ot[j]);
+					st.on = 0;
+				}
 			} else
 				k = 0;
 			if (k) {
@@ -1353,6 +1457,153 @@ out:
 	return done || t2 != t2in || hub || idled;
 }
 
+/* Lazy cogs. A cog whose code from its next instruction on reads hub RAM, PAR and CNT only, computes in cog RAM,
+   jumps to fixed addresses and writes OUTA, on pins no other cog or counter drives and that only the host's
+   bus.lazy_pins watches (lazy_ok), leaves the schedule and runs behind the others: it catches up before another
+   cog's hub write that changes a byte (so it reads hub RAM as it was), before an INA read and at the end of
+   run_until, and its pin changes go to bus.lazy_pins in time order instead of the pending points. A wait or a sleep
+   on its pins, another cog driving them, or a cog operation on it makes it run as the others again. */
+
+/* the cog's code from its next instruction: every reachable word passes, and none of it is written */
+static int lazy_code(const p8x32a *p, int n)
+{
+	const p8x32a_cog *c = &p->cog[n];
+	uint8_t seen[64], wr[64];
+	uint16_t todo[512];
+	int nt = 0, k;
+	memset(seen, 0, sizeof(seen));
+	memset(wr, 0, sizeof(wr));
+	todo[nt++] = (uint16_t)((c->p - 1) & 511);
+	seen[todo[0] >> 3] |= (uint8_t)(1u << (todo[0] & 7));
+	while (nt) {
+		unsigned a = todo[--nt], op, nx[2], nn = 0, j;
+		uint32_t w = c->ram[a];
+		if (a >= 0x1F0) return 0;
+		op = OP(w);
+		if (COND(w) == 0) nx[nn++] = (a + 1) & 511;
+		else {
+			if (op == 3 || op >= 0x3C) return 0;                           /* system ops, waits */
+			if (!FIM(w) && SRC(w) >= 0x1F0 && SRC(w) != 0x1F0 && SRC(w) != 0x1F1 && SRC(w) != 0x1F4) return 0; /* INA, PHS, ... */
+			if (op <= 2) {
+				if (!FWR(w) || DST(w) >= 0x1F0) return 0;                  /* hub writes */
+			} else if (FWR(w) && DST(w) >= 0x1F0 && DST(w) != 0x1F4) return 0; /* special registers but OUTA */
+			if (FWR(w) && DST(w) < 0x1F0) wr[DST(w) >> 3] |= (uint8_t)(1u << (DST(w) & 7));
+			if (op == 0x17 || (op >= 0x39 && op <= 0x3B)) {
+				if (!FIM(w)) return 0;                                       /* jumps to an address from a register */
+				nx[nn++] = SRC(w);
+				if (COND(w) != 15 || op != 0x17) nx[nn++] = (a + 1) & 511;
+			} else nx[nn++] = (a + 1) & 511;
+		}
+		for (j = 0; j < nn; j++)
+			if (!(seen[nx[j] >> 3] >> (nx[j] & 7) & 1)) {
+				seen[nx[j] >> 3] |= (uint8_t)(1u << (nx[j] & 7));
+				todo[nt++] = (uint16_t)nx[j];
+			}
+	}
+	for (k = 0; k < 64; k++)
+		if (seen[k] & wr[k]) return 0;                                          /* code it writes */
+	return 1;
+}
+
+P8_COLD void lazy_run(p8x32a *p, uint64_t t)
+{
+	p8x32a_cog *c;
+	uint64_t now;
+	c = &p->cog[p->lz];
+	now = p->now;
+	p->lz_to = t;
+	lazy_due(p, t);
+	c->ev_t = p->lz_evt;
+	while (c->ev_t <= t && (c->ev == EV_EXEC || c->ev == EV_HUB)) {
+		p->now = c->ev_t;
+		if (!run_local(p, p->lz, t, P8X32A_NEVER, p->sched_gen)) { log_once(p, LOG_LAZY, "p8x32a: lazy cog stopped"); break; }
+	}
+	lazy_due(p, t);
+	p->lz_evt = c->ev_t;
+	c->ev_t = P8X32A_NEVER; /* out of the schedule */
+	p->now = now;
+	p->lz_at = t;
+}
+
+/* the cog's translated blocks are built again: with or without its OUTA writes */
+static void jit_drop(p8x32a *p, int n)
+{
+	unsigned j;
+	for (j = 0; j < 512; j++)
+		if (p->jblk[n][j]) p->jblk[n][j]->valid = 0;
+	memset(p->jcode[n], 0, sizeof(p->jcode[n]));
+}
+
+/* at p->now: the lazy cog runs as the others from here */
+static void lazy_exit(p8x32a *p)
+{
+	p8x32a_cog *c = &p->cog[p->lz];
+	int k;
+	lazy_catch(p, p->now);
+	flush(p, p->now);
+	for (k = 0; k < p->lz_nh; k++) add_pending(p, p->lz_ht[k], p->lz_pins, P8X32A_PEND_COG(p->lz));
+	p->lz_nh = 0;
+	p->lz_on = 0;
+	c->ev_t = p->lz_evt;
+	c->outa = p->lz_reg;
+	jit_drop(p, p->lz);
+	p->pins_ok = 0;
+	p->sched_gen++;
+	p->lz_try[p->lz] = p->now + (1u << 16);
+	if (p->bus.lazy) p->bus.lazy(p->bus.ctx, p->now, 0, 0, 0);
+}
+
+/* at the end of run_until(t), with the pins flushed to t: a cog that can run lazily from its next instruction */
+static void lazy_try(p8x32a *p, uint64_t t)
+{
+	int n, k, j;
+	if (p->stop) return;
+	for (n = 0; n < 8; n++) {
+		p8x32a_cog *c = &p->cog[n];
+		uint32_t g = c->dira.cur, other = 0;
+		if (c->ev != EV_EXEC || t < p->lz_try[n]) continue;
+		/* a cog that does not qualify is looked at again after 2^14 cycles, doubling to 2^22 */
+		p->lz_wait[n] = p->lz_wait[n] ? (p->lz_wait[n] < (1u << 22) ? p->lz_wait[n] * 2 : p->lz_wait[n]) : 1u << 14;
+		p->lz_try[n] = t + p->lz_wait[n];
+		if (!c->run || (p->sleepers >> n & 1) || p->loop[n].state != LOOP_SEARCH) continue;
+		if (c->disable_at != P8X32A_NEVER || c->restart_at != P8X32A_NEVER || c->ix != c->ram[(c->p - 1) & 511]) continue;
+		if (c->ctr[0] || c->ctr[1] || c->ctr_old[0] || c->ctr_old[1] || c->ctr_at[0] > t || c->ctr_at[1] > t) continue;
+		if (!g || (g & ~p->lazy_ok) || c->dira.at > t) continue;
+		for (k = 0; k < 8; k++) {
+			const p8x32a_cog *o = &p->cog[k];
+			for (j = 0; j < 2; j++) other |= nco_pins(o->ctr[j]) | nco_pins(o->ctr_old[j]);
+			if (k == n) continue;
+			other |= regval(&o->dira, t) | o->dira.cur;
+			if ((p->sleepers >> k & 1) && (p->loop[k].wake & g)) other |= g;
+			if (o->ev == EV_WAITPIN) other |= o->s;
+		}
+		if ((other & g) || !lazy_code(p, n)) continue;
+		p->lz_on = 1;
+		p->lz = (uint8_t)n;
+		p->lz_pins = g;
+		p->lz_at = p->lz_to = t;
+		p->lz_nh = 0;
+		/* an OUTA write not in effect yet goes on the lazy path */
+		p->lz_out = regval(&c->outa, t) & g;
+		if (c->outa.at > t && ((c->outa.cur ^ c->outa.prev) & g)) {
+			p->lz_ht[0] = c->outa.at;
+			p->lz_hout[0] = c->outa.cur & g;
+			p->lz_nh = 1;
+		}
+		p->pins_ok = 0;
+		p->sched_gen++;
+		p->lazies++;
+		p->lz_evt = c->ev_t;
+		c->ev_t = P8X32A_NEVER;
+		/* its OUTA is kept in lz_reg: the pins' register part leaves it out */
+		p->lz_reg = c->outa;
+		c->outa.prev = c->outa.cur = 0;
+		jit_drop(p, n);
+		if (p->bus.lazy) p->bus.lazy(p->bus.ctx, t, g, p->lz_out, g);
+		return;
+	}
+}
+
 void p8x32a_run_until(p8x32a *p, uint64_t t)
 {
 	p->horizon = t;
@@ -1405,8 +1656,10 @@ void p8x32a_run_until(p8x32a *p, uint64_t t)
 			if ((e << 4 | (uint64_t)(b->ev != EV_HUB) << 3 | (uint64_t)best) < bk2) goto again;
 		}
 	}
+	lazy_catch(p, t);
 	flush(p, t);
 	p->now = t;
+	if (!p->lz_on && p->lazy_ok) lazy_try(p, t);
 }
 
 void p8x32a_reset(p8x32a *p, uint64_t t)
@@ -1436,6 +1689,13 @@ void p8x32a_reset(p8x32a *p, uint64_t t)
 	p->pins_ok = 0;
 	p->sleepers = 0;
 	for (n = 0; n < 8; n++) loop_reset(&p->loop[n]);
+	if (p->lz_on) {
+		jit_drop(p, p->lz);
+		if (p->bus.lazy) p->bus.lazy(p->bus.ctx, t, 0, 0, 0);
+	}
+	p->lz_on = p->lz_nh = 0;
+	memset(p->lz_try, 0, sizeof(p->lz_try));
+	memset(p->lz_wait, 0, sizeof(p->lz_wait));
 	p->flushed = t;
 	p->last_out = p->last_dir = 0;
 	p->cog[0].ptr = 0x3E00;
