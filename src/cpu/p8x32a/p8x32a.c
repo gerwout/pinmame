@@ -7,7 +7,7 @@ enum { EV_NONE, EV_HUB, EV_EXEC, EV_DONE, EV_WAITPIN, EV_RESTART, EV_SLEEP };
 
 /* run_local's helpers stay in its loop */
 #if defined(__GNUC__)
-#define P8_INLINE static __inline__ __attribute__((always_inline))
+#define P8_INLINE static __inline __attribute__((always_inline)) /* not __inline__: xpinmame defines it */
 #define P8_COLD static __attribute__((noinline))
 #elif defined(_MSC_VER)
 #define P8_INLINE static __forceinline
