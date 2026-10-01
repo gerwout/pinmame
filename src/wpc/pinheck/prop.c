@@ -359,11 +359,13 @@ int prop_p24(pinheck_prop *p, uint64_t pic_cycle)
 #define PROP_SPIN_NS 50000
 #endif
 
-enum { CMD_PINS, CMD_CATCH_UP, CMD_QUIT };
+enum { CMD_PINS, CMD_CATCH_UP, CMD_SAMPLE, CMD_QUIT };
 
 typedef struct prop_cmd { uint64_t pic, stamp; uint32_t pins; int kind; } prop_cmd;
 
 #ifdef PINHECK_NO_THREADS
+uint32_t prop_sample(pinheck_prop *p, uint64_t pic_cycle) { (void)p; (void)pic_cycle; return 0; }
+int prop_sample_get(pinheck_prop *p, uint32_t token, int wait) { (void)p; (void)token; (void)wait; return 0; }
 int prop_start_thread(pinheck_prop *p) { (void)p; return -1; }
 void prop_stop_thread(pinheck_prop *p) { (void)p; }
 void prop_sync(pinheck_prop *p) { (void)p; }
@@ -533,7 +535,14 @@ static void run_cmd(pinheck_prop *p, const prop_cmd *c)
 {
 	p->stamp = c->stamp;
 	if (c->kind == CMD_CATCH_UP) do_catch_up(p, c->pic);
-	else do_pic_pins(p, c->pic, c->pins);
+	else if (c->kind == CMD_SAMPLE) {
+		/* prop_p24's catch-up and read, on this thread */
+		uint32_t dir, out;
+		do_catch_up(p, c->pic);
+		out = p8x32a_pins(&p->chip, p->chip.now, &dir);
+		p->samp_val[c->pins % PROP_SAMPS] = (uint8_t)((dir & PIN_P24) ? (out & PIN_P24) != 0 : 0);
+		put_rel(&p->samp_done, c->pins);
+	} else do_pic_pins(p, c->pic, c->pins);
 }
 
 #ifdef _WIN32
@@ -650,6 +659,27 @@ void prop_stop_thread(pinheck_prop *p)
 #endif
 	free(w);
 	p->worker = NULL;
+}
+
+/* P24 at pic_cycle as prop_p24 reads it, read by the worker: the caller goes on and asks prop_sample_get later */
+uint32_t prop_sample(pinheck_prop *p, uint64_t pic_cycle)
+{
+	prop_worker *w = (prop_worker *)p->worker;
+	uint32_t k = ++p->samp_post;
+	p->samp_cmd[k % PROP_SAMPS] = w->tail;
+	post(p, CMD_SAMPLE, pic_cycle, k);
+	return k;
+}
+
+int prop_sample_get(pinheck_prop *p, uint32_t token, int wait)
+{
+	if ((int)(get_acq(&p->samp_done) - token) < 0) {
+		prop_worker *w = (prop_worker *)p->worker;
+		if (!wait) return -1;
+		if (w) wait_head(w, p->samp_cmd[token % PROP_SAMPS] + 1);
+		get_acq(&p->samp_done);
+	}
+	return p->samp_val[token % PROP_SAMPS];
 }
 #endif
 

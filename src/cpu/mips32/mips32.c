@@ -80,6 +80,7 @@ static void take_exception(mips32_state *s, int code, int ce)
 	int is_int = code == MIPS32_EXC_INT;
 	uint32_t off = 0x180, base;
 
+	s->exc_seq++;
 	if (s->bus.exc_hook) {
 		int h = s->bus.exc_hook(s->bus.ctx, s, code);
 		if (h == MIPS32_HOOK_SKIP) { s->pc = s->skip_pc; s->npc = s->pc + 4; s->delay = 0; return; }
@@ -429,25 +430,93 @@ static void exec_special3(mips32_state *s, uint32_t op)
 	}
 }
 
+enum { PK_W, PK_B, PK_H, PK_BU, PK_HU };
+
+static uint32_t prov_value(int kind, uint32_t v)
+{
+	switch (kind) {
+	case PK_B: return (uint32_t)(int32_t)(int8_t)v;
+	case PK_H: return (uint32_t)(int32_t)(int16_t)v;
+	case PK_BU: return v & 0xFFu;
+	case PK_HU: return v & 0xFFFFu;
+	}
+	return v;
+}
+
+/* the uncertain bits as they are in the register */
+static uint32_t prov_regmask(const mips32_state *s)
+{
+	uint32_t m = s->prov_mask;
+	switch (s->prov_kind) {
+	case PK_B: return (m & 0x80u) ? m | 0xFFFFFF00u : m & 0xFFu;
+	case PK_H: return (m & 0x8000u) ? m | 0xFFFF0000u : m & 0xFFFFu;
+	case PK_BU: return m & 0xFFu;
+	case PK_HU: return m & 0xFFFFu;
+	}
+	return m;
+}
+
+static void prov_apply(mips32_state *s, uint32_t bits)
+{
+	uint32_t v = (s->prov_v & ~s->prov_mask) | (bits & s->prov_mask);
+	s->gpr[s->prov_set][s->prov_reg] = prov_value(s->prov_kind, v);
+	s->prov = 0;
+}
+
+void mips32_settle(mips32_state *s)
+{
+	uint32_t bits = 0;
+	if (!s->prov) return;
+	if (s->bus.settle) s->bus.settle(s->bus.ctx, s->prov_tok, 1, &bits);
+	prov_apply(s, bits);
+}
+
+void mips32_uncertain(mips32_state *s, uint32_t mask, uint32_t token)
+{
+	s->unc = mask;
+	s->unc_tok = token;
+}
+
+/* register reg (current set) was loaded with v, whose bits s->unc are not known yet */
+static void prov_new(mips32_state *s, unsigned reg, int kind, uint32_t v)
+{
+	uint32_t mask = s->unc;
+	s->unc = 0;
+	if (!reg) return;
+	if (s->prov && !(s->prov_reg == reg && s->prov_set == (s->srsctl & 7))) mips32_settle(s);
+	s->prov = 1;
+	s->prov_kind = kind;
+	s->prov_set = s->srsctl & 7;
+	s->prov_reg = reg;
+	s->prov_v = v;
+	s->prov_mask = mask;
+	s->prov_tok = s->unc_tok;
+	s->prov_gen++;
+	s->prov_n = 0;
+}
+
 static void exec_mem(mips32_state *s, uint32_t op)
 {
 	uint32_t ea = REGS(s)[RS(op)] + SIMM(op), rt = REGS(s)[RT(op)], v;
 	unsigned b = ea & 3, i, sh;
 
+	s->unc = 0;
 	switch (op >> 26) {
-	case 0x20: if (load(s, ea, 1, &v)) SET(RT(op), (uint32_t)(int32_t)(int8_t)v); break;
-	case 0x21: if (load(s, ea, 2, &v)) SET(RT(op), (uint32_t)(int32_t)(int16_t)v); break;
+	case 0x20: if (load(s, ea, 1, &v)) { SET(RT(op), (uint32_t)(int32_t)(int8_t)v); if (s->unc) prov_new(s, RT(op), PK_B, v); } break;
+	case 0x21: if (load(s, ea, 2, &v)) { SET(RT(op), (uint32_t)(int32_t)(int16_t)v); if (s->unc) prov_new(s, RT(op), PK_H, v); } break;
 	case 0x22:
 		if (load(s, ea & ~3u, 4, &v)) {
+			if (s->unc) { uint32_t bits = 0; if (s->bus.settle) s->bus.settle(s->bus.ctx, s->unc_tok, 1, &bits); v = (v & ~s->unc) | (bits & s->unc); s->unc = 0; }
 			sh = (3 - b) * 8;
 			SET(RT(op), sh ? (rt & ((1u << sh) - 1)) | (v << sh) : v);
 		}
 		break;
-	case 0x23: if (load(s, ea, 4, &v)) SET(RT(op), v); break;
-	case 0x24: if (load(s, ea, 1, &v)) SET(RT(op), v & 0xFFu); break;
-	case 0x25: if (load(s, ea, 2, &v)) SET(RT(op), v & 0xFFFFu); break;
+	case 0x23: if (load(s, ea, 4, &v)) { SET(RT(op), v); if (s->unc) prov_new(s, RT(op), PK_W, v); } break;
+	case 0x24: if (load(s, ea, 1, &v)) { SET(RT(op), v & 0xFFu); if (s->unc) prov_new(s, RT(op), PK_BU, v); } break;
+	case 0x25: if (load(s, ea, 2, &v)) { SET(RT(op), v & 0xFFFFu); if (s->unc) prov_new(s, RT(op), PK_HU, v); } break;
 	case 0x26:
 		if (load(s, ea & ~3u, 4, &v)) {
+			if (s->unc) { uint32_t bits = 0; if (s->bus.settle) s->bus.settle(s->bus.ctx, s->unc_tok, 1, &bits); v = (v & ~s->unc) | (bits & s->unc); s->unc = 0; }
 			sh = b * 8;
 			SET(RT(op), sh ? (rt & ~(0xFFFFFFFFu >> sh)) | (v >> sh) : v);
 		}
@@ -463,7 +532,7 @@ static void exec_mem(mips32_state *s, uint32_t op)
 		for (i = 0; i < 4 - b; i++)
 			if (!store(s, ea + i, (rt >> (8 * i)) & 0xFFu, 1)) break;
 		break;
-	case 0x30: if (load(s, ea, 4, &v)) { SET(RT(op), v); s->llbit = 1; } break;
+	case 0x30: if (load(s, ea, 4, &v)) { SET(RT(op), v); s->llbit = 1; if (s->unc) prov_new(s, RT(op), PK_W, v); } break;
 	case 0x38:
 		if (s->llbit) { if (store(s, ea, rt, 4)) SET(RT(op), 1); }
 		else SET(RT(op), 0);
@@ -767,6 +836,105 @@ static int fast_run(mips32_state *s, uint64_t lim)
 	return n;
 }
 
+/* The registers an instruction reads (a mask) and the one it writes when it completes (-1: none or not always);
+   -2: it touches other register sets or changes the current one. */
+#define R1(n) (1u << (n))
+static int gpr_use(uint32_t op, uint32_t *rd)
+{
+	unsigned rs = RS(op), rt = RT(op), d = RD(op);
+	*rd = R1(rs) | R1(rt);
+	switch (op >> 26) {
+	case 0x00:
+		switch (FUNCT(op)) {
+		case 0x00: case 0x02: case 0x03: *rd = R1(rt); return (int)d;
+		case 0x04: case 0x06: case 0x07: return (int)d;
+		case 0x08: *rd = R1(rs); return -1;
+		case 0x09: *rd = R1(rs); return (int)d;
+		case 0x0A: case 0x0B: *rd |= R1(d); return -1;
+		case 0x0C: case 0x0D: case 0x0F: *rd = 0; return -1;
+		case 0x10: case 0x12: *rd = 0; return (int)d;
+		case 0x11: case 0x13: *rd = R1(rs); return -1;
+		case 0x18: case 0x19: case 0x1A: case 0x1B: return -1;
+		case 0x20: case 0x21: case 0x22: case 0x23: case 0x24: case 0x25: case 0x26: case 0x27: case 0x2A: case 0x2B: return (int)d;
+		case 0x30: case 0x31: case 0x32: case 0x33: case 0x34: case 0x36: return -1;
+		}
+		return -2;
+	case 0x01:
+		*rd = R1(rs);
+		if (rt >= 0x10 && rt <= 0x13) return 31;
+		return -1;
+	case 0x02: *rd = 0; return -1;
+	case 0x03: *rd = 0; return 31;
+	case 0x04: case 0x05: case 0x14: case 0x15: return -1;
+	case 0x06: case 0x07: case 0x16: case 0x17: *rd = R1(rs); return -1;
+	case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C: case 0x0D: case 0x0E: *rd = R1(rs); return (int)rt;
+	case 0x0F: *rd = 0; return (int)rt;
+	case 0x10:
+		if (op & (1u << 25)) { *rd = 0; return FUNCT(op) == 0x20 ? -1 : -2; }
+		if (rs == 0x00 || rs == 0x0B) { *rd = 0; return (int)rt; }
+		return -2;
+	case 0x1C:
+		switch (FUNCT(op)) {
+		case 0x00: case 0x01: case 0x04: case 0x05: return -1;
+		case 0x02: return (int)d;
+		case 0x20: case 0x21: *rd = R1(rs); return (int)d;
+		}
+		return -2;
+	case 0x1F:
+		switch (FUNCT(op)) {
+		case 0x00: *rd = R1(rs); return (int)rt;
+		case 0x04: return (int)rt;
+		case 0x20: *rd = R1(rt); return (int)d;
+		case 0x3B: *rd = 0; return (int)rt;
+		}
+		return -2;
+	case 0x20: case 0x21: case 0x23: case 0x24: case 0x25: case 0x30: *rd = R1(rs); return (int)rt;
+	case 0x22: case 0x26: return (int)rt;
+	case 0x28: case 0x29: case 0x2A: case 0x2B: case 0x2E: case 0x2F: case 0x33: return -1;
+	case 0x38: return -1;
+	}
+	return -2;
+}
+
+/* before one instruction while a register is not known: it waits for its bits where it reads them (an AND that
+   clears them does not); the register is known again when an instruction writes it without reading it. Returns
+   the register the instruction writes for careful_post, or -1 */
+typedef struct careful { unsigned gen, seq; int wr; } careful;
+
+#if defined(__GNUC__)
+__attribute__((noinline))
+#elif defined(_MSC_VER)
+__declspec(noinline)
+#endif
+static void careful_pre(mips32_state *s, careful *k)
+{
+	uint32_t bits = 0, op, rd, m, other;
+	unsigned off = s->pc - s->fva, r = s->prov_reg;
+	int wr, safe = 0;
+
+	k->wr = -1;
+	if (s->bus.settle && s->bus.settle(s->bus.ctx, s->prov_tok, 0, &bits)) { prov_apply(s, bits); return; }
+	if (off >= s->fsize || (off & 3) || ++s->prov_n > 256) { mips32_settle(s); return; }
+	op = le32(s->fptr + off);
+	wr = gpr_use(op, &rd);
+	if (wr == -2) { mips32_settle(s); return; }
+	if ((s->srsctl & 7) != s->prov_set) return;
+	if (rd >> r & 1) {
+		m = prov_regmask(s);
+		if ((op >> 26) == 0x00 && FUNCT(op) == 0x24 && RS(op) != RT(op)) {
+			other = REGS(s)[RS(op) == r ? RT(op) : RS(op)];
+			safe = !(other & m);
+		} else if ((op >> 26) == 0x0C)
+			safe = !(UIMM(op) & m);
+		if (!safe) { mips32_settle(s); return; }
+	}
+	if (wr == (int)r) {
+		k->wr = wr;
+		k->gen = s->prov_gen;
+		k->seq = s->exc_seq;
+	}
+}
+
 static int irq_pending(const mips32_state *s)
 {
 	return s->eic_ripl > (int)ST_IPL(s->status) && (s->status & (ST_IE | ST_EXL | ST_ERL)) == ST_IE;
@@ -792,7 +960,7 @@ int mips32_run(mips32_state *s, int cycles)
 				if (s->stop) break;
 			}
 		}
-		if (!s->waiting && fast_run(s, end < s->ti_at ? end : s->ti_at)) {
+		if (!s->waiting && !s->prov && fast_run(s, end < s->ti_at ? end : s->ti_at)) {
 		} else if (s->waiting) {
 			uint64_t burn = end - s->cycles;
 			count_sync(s, s->cycles);
@@ -802,8 +970,14 @@ int mips32_run(mips32_state *s, int cycles)
 				if (need && need < burn) burn = need;
 			}
 			s->cycles += burn;
-		} else
+		} else {
+			careful k;
+			k.wr = -1;
+			if (s->prov) careful_pre(s, &k);
 			step(s);
+			/* written whole without being read: known */
+			if (k.wr >= 0 && s->prov && s->prov_gen == k.gen && s->exc_seq == k.seq) s->prov = 0;
+		}
 		if (s->cycles >= s->ti_at) {
 			s->cause |= CA_TI;
 			s->stop = 1;
@@ -842,6 +1016,8 @@ int mips32_soft_irq(const mips32_state *s) { return (int)((s->cause >> 8) & 3); 
 
 void mips32_reset(mips32_state *s)
 {
+	s->prov = 0;
+	s->unc = 0;
 	s->pc = 0xBFC00000u;
 	s->npc = s->pc + 4;
 	s->delay = 0;

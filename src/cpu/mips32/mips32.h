@@ -36,6 +36,8 @@ typedef struct mips32_bus {
 	void (*write)(void *ctx, uint32_t pa, uint32_t data, int size, int *err);
 	int (*exc_hook)(void *ctx, mips32_state *s, int exccode);
 	void (*irq_taken)(void *ctx, int vector);
+	/* the true bits of an uncertain read (mips32_uncertain), in the read's value; 1 when known (always with wait) */
+	int (*settle)(void *ctx, uint32_t token, int wait, uint32_t *bits);
 } mips32_bus;
 
 struct mips32_state {
@@ -60,6 +62,12 @@ struct mips32_state {
 	uint32_t fva, fsize;          /* instructions at [fva, fva + fsize) come from fptr */
 	const uint8_t *fptr;
 	int dslot;                    /* direct region of the last fast load */
+	unsigned exc_seq;             /* exceptions taken */
+	/* a register loaded from a read whose bits prov_mask are not known yet (bus.settle gives them): every
+	   instruction that reads it, but an AND that clears those bits, waits for them first */
+	int prov, prov_kind;
+	unsigned prov_set, prov_reg, prov_gen, prov_n;
+	uint32_t prov_v, prov_mask, prov_tok, unc, unc_tok;
 };
 
 void mips32_init(mips32_state *s, const mips32_bus *bus, int shadow_sets, uint32_t prid);
@@ -67,6 +75,8 @@ void mips32_reset(mips32_state *s);
 void mips32_direct(mips32_state *s, int slot, uint32_t base, uint32_t size, const uint8_t *rd, uint8_t *wr);
 int mips32_run(mips32_state *s, int cycles);
 uint32_t *mips32_regs(mips32_state *s);
+void mips32_uncertain(mips32_state *s, uint32_t mask, uint32_t token); /* from bus.read: bits of this read not known yet */
+void mips32_settle(mips32_state *s);                                  /* a register not known yet gets its bits */
 void mips32_set_eic(mips32_state *s, int ripl, int vector, int srs);
 int mips32_timer_irq(const mips32_state *s);
 int mips32_soft_irq(const mips32_state *s);

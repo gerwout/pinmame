@@ -11,6 +11,7 @@ extern "C" {
 #define PROP_EDGES 4096
 #define PROP_SEGS  32
 #define PROP_PIC_PINS ((1u << 24) | (1u << 25) | (1u << 26))
+#define PROP_SAMPS 1024
 
 typedef int (*prop_spi_fn)(void *ctx, int cs, int sclk, int mosi);
 typedef void (*prop_log_fn)(void *ctx, const char *msg);
@@ -57,6 +58,9 @@ typedef struct pinheck_prop {
 	void *clock_ctx;
 	uint64_t stamp; /* the PIC32 cycle at which the running call was made */
 	void *worker; /* worker thread, NULL = calls run inline */
+	uint32_t samp_post, samp_cmd[PROP_SAMPS]; /* P24 samples (prop_sample): posted, and the queue position of each */
+	volatile uint32_t samp_done;
+	uint8_t samp_val[PROP_SAMPS];
 	uint64_t owner; /* the thread that started the worker: the only one whose prop_sync waits for it */
 } pinheck_prop;
 
@@ -72,6 +76,8 @@ void prop_reset(pinheck_prop *p, uint64_t pic_cycle);
 void prop_pic_pins(pinheck_prop *p, uint64_t pic_cycle, uint32_t pins);
 void prop_catch_up(pinheck_prop *p, uint64_t pic_cycle);
 int prop_p24(pinheck_prop *p, uint64_t pic_cycle);
+uint32_t prop_sample(pinheck_prop *p, uint64_t pic_cycle);      /* with the worker: prop_p24 left to it; a token */
+int prop_sample_get(pinheck_prop *p, uint32_t token, int wait); /* its P24 (0, 1); -1 not yet (wait 0) */
 void prop_set_clock(pinheck_prop *p, prop_clock_fn fn, void *ctx);
 uint64_t prop_stamp(const pinheck_prop *p);
 int prop_start_thread(pinheck_prop *p);

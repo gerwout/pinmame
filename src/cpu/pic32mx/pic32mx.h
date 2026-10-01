@@ -26,6 +26,8 @@ typedef struct pic32mx_board {
 	void (*unmapped)(void *ctx, uint32_t pa, int write);
 	void (*exception)(void *ctx, int code, uint32_t pc);
 	uint64_t (*hold)(void *ctx, uint64_t cycle); /* cycles the core must stay held, 0 = run */
+	/* the true bits of a port read that pic32mx_uncertain marked, in port_read's value; 1 when known (always with wait) */
+	int (*port_settle)(void *ctx, uint32_t token, int wait, uint32_t *bits);
 } pic32mx_board;
 
 typedef struct pic32mx_timer {
@@ -60,6 +62,7 @@ typedef struct pic32mx {
 	uint8_t logged[PIC32MX_SFR_SIZE / 16];
 	int *icount;      /* host cycle counter, kept current across board callbacks; NULL = none */
 	uint64_t run_end; /* cycle at which the current pic32mx_run ends */
+	uint32_t unc, unc_tok; /* port_read's bits not known yet (pic32mx_uncertain) */
 } pic32mx;
 
 void pic32mx_init(pic32mx *p, const pic32mx_board *board, const uint8_t *flash, uint32_t flash_size);
@@ -67,6 +70,7 @@ void pic32mx_reset(pic32mx *p);
 int pic32mx_run(pic32mx *p, int cycles);
 void pic32mx_uart_rx(pic32mx *p, int uart, uint8_t byte);
 void pic32mx_set_irq(pic32mx *p, int irq);
+void pic32mx_uncertain(pic32mx *p, uint32_t mask, uint32_t token); /* from port_read: these bits are settled later */
 int pic32mx_irq_vector(int irq);
 uint32_t pic32mx_sfr_peek(const pic32mx *p, uint32_t va);
 

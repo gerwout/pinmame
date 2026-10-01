@@ -118,7 +118,7 @@ static int load_elf(const char *path, uint32_t *entry)
 
 int main(int argc, char **argv)
 {
-	mips32_bus bus = { NULL, bus_read, bus_write, exc_hook, NULL };
+	mips32_bus bus = { NULL, bus_read, bus_write, exc_hook, NULL, NULL };
 	uint64_t limit = 100000000;
 	uint32_t entry;
 	const char *path = NULL;

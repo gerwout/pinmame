@@ -328,12 +328,31 @@ static void pinheck_port_write(void *ctx, int port, uint32_t lat, uint32_t tris,
 	pinheck_board_port(&brd, port, lat, tris, cycle);
 }
 
+/* RF13 (P24) with the worker thread: read by the worker, and settled only for an instruction that uses it
+   (mips32_uncertain); its guess is the last value settled */
+static int rf13_guess, rf13_exact = -1;
+
 static uint32_t pinheck_port_read(void *ctx, int port, uint64_t cycle)
 {
 	uint32_t v = pinheck_board_read(&brd, port, cycle);
 	(void)ctx;
 	if (port != PIC32MX_PORTF) return v;
+	if (rf13_exact < 0) rf13_exact = getenv("PINHECK_RF13") && atoi(getenv("PINHECK_RF13")) == 0;
+	if (prop.worker && !rf13_exact) {
+		pic32mx_uncertain(pic32cpu_soc(), RF13, prop_sample(&prop, cycle));
+		return (v & ~RF13) | (rf13_guess ? RF13 : 0);
+	}
 	return (v & ~RF13) | (prop_p24(&prop, cycle) ? RF13 : 0);
+}
+
+static int pinheck_port_settle(void *ctx, uint32_t token, int wait, uint32_t *bits)
+{
+	int v = prop_sample_get(&prop, token, wait);
+	(void)ctx;
+	if (v < 0) return 0;
+	rf13_guess = v;
+	*bits = v ? RF13 : 0;
+	return 1;
 }
 
 static int pinheck_i2c_pins(void *ctx, int module, int scl, int sda, uint64_t cycle)
@@ -885,7 +904,7 @@ static struct CustomSound_interface pinheck_sndInt = { pinheck_sh_start, pinheck
 
 static MACHINE_INIT(pinheck)
 {
-	pic32mx_board board = { NULL, pinheck_port_write, pinheck_port_read, pinheck_uart_tx, pinheck_i2c_pins, pinheck_unmapped, pinheck_exception, pinheck_hold };
+	pic32mx_board board = { NULL, pinheck_port_write, pinheck_port_read, pinheck_uart_tx, pinheck_i2c_pins, pinheck_unmapped, pinheck_exception, pinheck_hold, pinheck_port_settle };
 	const char *log = getenv("PINHECK_UART1_LOG"), *plog = getenv("PINHECK_PROP_LOG");
 
 	prop_stop_thread(&prop);

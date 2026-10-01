@@ -342,8 +342,10 @@ static uint32_t port_read(pic32mx *p, uint32_t off)
 	uint32_t reg = (off - OFF_TRISA) & 0x30u, tris = SFR(p, OFF_TRISA + (uint32_t)port * 0x40);
 	if (reg == 0x10) {
 		uint32_t in = 0xFFFFu;
+		p->unc = 0;
 		if (p->board.port_read) { host_enter(p); in = p->board.port_read(p->board.ctx, port, p->cpu.cycles); host_leave(p); }
-		if (port == PIC32MX_PORTB) in &= SFR(p, OFF_AD1PCFG);
+		if (port == PIC32MX_PORTB) { in &= SFR(p, OFF_AD1PCFG); p->unc &= SFR(p, OFF_AD1PCFG); }
+		p->unc &= tris;
 		return (SFR(p, OFF_TRISA + (uint32_t)port * 0x40 + 0x20) & ~tris) | (in & tris);
 	}
 	return SFR(p, off & ~0xFu);
@@ -446,8 +448,14 @@ static uint32_t bus_read(void *ctx, uint32_t pa, int size, int fetch, int *err)
 
 	(void)fetch;
 	if (pa >= PIC32MX_SFR_BASE && pa - PIC32MX_SFR_BASE < PIC32MX_SFR_SIZE) {
-		uint32_t off = pa - PIC32MX_SFR_BASE;
-		return (sfr_read(p, off & ~3u) >> ((off & 3) * 8)) & (size == 4 ? 0xFFFFFFFFu : (1u << (size * 8)) - 1);
+		uint32_t off = pa - PIC32MX_SFR_BASE, sm = size == 4 ? 0xFFFFFFFFu : (1u << (size * 8)) - 1;
+		v = (sfr_read(p, off & ~3u) >> ((off & 3) * 8)) & sm;
+		if (p->unc) {
+			uint32_t m = (p->unc >> ((off & 3) * 8)) & sm;
+			p->unc = 0;
+			if (m) mips32_uncertain(&p->cpu, m, p->unc_tok << 2 | (off & 3));
+		}
+		return v;
 	}
 	m = mem_ptr(p, pa, size, 0);
 	if (!m) {
@@ -525,11 +533,29 @@ void pic32mx_reset(pic32mx *p)
 	mips32_reset(&p->cpu);
 }
 
+void pic32mx_uncertain(pic32mx *p, uint32_t mask, uint32_t token)
+{
+	p->unc = mask;
+	p->unc_tok = token;
+}
+
+static int soc_settle(void *ctx, uint32_t token, int wait, uint32_t *bits)
+{
+	pic32mx *p = (pic32mx *)ctx;
+	uint32_t in = 0;
+	int r;
+	if (!p->board.port_settle) return 1;
+	r = p->board.port_settle(p->board.ctx, token >> 2, wait, &in);
+	*bits = in >> ((token & 3) * 8);
+	return r;
+}
+
 void pic32mx_init(pic32mx *p, const pic32mx_board *board, const uint8_t *flash, uint32_t flash_size)
 {
 	mips32_bus bus;
 
 	memset(p, 0, sizeof(*p));
+	memset(&bus, 0, sizeof(bus));
 	if (board) p->board = *board;
 	p->flash = flash;
 	p->flash_size = flash_size > PIC32MX_FLASH_SIZE ? PIC32MX_FLASH_SIZE : flash_size;
@@ -538,6 +564,7 @@ void pic32mx_init(pic32mx *p, const pic32mx_board *board, const uint8_t *flash, 
 	bus.write = bus_write;
 	bus.exc_hook = exc_hook;
 	bus.irq_taken = irq_taken;
+	bus.settle = soc_settle;
 	mips32_init(&p->cpu, &bus, 2, 0x00018700u);
 	mips32_direct(&p->cpu, 0, 0x1D000000u, p->flash_size, p->flash, NULL);
 	mips32_direct(&p->cpu, 1, 0, PIC32MX_RAM_SIZE, p->ram, p->ram);

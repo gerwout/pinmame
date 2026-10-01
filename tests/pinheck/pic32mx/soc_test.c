@@ -44,7 +44,7 @@ static void put(uint32_t off, uint32_t w)
 
 static void setup(void)
 {
-	pic32mx_board board = { NULL, b_port_write, b_port_read, b_uart_tx, NULL, b_unmapped, b_exception, NULL };
+	pic32mx_board board = { NULL, b_port_write, b_port_read, b_uart_tx, NULL, b_unmapped, b_exception, NULL, NULL };
 	memset(&rec, 0, sizeof(rec));
 	memset(flash, 0, sizeof(flash));
 	put(0x1000, 0x1000FFFFu);
