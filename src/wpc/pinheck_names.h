@@ -23,7 +23,16 @@
    servos); numbering as above. Not in them: User (2) and Back (5), as for Domino's. Servo levels 0-255 are
    0-180 degrees (0.544-2.4 ms). The LDG light (external RGB LED) gets red, blue, green on 62-64 while the
    service menu's SWAP G <-> B is NO, its factory setting. HandleMechanics bit 0 raises the drop target (48) on
-   its coil, bit 1 closes the flippers' end-of-stroke switches while their coils are on. */
+   its coil, bit 1 closes the flippers' end-of-stroke switches while their coils are on.
+
+   The Jetsons (pinheck_jetsons_*).
+   Sources: Jetsons_Switch_Matrix_Production.pdf, Jetsons_Light_Matrix_Production.pdf and JETSONS-WIRE-TO-BOARD.pdf
+   (coils, GI, optos); numbering as above. A device is numbered where JET_V004 reads it: the kickout hole on
+   switch 7 (18; the switch chart says 6), the trough's eject position and the scoop on their optos (92, 96;
+   the chart's switches 33 and 8 are never read). Not listed: switches 14, 15, 22, 23, 30, 31, 38, 39 and lamps
+   45-47, which the firmware uses but no chart names. Servo levels 0-255 are 0-180 degrees (0.544-2.4 ms); servo 0
+   is the Orbitty topper. The firmware never writes the external RGB LED (62-64). HandleMechanics bit 0 closes
+   the flippers' end-of-stroke switches while their coils are on. */
 #ifndef PINHECK_NAMES_H
 #define PINHECK_NAMES_H
 
@@ -345,6 +354,143 @@ static const pinheck_name_t pinheck_rzspook_solenoid_names[] = {
   { 62, "sLDGR",       "LDG light red" },
   { 63, "sLDGB",       "LDG light blue" },
   { 64, "sLDGG",       "LDG light green" },
+  { 0 }
+};
+
+static const pinheck_name_t pinheck_jetsons_switch_names[] = {
+  {   1, "swCoinDoor",  "Coin Door (closed)" },
+  {   2, "swUser",      "Launch Button" },
+  {   3, "swRFlip",     "Right Flipper" },
+  {   4, "swLFlip",     "Left Flipper" },
+  {   5, "swBack",      "Back" },
+  {   6, "swEnter",     "Enter (menu)" },
+  {   7, "swCoin",      "Coin Mech" },
+  {   8, "swTilt",      "Tilt" },
+  {  11, "swROrbit",    "Right Orbit" },
+  {  12, "swCaptive",   "Captive Ball" },
+  {  13, "swRLane",     "Right Lane" },
+  {  14, "swMLane",     "Middle Lane" },
+  {  15, "swLLane",     "Left Lane" },
+  {  16, "swElroy",     "Elroy Loop" },
+  {  18, "swKickout",   "Kickout Hole" },
+  {  22, "swExtraBall", "Extra Ball" },
+  {  23, "swLSling",    "Left Sling" },
+  {  24, "swLInlane",   "Left Inlane" },
+  {  25, "swLOutlane",  "Left Outlane" },
+  {  26, "swLFlipEOS",  "Left Flipper EOS" },
+  {  31, "swCTargetG",  "Center Target G" },
+  {  32, "swCTargetE",  "Center Target E" },
+  {  33, "swCTargetO",  "Center Target O" },
+  {  34, "swLowerPop",  "Lower Pop" },
+  {  35, "swLPop",      "Left Pop" },
+  {  36, "swRPop",      "Right Pop" },
+  {  41, "swRTargetR",  "Right Target R" },
+  {  42, "swRTargetG",  "Right Target G" },
+  {  43, "swRTargetE",  "Right Target E" },
+  {  44, "swRSling",    "Right Sling" },
+  {  45, "swRInlane",   "Right Inlane" },
+  {  46, "swROutlane",  "Right Outlane" },
+  {  51, "swShooter",   "Shooter Lane" },
+  {  53, "swTrough2",   "Ball Trough 2" },
+  {  54, "swTrough3",   "Ball Trough 3" },
+  {  55, "swRFlipEOS",  "Right Flipper EOS" },
+  {  56, "swLOrbit",    "Left Orbit" },
+  {  92, "swTrough1",   "Trough Opto 1 (ball trough 1)" },
+  {  93, "swTroughJam", "Trough Jam Opto" },
+  {  94, "swStart",     "Start Button" },
+  {  96, "swScoop",     "Scoop Opto" },
+  { 112, "swLRFlip",    "Right Flipper button (reaches switch 3)" },
+  { 114, "swLLFlip",    "Left Flipper button (reaches switch 4)" },
+  { 0 }
+};
+
+static const pinheck_name_t pinheck_jetsons_lamp_names[] = {
+  {  11, "lJ",                 "J" },
+  {  12, "lA",                 "A" },
+  {  13, "lExtraBall",         "Extra Ball" },
+  {  14, "lLScoopArrow",       "Left Scoop Arrow" },
+  {  15, "lLScoopS",           "Left Scoop S" },
+  {  16, "lRosie",             "Rosie" },
+  {  17, "lAstro",             "Astro" },
+  {  18, "lJudy",              "Judy" },
+  {  21, "lE",                 "E" },
+  {  22, "lN",                 "N" },
+  {  23, "lRTargetE",          "Right Target E" },
+  {  24, "lRTargetG",          "Right Target G" },
+  {  25, "lRTargetR",          "Right Target R" },
+  {  26, "lOrbity",            "Orbity" },
+  {  27, "lElroy",             "Elroy" },
+  {  28, "lJane",              "Jane" },
+  {  31, "lGeorge",            "George" },
+  {  32, "lJetScreamer",       "Jet Screamer" },
+  {  33, "lOrbitCityMB",       "Orbit City MB" },
+  {  34, "lSpacelyCogswellMB", "Spacely vs Cogswell MB" },
+  {  35, "lJetAgain",          "Jet Again" },
+  {  41, "lAstroJ",            "Astro J" },
+  {  42, "lLOrbitArrow",       "Left Orbit Arrow" },
+  {  43, "lJudyJ",             "Judy J" },
+  {  44, "lRampArrow",         "Ramp Arrow" },
+  {  45, "lElroyJ",            "Elroy J" },
+  {  46, "lElroyLoopArrow",    "Elroy Loop Arrow" },
+  {  47, "lCTargetG",          "Center Target G" },
+  {  48, "lCTargetE",          "Center Target E" },
+  {  51, "lCTargetO",          "Center Target O" },
+  {  52, "lJackpot",           "Jackpot" },
+  {  53, "lKickoutC",          "Kickout C" },
+  {  54, "lKickoutArrow",      "Kickout Arrow" },
+  {  55, "lOrbityJ",           "Orbity J" },
+  {  56, "lROrbitArrow",       "Right Orbit Arrow" },
+  {  91, "lStart",             "Start Button" },
+  { 0 }
+};
+
+static const pinheck_name_t pinheck_jetsons_solenoid_names[] = {
+  {  1, "sKnocker",    "Knocker (option)" },
+  {  2, "sShaker",     "Shaker (option)" },
+  {  3, "sRFlipLow",   "Right Flipper Low" },
+  {  4, "sRFlipHigh",  "Right Flipper High" },
+  {  5, "sLoad",       "Ball Load (trough)" },
+  {  6, "sLaunch",     "Ball Launch (autolauncher)" },
+  {  7, "sLFlipHigh",  "Left Flipper High" },
+  {  8, "sLFlipLow",   "Left Flipper Low" },
+  {  9, "sScoop",      "Scoop" },
+  { 10, "sLSling",     "Left Sling" },
+  { 11, "sRSling",     "Right Sling" },
+  { 17, "sPost",       "Up Post (ball stop)" },
+  { 18, "sLowerPop",   "Lower Pop" },
+  { 19, "sLPop",       "Left Pop" },
+  { 20, "sKickout",    "Saucer Kick Out" },
+  { 21, "sRPop",       "Right Pop" },
+  { 25, "sGI0",        "GI_0 (no wire on the chart)" },
+  { 26, "sGI1",        "GI_1 (no wire on the chart)" },
+  { 27, "sGI2",        "GI_2 (no wire on the chart)" },
+  { 28, "sGI3",        "GI_3 (no wire on the chart)" },
+  { 29, "sGI4",        "GI_4 (no wire on the chart)" },
+  { 30, "sGI5",        "GI_5 (no wire on the chart)" },
+  { 31, "sGI6",        "GI_6 (no wire on the chart)" },
+  { 32, "sGI7",        "GI_7 (no wire on the chart)" },
+  { 37, "sGI8",        "GI_8 ramp flasher" },
+  { 38, "sGI9",        "GI_9 scoop flasher" },
+  { 39, "sGI10",       "GI_10 left GI" },
+  { 40, "sGI11",       "GI_11 right GI" },
+  { 41, "sGI12",       "GI_12 (no wire on the chart)" },
+  { 42, "sGI13",       "GI_13 (no wire on the chart)" },
+  { 43, "sGI14",       "GI_14 (no wire on the chart)" },
+  { 44, "sGI15",       "GI_15 (no wire on the chart)" },
+  { 51, "sRGB1R",      "RGB1 red" },
+  { 52, "sRGB1G",      "RGB1 green" },
+  { 53, "sRGB1B",      "RGB1 blue" },
+  { 54, "sRGB2R",      "RGB2 red (follows the Orbitty)" },
+  { 55, "sRGB2G",      "RGB2 green (follows the Orbitty)" },
+  { 56, "sRGB2B",      "RGB2 blue (follows the Orbitty)" },
+  { 57, "sOrbitty",    "Servo 0: Orbitty topper" },
+  { 58, "sServo1",     "Servo 1 (held at 90 degrees)" },
+  { 59, "sServo2",     "Servo 2" },
+  { 60, "sServo3",     "Servo 3" },
+  { 61, "sServo4",     "Servo 4" },
+  { 62, "sExtR",       "External RGB red (not written)" },
+  { 63, "sExtG",       "External RGB green (not written)" },
+  { 64, "sExtB",       "External RGB blue (not written)" },
   { 0 }
 };
 

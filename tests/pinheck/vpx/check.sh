@@ -11,8 +11,9 @@ mkdir -p $B || exit 2
 fail=0
 python3 names.py check $S || fail=$((fail + 1))
 python3 names.py check $S rzspook || fail=$((fail + 1))
+python3 names.py check $S jetsons || fail=$((fail + 1))
 if command -v x86_64-w64-mingw32-gcc > /dev/null; then python3 mingw_check.py $S/libpinmame/libpinmame.cpp x86_64-w64-mingw32-gcc || fail=$((fail + 1)); else echo "vpx: MinGW compiler missing, strcasecmp check skipped"; fi
-printf '#include "pinheck_names.h"\nint main(void) { return pinheck_dominos_switch_names[0].num != 1 || pinheck_rzspook_switch_names[0].num != 1; }\n' > $B/names.c
+printf '#include "pinheck_names.h"\nint main(void) { return pinheck_dominos_switch_names[0].num != 1 || pinheck_rzspook_switch_names[0].num != 1 || pinheck_jetsons_switch_names[0].num != 1; }\n' > $B/names.c
 cc -std=c89 -pedantic-errors -Wall -Wextra -Werror -I$S/wpc $B/names.c -o $B/names && ./$B/names || { echo "NAMES FAIL: pinheck_names.h"; fail=$((fail + 1)); }
 # per-game data: Domino's values only for the system set and Domino's; every other game spells out its own
 dd=$(grep -l 'PINHECK_DOMINOS_DATA' $S/wpc/*.c $S/wpc/sims/pinheck/*.c | sed 's|.*/src/||' | tr '\n' ' ')
@@ -22,7 +23,9 @@ if [ "$dd" = "wpc/pinheckgames.c wpc/sims/pinheck/dominos.c " ] && grep -q 'defi
 else
 	echo "GAMEDATA FAIL: Domino's values (PINHECK_DOMINOS_DATA) in '$dd', or INIT_PINHECK without a data argument"; fail=$((fail + 1))
 fi
-python3 names.py vbs $S rzspook | head -1 | grep -q "rzspook.vbs" && echo "vbs: rzspook's script names its file" || { echo "VBS FAIL: rzspook's script does not name rzspook.vbs"; fail=$((fail + 1)); }
+for g in rzspook jetsons; do
+	python3 names.py vbs $S $g | head -1 | grep -q "$g.vbs" && echo "vbs: the $g script names $g.vbs" || { echo "VBS FAIL: the $g script does not name $g.vbs"; fail=$((fail + 1)); }
+done
 srcs() { grep -o 'src/\(wpc/pinheck\|wpc/sims/pinheck\|cpu/mips32\|cpu/pic32mx\|cpu/p8x32a\)[^ )"]*' "$1" | sort -u; }
 srcs ../../../cmake/libpinmame/CMakeLists.txt > $B/srcs.ref
 n=0
@@ -35,7 +38,7 @@ echo "builds: $n build lists carry the same $(wc -l < $B/srcs.ref) pinHeck sourc
 python3 vpx.py selftest $B/selftest || fail=$((fail + 1))
 scale() { cc -E -dM -x c "$@" -I$S -I$S/wpc -I$S/unix -I$S/unix/sysdep $S/wpc/pinheck.h | sed -n 's/^#define PINHECK_VIDEO_SCALE //p'; }
 if [ "$(scale)" = 2 ] && [ "$(scale -DLIBPINMAME)" = 1 ]; then
-	echo "scale: 2x2 dots in PinMAME and VPinMAME windows, the 128x32 panel as sent to libpinmame hosts"
+	echo "scale: 2x2 dots in PinMAME and VPinMAME windows, the panel (128x32, The Jetsons' 128x64) as sent to libpinmame hosts"
 else
 	echo "SCALE FAIL: PINHECK_VIDEO_SCALE is $(scale) without LIBPINMAME and $(scale -DLIBPINMAME) with it"; fail=$((fail + 1))
 fi

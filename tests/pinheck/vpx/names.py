@@ -3,14 +3,15 @@
   names.py check SRC [GAME]   every name has a number the driver gives that device; GAME.c and pinheck.c agree
   names.py vbs SRC [GAME]     the system script a table loads with LoadVPM (to stdout): pinheck.vbs for dominos,
                               GAME.vbs (rzspook.vbs, ...) for the others, which say so in their first line
-GAME is dominos (the default) or rzspook."""
+GAME is dominos (the default), rzspook or jetsons."""
 import re
 import sys
 
 TABLES = ('switch', 'lamp', 'solenoid')
-TITLE = {'dominos': "Domino's Spectacular Pinball Adventure", 'rzspook': "Rob Zombie's Spookshow International"}
+TITLE = {'dominos': "Domino's Spectacular Pinball Adventure", 'rzspook': "Rob Zombie's Spookshow International",
+         'jetsons': 'The Jetsons'}
 # the ids of servo 0 and the external LED's first channel
-ROLES = {'dominos': ('sNoid', 'sExtR'), 'rzspook': ('sGate', 'sLDGR')}
+ROLES = {'dominos': ('sNoid', 'sExtR'), 'rzspook': ('sGate', 'sLDGR'), 'jetsons': ('sOrbitty', 'sExtR')}
 
 
 def read(src, game='dominos'):
