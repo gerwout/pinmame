@@ -1,5 +1,12 @@
 .project
 build/
+
+# profile-guided builds (cmake/pgo.cmake): profiles stay local
+*.gcda
+*.profraw
+*.profdata
+*.pgd
+*.pgc
 /CMakeLists.txt
 /.vs/
 /obj/

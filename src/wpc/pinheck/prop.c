@@ -1,3 +1,6 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE /* sched_getaffinity */
+#endif
 #include "prop.h"
 #include <stdio.h>
 #include <string.h>
@@ -298,7 +301,7 @@ int prop_p24(pinheck_prop *p, uint64_t pic_cycle)
    would inline, each with the PIC32 cycle at which it was made. The caller waits for the queue to drain before
    it reads Propeller state (prop_sync). */
 #define PROP_Q 4096
-#define PROP_SPIN 20000
+#define PROP_SPIN_NS 50000 /* a wait spins this long, then blocks */
 
 enum { CMD_PINS, CMD_CATCH_UP, CMD_QUIT };
 
@@ -321,8 +324,26 @@ static uint64_t self_id(void) { return GetCurrentThreadId(); }
 #define CPU_RELAX_ANY() YieldProcessor()
 static unsigned get_sc(volatile unsigned *v) { MemoryBarrier(); return *v; }
 static void put_sc(volatile unsigned *v, unsigned x) { InterlockedExchange((volatile LONG *)v, (LONG)x); }
+static uint64_t now_ns(void)
+{
+	static LARGE_INTEGER f;
+	LARGE_INTEGER c;
+	if (!f.QuadPart) QueryPerformanceFrequency(&f);
+	QueryPerformanceCounter(&c);
+	return (uint64_t)((double)c.QuadPart * 1e9 / (double)f.QuadPart);
+}
+static int cpus_allowed(void)
+{
+	DWORD_PTR pm, sm;
+	int n = 0;
+	if (!GetProcessAffinityMask(GetCurrentProcess(), &pm, &sm) || !pm) return 2;
+	for (; pm; pm &= pm - 1) n++;
+	return n;
+}
 #else
 #include <pthread.h>
+#include <sched.h>
+#include <time.h>
 typedef struct prop_os { pthread_t th; pthread_mutex_t m; pthread_cond_t c, sc; int wake; } prop_os;
 static unsigned get_acq(volatile unsigned *v) { return __atomic_load_n(v, __ATOMIC_ACQUIRE); }
 static void put_rel(volatile unsigned *v, unsigned x) { __atomic_store_n(v, x, __ATOMIC_RELEASE); }
@@ -344,7 +365,36 @@ static uint64_t self_id(void)
 #define CPU_RELAX_ANY() CPU_RELAX()
 static unsigned get_sc(volatile unsigned *v) { return __atomic_load_n(v, __ATOMIC_SEQ_CST); }
 static void put_sc(volatile unsigned *v, unsigned x) { __atomic_store_n(v, x, __ATOMIC_SEQ_CST); }
+static uint64_t now_ns(void)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
+static int cpus_allowed(void)
+{
+#ifdef __linux__
+	cpu_set_t s;
+	if (sched_getaffinity(0, sizeof(s), &s)) return 2;
+	return CPU_COUNT(&s);
+#else
+	return 2;
 #endif
+}
+#endif
+
+/* one step of a bounded spin; 1 when it has lasted PROP_SPIN_NS (the clock is read every 64 steps) */
+static int spin(uint64_t *t0, unsigned *k)
+{
+	if (!(*k & 63)) {
+		uint64_t n = now_ns();
+		if (!*k) *t0 = n;
+		else if (n - *t0 >= PROP_SPIN_NS) return 1;
+	}
+	++*k;
+	CPU_RELAX_ANY();
+	return 0;
+}
 
 typedef struct prop_worker {
 	prop_os os;
@@ -386,10 +436,11 @@ static void wake(prop_worker *w)
 /* the poster waits for head to reach want: a bounded spin, then it blocks until the worker gets there */
 static void wait_head(prop_worker *w, unsigned want)
 {
-	int k;
-	for (k = 0; k < PROP_SPIN; k++) {
+	uint64_t t0 = 0;
+	unsigned k = 0;
+	for (;;) {
 		if ((int)(get_acq(&w->head) - want) >= 0) return;
-		CPU_RELAX_ANY();
+		if (spin(&t0, &k)) break;
 	}
 #ifdef _WIN32
 	w->want = want;
@@ -435,13 +486,12 @@ static void *worker(void *arg)
 {
 	pinheck_prop *p = (pinheck_prop *)arg;
 	prop_worker *w = (prop_worker *)p->worker;
-	unsigned h = w->head;
-	int k = 0;
+	unsigned h = w->head, k = 0;
+	uint64_t t0 = 0;
 	for (;;) {
 		unsigned t = get_acq(&w->tail);
 		if (h == t) {
-			if (++k < PROP_SPIN) CPU_RELAX_ANY();
-			else { idle_wait(w, h); k = 0; }
+			if (spin(&t0, &k)) { idle_wait(w, h); k = 0; }
 			continue;
 		}
 		k = 0;
@@ -480,6 +530,11 @@ int prop_start_thread(pinheck_prop *p)
 {
 	prop_worker *w;
 	if (p->worker) return 0;
+	/* two threads time-sliced on one CPU wait for each other at every handoff */
+	if (cpus_allowed() < 2) {
+		if (p->log) p->log(p->log_ctx, "prop: one CPU allowed, no worker thread");
+		return -1;
+	}
 	w = (prop_worker *)calloc(1, sizeof(*w));
 	if (!w) return -1;
 	p->worker = w;
@@ -548,4 +603,112 @@ void prop_pic_pins(pinheck_prop *p, uint64_t pic_cycle, uint32_t pins)
 	if (p->worker) { post(p, CMD_PINS, pic_cycle, pins); return; }
 	p->stamp = p->clock ? p->clock(p->clock_ctx) : pic_cycle;
 	do_pic_pins(p, pic_cycle, pins);
+}
+
+/* Host time is judged in windows of a second. Three windows in a row below 0.95x real time with the worker try one
+   without it, which stays if it is 5% faster than the median of the last five windows with it; the other is tried
+   again after a pause that doubles (10 s to 320 s). A host stall (one vblank taking over 0.25 s and four times as long
+   as the one before) restarts the window. Both give the same results, so switching changes only the speed.
+   flip (test hook) switches every window. */
+enum { GOV_OFF, GOV_THREADED, GOV_TRY_INLINE, GOV_INLINE, GOV_TRY_THREADED };
+
+static void gov_log(pinheck_prop *p, const char *what, double a, double b)
+{
+	char msg[96];
+	if (!p->log) return;
+	sprintf(msg, "prop: worker thread %s (%.2fx with it, %.2fx without)", what, a, b);
+	p->log(p->log_ctx, msg);
+}
+
+static double gov_median(const double *v, int n)
+{
+	double a[PROP_GOV_RING], t;
+	int i, j;
+	for (i = 0; i < n; i++) a[i] = v[i];
+	for (i = 1; i < n; i++)
+		for (j = i; j > 0 && a[j - 1] > a[j]; j--) { t = a[j]; a[j] = a[j - 1]; a[j - 1] = t; }
+	return a[n / 2];
+}
+
+static void gov_backoff(prop_gov *g, double w)
+{
+	g->next = w + g->pause;
+	if (g->pause < 320.0) g->pause *= 2.0;
+}
+
+/* starts the worker; 0 when it runs */
+int prop_gov_start(pinheck_prop *p, prop_gov *g, double w, int flip)
+{
+	memset(g, 0, sizeof(*g));
+	if (prop_start_thread(p)) return -1;
+	g->state = GOV_THREADED;
+	g->next = w + 5.0;
+	g->pause = 10.0;
+	g->flip = flip;
+	return 0;
+}
+
+void prop_governor(pinheck_prop *p, prop_gov *g, double w, double e)
+{
+	double s, gap = w - g->wl, de = e - g->el;
+	int stall = gap > 3.0 || (gap > 0.25 && gap > 4.0 * g->rate * de);
+	if (g->state == GOV_OFF) return;
+	g->wl = w;
+	g->el = e;
+	if (de > 0.0) g->rate = gap / de;
+	if (g->w0 == 0.0 || e < g->e0 || stall) { /* start, reset or stall */
+		g->w0 = w;
+		g->e0 = e;
+		g->slow = 0;
+		return;
+	}
+	if (w - g->w0 < 1.0) return;
+	s = (e - g->e0) / (w - g->w0);
+	g->w0 = w;
+	g->e0 = e;
+	if (g->flip) {
+		if (p->worker) prop_stop_thread(p);
+		else prop_start_thread(p);
+		if (p->log) p->log(p->log_ctx, p->worker ? "prop: worker thread switched on" : "prop: worker thread switched off");
+		return;
+	}
+	switch (g->state) {
+	case GOV_THREADED:
+		g->thr[g->n++ % PROP_GOV_RING] = s;
+		g->slow = s < 0.95 ? g->slow + 1 : 0;
+		if (g->slow < 3 || w < g->next) break;
+		prop_stop_thread(p);
+		g->state = GOV_TRY_INLINE;
+		break;
+	case GOV_TRY_INLINE: {
+		double thr = gov_median(g->thr, g->n < PROP_GOV_RING ? g->n : PROP_GOV_RING);
+		g->inl = s;
+		g->slow = 0;
+		if (s > thr * 1.05) {
+			gov_log(p, "off", thr, s);
+			g->state = GOV_INLINE;
+		} else g->state = prop_start_thread(p) ? GOV_INLINE : GOV_THREADED;
+		gov_backoff(g, w);
+		break;
+	}
+	case GOV_INLINE:
+		g->inl = s;
+		if (w < g->next) break;
+		if (prop_start_thread(p)) gov_backoff(g, w); /* one CPU allowed */
+		else g->state = GOV_TRY_THREADED;
+		break;
+	case GOV_TRY_THREADED:
+		if (s > g->inl * 1.05 || s >= 0.95) {
+			gov_log(p, "on", s, g->inl);
+			g->state = GOV_THREADED;
+			g->n = 0;
+			g->next = w + g->pause;
+			g->pause = 10.0;
+			break;
+		}
+		prop_stop_thread(p);
+		g->state = GOV_INLINE;
+		gov_backoff(g, w);
+		break;
+	}
 }

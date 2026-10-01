@@ -1,4 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
+#ifdef __linux__
+#define _GNU_SOURCE /* sched_setaffinity */
+#endif
 #include "../../../src/wpc/pinheck/prop.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +11,9 @@
 #include <windows.h>
 #else
 #include <time.h>
+#endif
+#ifdef __linux__
+#include <sched.h>
 #endif
 
 #define CLK  (1u << 25)
@@ -245,12 +251,12 @@ static void pins_mask(void)
 	CHECK(calls[0] > 2 && calls[1] == calls[0] && calls[2] == 1);
 }
 
-static volatile int host_go;
+static int host_go; /* atomic */
 
 static void *host_sync(void *arg)
 {
 	(void)arg;
-	while (host_go) prop_sync(&p);
+	while (__atomic_load_n(&host_go, __ATOMIC_ACQUIRE)) prop_sync(&p);
 	return NULL;
 }
 
@@ -263,11 +269,11 @@ static void foreign_sync(void)
 		uint64_t pic = 200000;
 		boot();
 		CHECK(prop_start_thread(&p) == 0);
-		host_go = 1;
+		__atomic_store_n(&host_go, 1, __ATOMIC_RELEASE);
 		CHECK(pthread_create(&h, NULL, host_sync, NULL) == 0);
 		for (k = 0; k < 200; k++) { prop_catch_up(&p, pic); pulse(&pic, k & 1); }
 		prop_stop_thread(&p);
-		host_go = 0;
+		__atomic_store_n(&host_go, 0, __ATOMIC_RELEASE);
 		pthread_join(h, NULL);
 	}
 }
@@ -353,6 +359,230 @@ static void blocking_sync(void)
 	prop_stop_thread(&p);
 }
 
+#ifndef _WIN32
+static int nap_calls;
+
+static void nap_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
+{
+	(void)ctx; (void)t; (void)out; (void)dir;
+	if (nap_calls > 0) { nap_calls--; nap_ms(2); }
+}
+
+/* waits longer than the spin bound cost the waiting thread about 50 us of CPU each, not the whole wait */
+static void spin_bound(void)
+{
+	uint64_t pic = 200000;
+	double c0, w0;
+	int b;
+	boot();
+	prop_set_pins(&p, nap_pins, NULL);
+	CHECK(prop_start_thread(&p) == 0);
+	prop_catch_up(&p, pic);
+	prop_sync(&p);
+	nap_calls = 1000;
+	c0 = cpu_s();
+	w0 = wall_s();
+	for (b = 0; b < 50; b++) {
+		pulse(&pic, b & 1);
+		prop_catch_up(&p, pic);
+		prop_sync(&p);
+	}
+	CHECK(wall_s() - w0 > 0.1);
+	CHECK(cpu_s() - c0 < 0.01);
+	nap_calls = 0;
+	prop_stop_thread(&p);
+}
+#endif
+
+/* with one CPU allowed the worker does not start and the calls run inline */
+static void one_cpu(void)
+{
+	uint64_t pic = 200000;
+	int b;
+#ifdef __linux__
+	cpu_set_t all, one;
+	CHECK(sched_getaffinity(0, sizeof(all), &all) == 0);
+	CPU_ZERO(&one);
+	for (b = 0; b < CPU_SETSIZE; b++)
+		if (CPU_ISSET(b, &all)) { CPU_SET(b, &one); break; }
+	CHECK(sched_setaffinity(0, sizeof(one), &one) == 0);
+#elif defined(_WIN32)
+	DWORD_PTR all, sys;
+	CHECK(GetProcessAffinityMask(GetCurrentProcess(), &all, &sys));
+	CHECK(SetProcessAffinityMask(GetCurrentProcess(), all & (0 - all)));
+#endif
+	boot();
+#if defined(__linux__) || defined(_WIN32)
+	CHECK(prop_start_thread(&p) == -1 && p.worker == NULL);
+#endif
+	prop_catch_up(&p, pic);
+	for (b = 0; b < BITS; b++) pulse(&pic, (b * 7 + 3) % 5 < 2);
+	prop_catch_up(&p, pic);
+	prop_sync(&p);
+	CHECK(count() == BITS);
+#ifdef __linux__
+	CHECK(sched_setaffinity(0, sizeof(all), &all) == 0);
+	if (CPU_COUNT(&all) >= 2) {
+#elif defined(_WIN32)
+	CHECK(SetProcessAffinityMask(GetCurrentProcess(), all));
+	if (all & (all - 1)) {
+#else
+	{
+#endif
+		CHECK(prop_start_thread(&p) == 0);
+		prop_stop_thread(&p);
+	}
+}
+
+/* governor: host time is simulated; the emulation runs at thr times real time with the worker and inl without */
+static int gov_off, gov_on, gov_one;
+
+static void gov_log_fn(void *ctx, const char *msg)
+{
+	(void)ctx;
+	if (strstr(msg, "worker thread off")) gov_off++;
+	if (strstr(msg, "worker thread on")) gov_on++;
+	if (strstr(msg, "one CPU allowed")) gov_one++;
+}
+
+static prop_gov gov;
+static double gov_w, gov_e;
+
+static void gov_begin(void)
+{
+	boot();
+	prop_set_log(&p, gov_log_fn, NULL);
+	gov_off = gov_on = gov_one = 0;
+	gov_w = 100.0;
+	gov_e = 0.0;
+	CHECK(prop_gov_start(&p, &gov, gov_w, 0) == 0 && p.worker != NULL);
+}
+
+/* secs of host time, one call per vblank; a host stall of stall s before the first call; returns the host time
+   spent without the worker */
+static double gov_run(double secs, double thr, double inl, double stall)
+{
+	double end = gov_w + secs, off = 0.0;
+	while (gov_w < end) {
+		double dw = (1.0 / 60.0) / (p.worker ? thr : inl) + stall;
+		stall = 0.0;
+		if (!p.worker) off += dw;
+		gov_w += dw;
+		gov_e += 1.0 / 60.0;
+		prop_governor(&p, &gov, gov_w, gov_e);
+	}
+	return off;
+}
+
+/* n windows of the governor (host seconds it judges), as gov_run */
+static double gov_windows(int n, double thr, double inl)
+{
+	double off = 0.0;
+	while (n > 0) {
+		double w0 = gov.w0;
+		off += gov_run(0.0001, thr, inl, 0.0);
+		if (gov.w0 != w0) n--;
+	}
+	return off;
+}
+
+/* the worker goes off where the inline calls are faster, and stays off */
+static void gov_contention(void)
+{
+	gov_begin();
+	gov_run(15.0, 0.4, 0.9, 0.0);
+	CHECK(gov_off == 1 && p.worker == NULL);
+	gov_run(60.0, 0.4, 0.9, 0.0);
+	CHECK(gov_off == 1 && gov_on == 0 && p.worker == NULL);
+	prop_stop_thread(&p);
+}
+
+/* also where a handoff takes longer than a stall: 0.05x, a third of a second per vblank */
+static void gov_collapse(void)
+{
+	gov_begin();
+	gov_run(30.0, 0.05, 0.9, 0.0);
+	CHECK(gov_off == 1 && p.worker == NULL);
+	prop_stop_thread(&p);
+}
+
+/* a host stall while throttled is a pause, not a slow second; also three in a row */
+static void gov_stall(void)
+{
+	double off;
+	gov_begin();
+	gov_run(10.0, 1.0, 0.85, 0.0);
+	off = gov_run(20.0, 1.0, 0.85, 0.3);
+	off += gov_run(20.0, 1.0, 0.85, 0.2);
+	off += gov_run(1.0, 1.0, 0.85, 0.3);
+	off += gov_run(1.0, 1.0, 0.85, 0.3);
+	off += gov_run(20.0, 1.0, 0.85, 0.3);
+	CHECK(gov_off == 0 && p.worker != NULL && off < 0.5);
+	prop_stop_thread(&p);
+}
+
+/* a trial is judged against the median of the recent seconds with the worker, not the one that started it */
+static void gov_median(void)
+{
+	gov_begin();
+	gov_windows(10, 1.0, 0.9);
+	gov_windows(1, 0.6, 0.9);
+	gov_windows(3, 0.93, 0.9);
+	gov_windows(15, 1.0, 0.9);
+	gov_windows(2, 0.93, 0.9);
+	gov_windows(1, 0.6, 0.9);
+	gov_windows(10, 1.0, 0.9);
+	CHECK(gov_off == 0 && p.worker != NULL);
+	prop_stop_thread(&p);
+}
+
+/* once back on, the worker stays on for the pause before the next trial */
+static void gov_back_on(void)
+{
+	int k;
+	gov_begin();
+	gov_run(40.0, 0.4, 0.9, 0.0);
+	CHECK(gov_off == 1 && p.worker == NULL);
+	for (k = 0; k < 120 && !gov_on; k++) gov_run(1.0, 0.9, 0.8, 0.0);
+	CHECK(gov_on == 1 && p.worker != NULL);
+	CHECK(gov_run(10.0, 0.9, 0.8, 0.0) == 0.0);
+	prop_stop_thread(&p);
+}
+
+/* where the worker cannot start again (one CPU allowed), the retries back off */
+static void gov_one_cpu(void)
+{
+#ifdef __linux__
+	cpu_set_t all, one;
+	int b;
+#elif defined(_WIN32)
+	DWORD_PTR all, sys;
+#endif
+	gov_begin();
+	gov_run(20.0, 0.4, 0.9, 0.0);
+	CHECK(gov_off == 1 && p.worker == NULL);
+#ifdef __linux__
+	CHECK(sched_getaffinity(0, sizeof(all), &all) == 0);
+	CPU_ZERO(&one);
+	for (b = 0; b < CPU_SETSIZE; b++)
+		if (CPU_ISSET(b, &all)) { CPU_SET(b, &one); break; }
+	CHECK(sched_setaffinity(0, sizeof(one), &one) == 0);
+#elif defined(_WIN32)
+	CHECK(GetProcessAffinityMask(GetCurrentProcess(), &all, &sys));
+	CHECK(SetProcessAffinityMask(GetCurrentProcess(), all & (0 - all)));
+#endif
+	gov_run(60.0, 0.4, 0.9, 0.0);
+#if defined(__linux__) || defined(_WIN32)
+	CHECK(gov_one >= 1 && gov_one <= 4 && p.worker == NULL);
+#endif
+#ifdef __linux__
+	CHECK(sched_setaffinity(0, sizeof(all), &all) == 0);
+#elif defined(_WIN32)
+	CHECK(SetProcessAffinityMask(GetCurrentProcess(), all));
+#endif
+	prop_stop_thread(&p);
+}
+
 #ifdef _WIN32
 /* the worker runs at the priority of the thread that started it */
 static void priority(void)
@@ -403,6 +633,16 @@ int main(int argc, char **argv)
 	pins_mask();
 	foreign_sync();
 	blocking_sync();
+#ifndef _WIN32
+	spin_bound();
+#endif
+	one_cpu();
+	gov_contention();
+	gov_collapse();
+	gov_stall();
+	gov_median();
+	gov_back_on();
+	gov_one_cpu();
 #ifdef _WIN32
 	priority();
 #endif
