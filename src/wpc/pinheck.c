@@ -69,6 +69,20 @@ static UINT8 brd_sw_logged[10], brd_lamps_logged[9];
 
 static const pinheck_tGameData *pinheck_game(void) { return (const pinheck_tGameData *)core_gameData; }
 
+/* per-game data the driver does not support is named at start, not dropped silently */
+static void pinheck_unsupported(void)
+{
+	const pinheck_tGameData *g = pinheck_game();
+	if (g->rgbInverted) {
+		fprintf(stderr, "pinheck: %s: inverted WS2801 lines are not supported, the RGB outputs are as sent\n", Machine->gamedrv->name);
+		logerror("pinheck: %s: inverted WS2801 lines are not supported\n", Machine->gamedrv->name);
+	}
+	if (g->width != DISPLAY_W || g->height != DISPLAY_H) {
+		fprintf(stderr, "pinheck: %s: a %dx%d display is not supported, frames are taken as 128x32\n", Machine->gamedrv->name, g->width, g->height);
+		logerror("pinheck: %s: a %dx%d display is not supported\n", Machine->gamedrv->name, g->width, g->height);
+	}
+}
+
 static uint8_t pinheck_brd_swcol(void *ctx, int col) { (void)ctx; return coreGlobals.swMatrix[col + 1]; }
 static uint16_t pinheck_brd_cab(void *ctx) { (void)ctx; return (uint16_t)(coreGlobals.swMatrix[0] | coreGlobals.swMatrix[9] << 8); }
 
@@ -706,6 +720,7 @@ static MACHINE_INIT(pinheck)
 		logerror("pinheck: '%s' is the pinHeck system set, not a game\n", Machine->gamedrv->name);
 		return;
 	}
+	pinheck_unsupported();
 	memcpy(propmem, memory_region(PINHECK_PROPREGION), 0x8000);
 	prop_init(&prop, memory_region(PINHECK_BIOSREGION), propmem);
 #ifdef PINMAME_JIT_ASMJIT

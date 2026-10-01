@@ -239,7 +239,7 @@ static sim_tSimData dominosSimData = {
   NULL,                 /* no static drawing */
   TRUE,                 /* manual plunger (Space) next to the autolauncher */
   NULL,                 /* no custom key conditions */
-  TRUE                  /* the keys move a ball on the playfield: no Up/Down in multiball */
+  TRUE                  /* autoBall: the keys move the selected ball, or the first free one; Up/Down select among free balls */
 };
 
 static core_tLCDLayout dominos_disp[] = {
@@ -251,7 +251,7 @@ static pinheck_tGameData dominosGameData = {
     { FLIP_SWNO(PINHECK_SWLFLIP, PINHECK_SWRFLIP), 0, 1, PINHECK_CUSTSOLS, SNDBRD_NONE, 0, 6, 0,
       pinheck_getsol, dominos_handleMech, dominos_getMech },
     &dominosSimData },
-  PINHECK_GAME_DEFAULTS
+  PINHECK_DOMINOS_DATA
 };
 
 static void init_dominos(void) {

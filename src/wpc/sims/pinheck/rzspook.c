@@ -123,7 +123,6 @@ PINHECK_INPUT_PORTS_END
 #define GATE_OPEN_US 1700 /* servo 0: 1,227 us closed, 2,222 us open (servo test, factory settings) */
 
 static struct {
-  int since[25];  /* frames since each coil was last on */
   int drop;       /* drop target down, -1 = not yet set */
   int gateUs;     /* servo 0 (Spaulding gate): last pulse width in us, 0 = none yet */
   int robotUs;    /* servo 1 (robot): last pulse width in us, 0 = none yet */
@@ -219,8 +218,6 @@ static int rzspook_handleBallState(sim_tBallStatus *ball, int *inports) {
 static void rzspook_handleMech(int mech) {
   static const int coils[3][3] = { { sUFlipHigh, sUFlipLow, swUFlipEOS }, { sRFlipHigh, sRFlipLow, swRFlipEOS }, { sLFlipHigh, sLFlipLow, swLFlipEOS } };
   int i;
-  for (i = 1; i <= 24; i++)
-    locals.since[i] = sol(i) ? 0 : locals.since[i] < 10000 ? locals.since[i] + 1 : 10000;
   if (pinheck_servo(0)) locals.gateUs = pinheck_servo(0);
   if (pinheck_servo(1)) locals.robotUs = pinheck_servo(1);
   if ((mech & 0x01) && (sol(sDrop) || locals.drop < 0)) rzspook_setDrop(0);
@@ -262,7 +259,7 @@ static sim_tSimData rzspookSimData = {
   NULL,                 /* no static drawing */
   TRUE,                 /* manual plunger (Space) next to the autoplunger */
   NULL,                 /* no custom key conditions */
-  TRUE                  /* the keys move a ball on the playfield: no Up/Down in multiball */
+  TRUE                  /* autoBall: the keys move the selected ball, or the first free one; Up/Down select among free balls */
 };
 
 static core_tLCDLayout rzspook_disp[] = {
@@ -282,7 +279,6 @@ static void init_rzspook(void) {
   int i;
   core_gameData = &rzspookGameData.core;
   memset(&locals, 0, sizeof(locals));
-  for (i = 0; i <= 24; i++) locals.since[i] = 10000;
   locals.drop = -1;
   for (i = 0; i < 3; i++) locals.eos[i] = -1;
 }

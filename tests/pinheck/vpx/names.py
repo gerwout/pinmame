@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """A game's names (src/wpc/pinheck_names.h) against the driver's numbering, and the pinHeck system script for VPX.
   names.py check SRC [GAME]   every name has a number the driver gives that device; GAME.c and pinheck.c agree
-  names.py vbs SRC [GAME]     the system script a table loads with LoadVPM (to stdout): pinheck.vbs for dominos
+  names.py vbs SRC [GAME]     the system script a table loads with LoadVPM (to stdout): pinheck.vbs for dominos,
+                              GAME.vbs (rzspook.vbs, ...) for the others, which say so in their first line
 GAME is dominos (the default) or rzspook."""
 import re
 import sys
@@ -134,6 +135,8 @@ vpmSystemHelp = "pinHeck keys:" & vbNewLine &_
 def vbs(src, game='dominos'):
     names = read(src, game)
     out = [HEAD.lstrip('\n') % TITLE[game]]
+    if game != 'dominos':
+        out.insert(0, "' %s.vbs: save under this name (pinheck.vbs is Domino's); its table loads it with LoadVPM\n" % game)
     for t in TABLES:
         out.append("\n' %s\n" % {'switch': 'Switches', 'lamp': 'Lamps', 'solenoid': 'Solenoid outputs'}[t])
         out += ['Const %-20s = %3d  \' %s\n' % (i, n, name) for n, i, name in names[t]]

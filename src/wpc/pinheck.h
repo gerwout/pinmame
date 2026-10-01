@@ -64,8 +64,9 @@ typedef struct {
   int inService;          /* PINHECK_INSERVICE seeds the update record (version: core.hw.gameSpecific1) */
 } pinheck_tGameData;
 
-/* Domino's values: 128 x 32, POSITION 340, servo levels 1.0-2.0 ms, WS2801 as sent, PINHECK_INSERVICE applies */
-#define PINHECK_GAME_DEFAULTS 128, 32, 340, 1000, 2000, 0, 1
+/* Domino's values: 128 x 32, POSITION 340, servo levels 1.0-2.0 ms, WS2801 as sent, PINHECK_INSERVICE applies.
+   Only Domino's and the system set use them; every other game spells out its own */
+#define PINHECK_DOMINOS_DATA 128, 32, 340, 1000, 2000, 0, 1
 
 extern PINMAME_VIDEO_UPDATE(pinheck_video);
 extern int pinheck_getsol(int solNo);
