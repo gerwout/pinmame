@@ -3657,6 +3657,13 @@ void core_dmd_pwm_init(const core_tLCDLayout* layout, const int filter, const in
       dmd_state->fir_size = dmd_state->nFrames = sizeof(fir_254_15) / sizeof(UINT32);
     }
     break;
+  case CORE_DMD_PWM_FILTER_PINHECK_16: // pinHeck raw DMD: 16 subframes of one level each (a dot of value v is lit in v of them), about 785 Hz
+    {
+      static const UINT32 fir_box_16[] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }; // any 16 consecutive subframes hold each level once
+      dmd_state->fir_weights = fir_box_16;
+      dmd_state->fir_size = dmd_state->nFrames = sizeof(fir_box_16) / sizeof(UINT32);
+    }
+    break;
   default:
     assert(0); // Unsupported filter
   }
@@ -3989,6 +3996,21 @@ UINT8* core_dmd_update_identify(const core_tLCDLayout* layout, unsigned int * ra
         *rawData++ = (intens1 >> 6) & 0x03;
         *rawData++ = (intens2 >> 7) & 0x03;
       }
+    }
+    break;
+  case CORE_DMD_PWM_COMBINER_SUM_16: // Sum of the last 16 frames (pinHeck raw DMD: one subframe per level, the level-15 one always dark, so 0-15)
+    {
+      assert((dmd_state->width & 7) == 0 && dmd_state->nFrames >= 16);
+      memset(dmd_state->tempRawFrame, 0, dmd_state->frameSize);
+      for (int i = 1; i <= 16; i++) {
+        UINT8* rawData = dmd_state->tempRawFrame;
+        const UINT8* frameData = dmd_state->rawFrames + ((nf + (dmd_state->nFrames - i)) % dmd_state->nFrames) * dmd_state->rawFrameSize;
+        for (int kk = 0; kk < dmd_state->rawFrameSize; kk++)
+          for (UINT8 ll = 0, data = *frameData++; ll < 8; ll++, data <<= 1)
+            (*rawData++) += (data >> 7);
+      }
+      for (int kk = 0; kk < dmd_state->frameSize; kk++)
+        if (dmd_state->tempRawFrame[kk] > 15) dmd_state->tempRawFrame[kk] = 15;
     }
     break;
   default:

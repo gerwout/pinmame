@@ -86,6 +86,8 @@ extern int pinheck_getsol(int solNo);
 extern int pinheck_servo(int servo);
 extern void pinheck_flash_hex(void);
 extern MACHINE_DRIVER_EXTERN(PINHECK);
+extern MACHINE_DRIVER_EXTERN(PINHECKDMD);
 #define gl_mPINHECK PINHECK
+#define gl_mPINHECKDMD PINHECKDMD
 
 #endif
