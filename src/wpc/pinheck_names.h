@@ -27,10 +27,11 @@
 
    The Jetsons (pinheck_jetsons_*).
    Sources: Jetsons_Switch_Matrix_Production.pdf, Jetsons_Light_Matrix_Production.pdf and JETSONS-WIRE-TO-BOARD.pdf
-   (coils, GI, optos); numbering as above. A device is numbered where JET_V004 reads it: the kickout hole on
-   switch 7 (18; the switch chart says 6), the trough's eject position and the scoop on their optos (92, 96;
-   the chart's switches 33 and 8 are never read). Not listed: switches 14, 15, 22, 23, 30, 31, 38, 39 and lamps
-   45-47, which the firmware uses but no chart names. Servo levels 0-255 are 0-180 degrees (0.544-2.4 ms); servo 0
+   (coils, GI, optos); numbering as above, PinMAME numbers. A device is numbered where JET_V004 reads it: the
+   kickout hole on 18 (the switch chart says 17), the trough's eject position on its opto 92 (the chart's Ball
+   Trough 1, 52, is never read). The scoop opto (96) ejects the ball; the chart's Scoop switch (21) also fires
+   the scoop coil, 3 s after it closes in a game. Not listed: switches 27, 28, 37, 38, 47, 48, 57 and 58, and
+   lamps 66-68, which the firmware uses but no chart names. Servo levels 0-255 are 0-180 degrees (0.544-2.4 ms); servo 0
    is the Orbitty topper. The firmware never writes the external RGB LED (62-64). HandleMechanics bit 0 closes
    the flippers' end-of-stroke switches while their coils are on. */
 #ifndef PINHECK_NAMES_H
@@ -373,6 +374,7 @@ static const pinheck_name_t pinheck_jetsons_switch_names[] = {
   {  15, "swLLane",     "Left Lane" },
   {  16, "swElroy",     "Elroy Loop" },
   {  18, "swKickout",   "Kickout Hole" },
+  {  21, "swScoopSw",   "Scoop" },
   {  22, "swExtraBall", "Extra Ball" },
   {  23, "swLSling",    "Left Sling" },
   {  24, "swLInlane",   "Left Inlane" },
