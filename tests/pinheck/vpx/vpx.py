@@ -18,7 +18,7 @@ import sys
 import wave
 
 FPS = 60
-W, H = 128, 32
+W, H = 128, 64 if os.environ.get('PINHECK_GAME') == 'jetsons' else 32    # the module PINHECK_GAME has
 MENU_AT, SEND_AT, GAP = 10.5, 11.5, 0.25
 ENTER, BACK, LFLIP, RFLIP = 6, 5, 114, 112      # cabinet switches; the flippers through PinMAME's flipper column
 PROBE_AT = 900                                  # frame: switch numbers that do not exist are set, then cleared
@@ -234,8 +234,8 @@ def media(d, ref):
     fails = []
     _, other = api_log(d)
     avail = [l for l in other if l.startswith('avail ')]
-    if avail != ['avail 0 1 type 15 128x32 depth 16 length 0']:
-        fails.append('display announced as %s, expected one 128x32 VIDEO display of depth 16' % avail)
+    if avail != ['avail 0 1 type 15 %dx%d depth 16 length 0' % (W, H)]:
+        fails.append('display announced as %s, expected one %dx%d VIDEO display of depth 16' % (avail, W, H))
     lut = [rgb565(v) for v in range(256)]
     raw = open(os.path.join(d, 'frames.log'), 'rb').read()
     rec = 20 + W * H

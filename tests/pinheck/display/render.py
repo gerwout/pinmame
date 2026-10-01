@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check a PinMAME screen snapshot of a pinHeck game against the decoded frame log:
-the visible area is SCALE x the 128x32 frame wide and the full screen high, the frame is
+the visible area is SCALE x the 128-dot frame wide and the full screen high, the frame (128x32 in
+the module's look, 128x64 as sent) is
 drawn SCALE x SCALE at the top left, and everything else is black apart from the core's
 lamp/switch/solenoid panel, which starts 3 rows under the display and uses only the core's
 own pens, never an RGB332 frame colour, and a game simulator's ball list and plunger bar to its
@@ -12,10 +13,9 @@ import sys
 import zlib
 
 sys.dont_write_bytecode = True  # no __pycache__ next to the tests
-from frames import FRAME, read_log  # noqa: E402
+from frames import FRAME, W, H, read_log  # noqa: E402
 from look import parse as parse_look, render as render_look  # noqa: E402
 
-W, H = 128, 32
 SCALE = 2
 SCREEN_H = 256            # CORE_SCREENY: standalone PinMAME shows the full screen height
 TOL = 7                   # 8 -> 5 bit -> 8 bit rounding of a 15 bpp screen
@@ -64,7 +64,10 @@ def near(p, q):
 
 
 def frame_matches(rows, f, look):
-    """the frame region shows f in the module's look (look.py; the exact look draws each dot SCALE x SCALE)"""
+    """the frame region shows f in the module's look (look.py; the exact look draws each dot SCALE x SCALE);
+    the 128x64 module has no look"""
+    if H != 32:
+        return all(near(rows[y][x], rgb332(f[(y // SCALE) * W + x // SCALE])) for y in range(H * SCALE) for x in range(W * SCALE))
     img = render_look(look, f)
     return all(near(rows[y][x], img[y][x]) for y in range(H * SCALE) for x in range(W * SCALE))
 
