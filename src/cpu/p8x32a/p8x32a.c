@@ -75,12 +75,62 @@ static void lazy_exit(p8x32a *p);
 /* the lazy cog catches up to t */
 #define lazy_catch(p, t) do { if ((p)->lz_on && (t) > (p)->lz_at) lazy_run((p), (t)); } while (0)
 
-/* a hub write at h that changes a byte: the lazy cog reads hub RAM as it was before it */
+/* a hub write at h that changes a byte: the lazy cog reads hub RAM as it was before it, the bytes it replaces kept
+   in the journal (or, the journal full, by catching up first) */
 P8_COLD void lazy_write(p8x32a *p, unsigned ha, unsigned sz, uint32_t v, uint64_t h)
 {
 	unsigned k;
 	for (k = 0; k < sz; k++)
-		if (p->hub[ha + k] != (uint8_t)(v >> (8 * k))) { lazy_catch(p, h - 1); return; }
+		if (p->hub[ha + k] != (uint8_t)(v >> (8 * k))) break;
+	if (k == sz || h - 1 <= p->lz_at) return;
+	if (p->jn_off || p->jn == P8X32A_JN) {
+		if (!p->jn_off) p->jn_full++;
+		lazy_catch(p, h - 1);
+		return;
+	}
+	p->jn_t[p->jn] = h;
+	p->jn_a[p->jn] = (uint16_t)ha;
+	p->jn_sz[p->jn] = (uint8_t)sz;
+	for (k = 0; k < sz; k++) p->jn_old[p->jn][k] = p->hub[ha + k];
+	p->jmap[ha >> 5] |= (uint8_t)(1u << ((ha >> 2) & 7));
+	p->jn++;
+	p->jn_writes++;
+}
+
+/* the hub long at a (aligned) as it was at t: the bytes of the earliest entry after t that wrote them */
+static uint32_t jn_rd32(const p8x32a *p, uint32_t a, uint64_t t)
+{
+	uint8_t b[4];
+	int k, j;
+	memcpy(b, p->hub + a, 4);
+	for (k = p->jn - 1; k >= 0; k--)
+		if (p->jn_t[k] > t && (p->jn_a[k] & ~3u) == a)
+			for (j = 0; j < p->jn_sz[k]; j++) b[(p->jn_a[k] & 3) + j] = p->jn_old[k][j];
+	return b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+}
+
+uint8_t p8x32a_hub_at(const p8x32a *p, uint32_t a, uint64_t t)
+{
+	a &= 0xFFFF;
+	if (!p->jn || !(p->jmap[a >> 5] >> ((a >> 2) & 7) & 1)) return p->hub[a];
+	return (uint8_t)(jn_rd32(p, a & ~3u, t) >> (8 * (a & 3)));
+}
+
+/* the lazy cog has run to t: the entries up to t are done with */
+static void jn_drop(p8x32a *p, uint64_t t)
+{
+	int k, j = 0;
+	for (k = 0; k < p->jn; k++) p->jmap[p->jn_a[k] >> 5] = 0;
+	for (k = 0; k < p->jn; k++)
+		if (p->jn_t[k] > t) {
+			p->jn_t[j] = p->jn_t[k];
+			p->jn_a[j] = p->jn_a[k];
+			p->jn_sz[j] = p->jn_sz[k];
+			memcpy(p->jn_old[j], p->jn_old[k], 4);
+			p->jmap[p->jn_a[j] >> 5] |= (uint8_t)(1u << ((p->jn_a[j] >> 2) & 7));
+			j++;
+		}
+	p->jn = (uint8_t)j;
 }
 static void jit_drop(p8x32a *p, int n);
 
@@ -1120,7 +1170,7 @@ static void dec_fill(p8x32a_dec *e, uint32_t i)
 static unsigned hub_rw(p8x32a *p, int n, uint32_t i, uint32_t s, uint32_t d, uint64_t h, uint64_t m3, unsigned fl)
 {
 	p8x32a_loop *l = &p->loop[n];
-	uint32_t *ram = p->cog[n].ram, a = s & 0xFFFF, w = rd32(p, a), r;
+	uint32_t *ram = p->cog[n].ram, a = s & 0xFFFF, w = p->jn && p->lz_on && n == p->lz ? jn_rd32(p, a & 0xFFFC, h) : rd32(p, a), r;
 	unsigned op = OP(i), dst = DST(i);
 	if (!FWR(i) && a < 0x8000) {
 		unsigned sz = op == 2 ? 4 : op == 1 ? 2 : 1, ha = a & ~(sz - 1), k;
@@ -1295,6 +1345,7 @@ static int run_local(p8x32a *p, int n, uint64_t t, uint64_t lim, unsigned gen)
 					st.tl = tl;
 					st.slot = p->slot_base + 3 + 2 * (uint64_t)n;
 					st.hub = p->hub;
+					st.jmap = p->jmap;
 					st.latch = 0;
 				}
 				k = b->fn(&st);
@@ -1538,6 +1589,7 @@ P8_COLD void lazy_run(p8x32a *p, uint64_t t)
 	c->ev_t = P8X32A_NEVER; /* out of the schedule */
 	p->now = now;
 	p->lz_at = t;
+	if (p->jn) jn_drop(p, t);
 }
 
 /* the cog's translated blocks are built again: with or without its OUTA writes */
@@ -1711,6 +1763,8 @@ void p8x32a_reset(p8x32a *p, uint64_t t)
 		if (p->bus.lazy) p->bus.lazy(p->bus.ctx, t, 0, 0, 0);
 	}
 	p->lz_on = p->lz_nh = 0;
+	p->jn = 0;
+	memset(p->jmap, 0, sizeof(p->jmap));
 	memset(p->lz_try, 0, sizeof(p->lz_try));
 	memset(p->lz_wait, 0, sizeof(p->lz_wait));
 	p->flushed = t;

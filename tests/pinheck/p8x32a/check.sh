@@ -73,6 +73,7 @@ rtl_case() {
 	$P1RTL -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args -dump "$o.rtlhub" > "$o.rtl"
 	sleeps=$(sed -n "s/^' EXPECT-SLEEPS: //p" "$1")
 	lazies=$(sed -n "s/^' EXPECT-LAZY: //p" "$1")
+	journal=$(sed -n "s/^' EXPECT-JOURNAL: //p" "$1")
 	./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args $3 ${sleeps:+-sleeps} ${lazies:+-lazies} -dump "$o.ourhub" > "$o.our" 2> "$o.log"
 	if cmp -s "$o.rtl" "$o.our" && cmp -s "$o.rtlhub" "$o.ourhub"; then pass=$((pass + 1))
 	else echo "RTL MISMATCH $1"; diff "$o.rtl" "$o.our" | head -6; fail=$((fail + 1)); fi
@@ -80,6 +81,9 @@ rtl_case() {
 	if [ -n "$exp" ] && ! grep -qF "$exp" "$o.log"; then echo "LOG MISSING $1: $exp"; fail=$((fail + 1)); fi
 	if [ -n "$sleeps" ] && ! grep -qxF "p8run: $sleeps idle-loop sleeps" "$o.log"; then echo "SLEEPS $1: $(grep -F idle-loop "$o.log"), expected $sleeps"; fail=$((fail + 1)); fi
 	if [ -n "$lazies" ] && ! grep -qxF "p8run: $lazies lazy cogs" "$o.log"; then echo "LAZY $1: $(grep -F 'lazy cogs' "$o.log"), expected $lazies"; fail=$((fail + 1)); fi
+	# EXPECT-JOURNAL: e f = the lazy cog's journal took e entries and was full f times
+	if [ -n "$journal" ] && ! grep -qxF "p8run: $(echo $journal | cut -d' ' -f1) journal entries, $(echo $journal | cut -d' ' -f2) catch-ups with it full" "$o.log"; then
+		echo "JOURNAL $1: $(grep -F 'journal entries' "$o.log"), expected $journal"; fail=$((fail + 1)); fi
 	if grep -q "p8x32a: lazy\|p8run: lazy" "$o.log"; then echo "LAZY $1: $(grep "p8x32a: lazy\|p8run: lazy" "$o.log" | head -3)"; fail=$((fail + 1)); fi
 	# EXPECT-CLKSHIFT: d v = with CLKSET moving queued edges d cycles earlier, the long at $6000 is v
 	set -- "$1" $(sed -n "s/^' EXPECT-CLKSHIFT: //p" "$1")

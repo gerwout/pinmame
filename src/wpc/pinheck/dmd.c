@@ -24,7 +24,7 @@ void pinheck_dmd_init(pinheck_dmd *d, int full, const uint8_t *hub, uint32_t buf
 }
 
 /* P18 rising: the row's dots go to the output latches; P20 marks a subframe's first row */
-static void latch(pinheck_dmd *d, uint32_t now)
+static void latch(pinheck_dmd *d, uint32_t now, uint64_t t)
 {
 	int x;
 	if (now & DMD_P20) {
@@ -51,7 +51,8 @@ static void latch(pinheck_dmd *d, uint32_t now)
 		memset(d->latched, 0, DMD_ROW);
 		if (d->rows < 0 || !d->count) return;
 		for (x = 0; x < DMD_W; x += 2) {
-			const uint8_t v = d->hub[(d->buf + (uint32_t)d->rows * (DMD_W / 2) + (uint32_t)(x >> 1)) & 0xFFFFu];
+			const uint32_t a = (d->buf + (uint32_t)d->rows * (DMD_W / 2) + (uint32_t)(x >> 1)) & 0xFFFFu;
+			const uint8_t v = d->hub_at ? d->hub_at(d->ctx, a, t) : d->hub[a];
 			if ((v >> 4) > level) d->latched[x >> 3] |= (uint8_t)(0x80 >> (x & 7));
 			if ((v & 15) > level) d->latched[x >> 3] |= (uint8_t)(0x40 >> (x & 7));
 		}
@@ -107,6 +108,6 @@ void pinheck_dmd_pins(pinheck_dmd *d, uint64_t t, uint32_t out, uint32_t dir)
 		else d->shift[b >> 3] &= (uint8_t)~(0x80 >> (b & 7));
 		d->nbits++;
 	}
-	if (rise & DMD_P18) latch(d, now);
+	if (rise & DMD_P18) latch(d, now, t);
 	if (rise & DMD_P19) row_clock(d, now, t);
 }

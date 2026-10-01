@@ -46,8 +46,13 @@ PY
 	else echo "mutant $name caught by $bad cases (first $first)"; fi
 }
 mutant none '' ''
-mutant hub-write-catch-up 'if (p->hub[ha + k] != (uint8_t)(v >> (8 * k))) { lazy_catch(p, h - 1); return; }' \
-	'if (p->hub[ha + k] != (uint8_t)(v >> (8 * k))) return;'
+mutant journal-read 'if (p->jn_t[k] > t && (p->jn_a[k] & ~3u) == a)' 'if (0)'
+mutant journal-earliest 'for (k = p->jn - 1; k >= 0; k--)
+		if (p->jn_t[k] > t' 'for (k = 0; k < p->jn; k++)
+		if (p->jn_t[k] > t'
+mutant journal-full 'if (!p->jn_off) p->jn_full++;
+		lazy_catch(p, h - 1);' 'if (!p->jn_off) p->jn_full++;'
+mutant journal-old 'p->jn_old[p->jn][k] = p->hub[ha + k];' 'p->jn_old[p->jn][k] = (uint8_t)(v >> (8 * k));'
 mutant ina-lazy 'if (p->lz_on && (m & p->lz_pins)) return ina_lazy(p, t);' ';'
 mutant waitpxx-exit 'if (p->lz_on && (c->s & p->lz_pins)) lazy_exit(p);' ';'
 mutant cogop-exit 'if (p->lz_on && (op == 2 || op == 3) && num == p->lz) lazy_exit(p);' ';'

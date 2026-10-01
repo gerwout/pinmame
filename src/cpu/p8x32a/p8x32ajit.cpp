@@ -180,6 +180,13 @@ struct Emit {
 			a.mov(x86::esi, i);
 			stop_before(k, x86::esi);
 			a.bind(on);
+			// a long with a journal entry: the interpreter reads it
+			a.mov(x86::esi, x86::ecx);
+			a.and_(x86::esi, 0xFFFF);
+			a.shr(x86::esi, 2);
+			a.mov(x86::r11, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, jmap)));
+			a.bt(x86::dword_ptr(x86::r11), x86::esi);
+			a.jc(late);
 			// the next instruction starts at latch + 7
 			a.mov(x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, latch)), x86::rax);
 			a.lea(T2, x86::ptr(x86::rax, (int)(7 - 4 * (k + 1))));
