@@ -24,7 +24,7 @@ int main()
 	if (!jit) { std::printf("jit_oom: no translator\n"); return 1; }
 	fail_new = true;
 	try {
-		b = p8x32a_jit_build(jit, NULL, 0, 0xA0BC0000u, ram, var);
+		b = p8x32a_jit_build(jit, NULL, 0, 0xA0BC0000u, ram, var, 0);
 	} catch (...) {
 		bad = 1;
 	}

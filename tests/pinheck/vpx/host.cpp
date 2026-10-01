@@ -1,10 +1,11 @@
 /* libpinmame test host: runs a game headless through libpinmame's callback API or, with -p, the plugin
    message API VPX standalone uses, and logs what a host receives.
-   host [-p] [-o] [-x] [-P] [-R] [-m mech] [-s switches] GAME FRAMES DIR
+   host [-p] [-o] [-x] [-P] [-R] [-n GAME2] [-D] [-m mech] [-s switches] GAME FRAMES DIR
      -p  plugin message API (a minimal MsgPluginAPI host); -o sample lamps 1-98 and solenoids 1-64 each frame;
      -x  probe lamps and solenoids 0, -1 and 100000 and pinHeck lamp numbers that do not exist; -m  HandleMechanics mask (default 0);
      -s  file of "frame switch state" lines applied with PinmameSetSwitch; -P  physical outputs (SolMask(2) = 2);
-     -R  stop after FRAMES, copy $PINHECK_LINK_LOG to DIR/link1.log, run FRAMES more in a new session
+     -R  stop after FRAMES, copy $PINHECK_LINK_LOG to DIR/link1.log, run FRAMES more in a new session (of GAME2 with -n)
+     -D  DMD frames raw (PINMAME_DMD_MODE_RAW)
    host -T: messages broadcast from a second thread while this one subscribes (for a ThreadSanitizer build)
    DIR gets api.log, frames.bin (VIDEO and DMD frames: uint32 frame, then the pixels; the plugin's with the top bit
    set) and audio.raw (int16 stereo). */
@@ -276,7 +277,8 @@ static int thread_check()
 int main(int argc, char **argv)
 {
 	if (argc == 2 && !strcmp(argv[1], "-T")) return thread_check();
-	bool plugin = false, restart = false;
+	bool plugin = false, restart = false, raw = false;
+	const char *game2 = nullptr;
 	int mech = 0, a = 1;
 	for (; a < argc && argv[a][0] == '-'; a++) {
 		if (!strcmp(argv[a], "-p")) plugin = true;
@@ -284,6 +286,8 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[a], "-x")) probe = true;
 		else if (!strcmp(argv[a], "-P")) physout = true;
 		else if (!strcmp(argv[a], "-R")) restart = true;
+		else if (!strcmp(argv[a], "-D")) raw = true;
+		else if (!strcmp(argv[a], "-n") && a + 1 < argc) game2 = argv[++a];
 		else if (!strcmp(argv[a], "-m") && a + 1 < argc) mech = atoi(argv[++a]);
 		else if (!strcmp(argv[a], "-s") && a + 1 < argc) {
 			FILE *f = fopen(argv[++a], "r");
@@ -294,7 +298,7 @@ int main(int argc, char **argv)
 		} else return 2;
 	}
 	if (argc - a != 3) {
-		fprintf(stderr, "usage: host [-p] [-o] [-x] [-P] [-R] [-m mech] [-s switches] GAME FRAMES DIR\n");
+		fprintf(stderr, "usage: host [-p] [-o] [-x] [-P] [-R] [-n GAME2] [-D] [-m mech] [-s switches] GAME FRAMES DIR\n");
 		return 2;
 	}
 	const char *game = argv[a], *dir = argv[a + 2];
@@ -313,6 +317,7 @@ int main(int argc, char **argv)
 	PinmameSetHandleKeyboard(0);
 	PinmameSetHandleMechanics(mech);
 	if (physout) PinmameSetSolenoidMask(2, 2);
+	if (raw) PinmameSetDmdMode(PINMAME_DMD_MODE_RAW);
 	if (plugin) {
 		PinmameSetMsgAPI(&api, 0);
 		SubscribeMsg(1, GetMsgID(CTLPI_NAMESPACE, CTLPI_AUDIO_ON_UPDATE_MSG), OnAudio, nullptr);
@@ -336,7 +341,7 @@ int main(int argc, char **argv)
 			groups.clear();
 			last_frame_id = ~0u;
 		}
-		if (PinmameRun(game) != PINMAME_STATUS_OK) { logl("run failed\n"); return 1; }
+		if (PinmameRun(session && game2 ? game2 : game) != PINMAME_STATUS_OK) { logl("run failed\n"); return 1; }
 		while (!done) {
 			run_queue();
 			if (plugin && !plugin_ready && !groups.size() && PinmameIsRunning() && subscribed(GetMsgID(CTLPI_NAMESPACE, CTLPI_STATE_GET_SRC_MSG)))

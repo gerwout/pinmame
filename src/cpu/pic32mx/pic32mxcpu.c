@@ -42,6 +42,7 @@ void pic32cpu_set_context(void *src) { (void)src; }
 
 unsigned pic32cpu_get_reg(int regnum)
 {
+	mips32_settle(&soc.cpu);
 	switch (regnum) {
 	case REG_PC: case PIC32CPU_PC: return soc.cpu.pc;
 	case REG_PREVIOUSPC: return soc.cpu.cur_pc;
@@ -58,6 +59,7 @@ unsigned pic32cpu_get_reg(int regnum)
 
 void pic32cpu_set_reg(int regnum, unsigned val)
 {
+	mips32_settle(&soc.cpu);
 	switch (regnum) {
 	case REG_PC: case PIC32CPU_PC: soc.cpu.pc = val; soc.cpu.npc = val + 4; soc.cpu.delay = 0; return;
 	case REG_SP: mips32_regs(&soc.cpu)[29] = val; return;
@@ -74,6 +76,7 @@ const char *pic32cpu_info(void *context, int regnum)
 {
 	static char buf[32];
 	(void)context;
+	if (regnum < CPU_INFO_FLAGS) mips32_settle(&soc.cpu);
 	switch (regnum) {
 	case CPU_INFO_NAME: return "PIC32MX";
 	case CPU_INFO_FAMILY: return "MIPS32 M4K";

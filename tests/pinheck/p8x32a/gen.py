@@ -14,12 +14,17 @@ REGS = ['r%d' % k for k in range(12)]
 HUB = ['h%d' % k for k in range(4)]
 
 
+WREGS = ['w0', 'w1', 'w2', 'w3', 'v']
+
+
 class Gen:
-    def __init__(self, rnd, hubflags):
+    def __init__(self, rnd, hubflags, worker=None):
         self.r = rnd
         self.hubflags = hubflags
         self.out = []
         self.label = 0
+        # worker: a second random stream for a scan-cog-shaped cog 1 (reads hub RAM, computes, writes OUTA only)
+        self.w = worker
 
     def emit(self, s):
         self.out.append('        ' + s)
@@ -28,6 +33,8 @@ class Gen:
         return self.r.choice(CONDS) if self.r.random() < 0.3 else ''
 
     def src(self):
+        if self.w and self.w.random() < 0.05:
+            return 'ina'
         return '#%d' % self.r.randrange(512) if self.r.random() < 0.4 else self.r.choice(REGS)
 
     def flags(self, writes):
@@ -76,11 +83,56 @@ class Gen:
             self.emit(self.alu())
         self.out.append(lab)
 
+    def worker(self):
+        w = self.w
+        pins = 0
+        while not pins:
+            pins = w.getrandbits(16) << 8 & w.choice([0xFF00, 0xFF0000, 0x0F0F00, 0x1000, 0x80000])
+        out = ['        long    $C0DEE0D0', '        long    $C0DE0B0B', '        org     0',
+               'worker  mov     dira, wpins', '        mov     wp, par', ':loop']
+
+        def alu():
+            if w.random() < 0.8:
+                op, wr = w.choice(WRITES), True
+            else:
+                op, wr = w.choice(TESTS), False
+            src = '#%d' % w.randrange(512) if w.random() < 0.4 else w.choice(WREGS)
+            f = [x for x in ('wz', 'wc') if w.random() < 0.5]
+            if wr and w.random() < 0.1:
+                f.append('nr')
+            c = w.choice(CONDS) if w.random() < 0.3 else ''
+            return '%-12s %-7s %s, %s%s' % (c, op, w.choice(WREGS), src, ' ' + ', '.join(f) if f else '')
+
+        def outa():
+            k = w.randrange(5)
+            if k == 0:
+                return 'mov     outa, %s' % w.choice(WREGS)
+            if k == 1:
+                return 'xor     outa, %s' % w.choice(WREGS)
+            if k == 2:
+                return 'and     outa, %s' % w.choice(WREGS)
+            return '%-7s outa, wpins' % ('muxc' if k == 3 else 'muxz')
+
+        out.append('        %-7s v, wp%s' % (w.choice(['rdbyte', 'rdword', 'rdlong']), w.choice(['', ' wz'])))
+        for _ in range(w.randrange(1, 8)):
+            out.append('        ' + (outa() if w.random() < 0.25 else alu()))
+        out.append('        ' + outa())
+        out += ['        add     wp, #%d' % w.randrange(1, 4), '        and     wp, wmask', '        or      wp, wbase',
+                '        jmp     #:loop', 'wpins   long    $%08X' % pins, 'wp      long    0', 'wmask   long    $FF',
+                'wbase   long    $6200']
+        out += ['%-7s long    $%08X' % (x, w.getrandbits(32)) for x in WREGS]
+        return out
+
     def program(self, n):
         r = self.r
         self.out += ['PUB main', '  cognew(@entry, 0)', '  repeat until long[$6FFC]', 'DAT',
                      '        long    $C0DE5EED', '        org     0']
         self.out.append('entry')
+        if self.w:
+            # cog 1 on the hub bytes at $6200 (hub(), below, writes them); its pins run lazily from about 20000 cycles
+            for x in ('mov     wx, wk', 'shl     wx, #2', 'or      wx, wpar', 'or      wx, #1', 'coginit wx',
+                      'mov     wx, cnt', 'add     wx, wdel', 'waitcnt wx, #0'):
+                self.emit(x)
         self.emit('test    %s, #%d wz, wc' % (r.choice(REGS), r.randrange(512)))
         for _ in range(n):
             k = r.randrange(10)
@@ -95,6 +147,8 @@ class Gen:
         for reg in REGS + ['fl']:
             self.emit('wrlong  %s, ptr' % reg)
             self.emit('add     ptr, #4')
+        if self.w:
+            self.emit('cogstop one')
         self.emit('wrlong  one, done')
         self.emit('cogid   ptr')
         self.emit('cogstop ptr')
@@ -103,7 +157,11 @@ class Gen:
         for k, reg in enumerate(HUB):
             self.out.append('%-7s long    $%04X' % (reg, 0x6200 + r.randrange(0, 0x100, 4) + k))
         self.out += ['fl      long    0', 'ptr     long    $6000', 'done    long    $6FFC', 'one     long    1',
-                     'hmask   long    $FF', 'hbase   long    $6200', '        long    $C0DEE0D0']
+                     'hmask   long    $FF', 'hbase   long    $6200']
+        if self.w:
+            self.out += ['wx      long    0', 'wpar    long    $62000000', 'wdel    long    %d' % self.w.randrange(16000, 24000),
+                         'wk      long    $C0DEADD1'] + self.worker()
+        self.out.append('        long    $C0DEE0D0')
         return '\n'.join(self.out) + '\n'
 
 
@@ -114,11 +172,13 @@ def main():
     ap.add_argument('--first', type=int, default=1)
     ap.add_argument('--length', type=int, default=150)
     ap.add_argument('--hubflags', action='store_true')
+    ap.add_argument('--workers', type=float, default=0, help='share of programs with a scan-cog-shaped cog 1 (RTL only)')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     for seed in range(a.first, a.first + a.count):
         with open(os.path.join(a.out, 'r%05d.spin' % seed), 'w') as f:
-            f.write(Gen(random.Random(seed), a.hubflags).program(a.length))
+            w = random.Random(seed * 7919 + 1)
+            f.write(Gen(random.Random(seed), a.hubflags, w if w.random() < a.workers else None).program(a.length))
 
 
 if __name__ == '__main__':

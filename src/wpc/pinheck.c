@@ -56,7 +56,7 @@ static struct {
 #define PINHECK_SOL_SRV 56  /* servos 0-4: 57-61 */
 #define PINHECK_SOL_EXT 61  /* external WS2801 LED 0 R,G,B, or on-board LED 2 R,G,B: 62-64 */
 #define PINHECK_EXT_LEDS 1  /* the firmware drives one external LED */
-#define PINHECK_ONB_LEDS 3  /* on-board LEDs 0 and 1; a third (America's Most Haunted's ghost) on 62-64 */
+#define PINHECK_ONB_LEDS 3  /* on-board LEDs 0 and 1; a third (game data onbLed2: America's Most Haunted's ghost) on 62-64 */
 #define PINHECK_NSOLS   64
 #define PINHECK_LAMP_ST 64  /* start button lamp: lamp 91 */
 #define PINHECK_NLAMPS  72
@@ -138,7 +138,7 @@ static void pinheck_brd_rgb(void *ctx, uint64_t t, int chain, int led, uint8_t r
 {
 	(void)ctx;
 	if (brd_log) fprintf(brd_log, "%.9f R %d %d %02x%02x%02x %llu\n", timer_get_time(), chain, led, r, g, b, (unsigned long long)t);
-	if ((chain == BOARD_RGB_ONBOARD && led < PINHECK_ONB_LEDS) || (chain == BOARD_RGB_EXTERNAL && led < PINHECK_EXT_LEDS)) {
+	if ((chain == BOARD_RGB_ONBOARD && led < (pinheck_game()->onbLed2 ? PINHECK_ONB_LEDS : 2)) || (chain == BOARD_RGB_EXTERNAL && led < PINHECK_EXT_LEDS)) {
 		int idx = chain == BOARD_RGB_ONBOARD && led < 2 ? PINHECK_SOL_RGB + 3 * led : PINHECK_SOL_EXT + 3 * (chain == BOARD_RGB_ONBOARD ? led - 2 : led);
 		pinheck_brd_level(idx, r);
 		pinheck_brd_level(idx + 1, g);
@@ -328,12 +328,31 @@ static void pinheck_port_write(void *ctx, int port, uint32_t lat, uint32_t tris,
 	pinheck_board_port(&brd, port, lat, tris, cycle);
 }
 
+/* RF13 (P24) with the worker thread: read by the worker, and settled only for an instruction that uses it
+   (mips32_uncertain); its guess is the last value settled */
+static int rf13_guess, rf13_exact = -1;
+
 static uint32_t pinheck_port_read(void *ctx, int port, uint64_t cycle)
 {
 	uint32_t v = pinheck_board_read(&brd, port, cycle);
 	(void)ctx;
 	if (port != PIC32MX_PORTF) return v;
+	if (rf13_exact < 0) rf13_exact = getenv("PINHECK_RF13") && atoi(getenv("PINHECK_RF13")) == 0;
+	if (prop.worker && !rf13_exact) {
+		pic32mx_uncertain(pic32cpu_soc(), RF13, prop_sample(&prop, cycle));
+		return (v & ~RF13) | (rf13_guess ? RF13 : 0);
+	}
 	return (v & ~RF13) | (prop_p24(&prop, cycle) ? RF13 : 0);
+}
+
+static int pinheck_port_settle(void *ctx, uint32_t token, int wait, uint32_t *bits)
+{
+	int v = prop_sample_get(&prop, token, wait);
+	(void)ctx;
+	if (v < 0) return 0;
+	rf13_guess = v;
+	*bits = v ? RF13 : 0;
+	return 1;
 }
 
 static int pinheck_i2c_pins(void *ctx, int module, int scl, int sda, uint64_t cycle)
@@ -534,7 +553,7 @@ static void pinheck_disp_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 }
 
 /* The raw DMD (game data dmdHub): the Propeller thread decodes subframes from the scan pins (P16-P20) into a ring,
-   which the emulation thread hands to the core's PWM integration at each vblank, after the Propeller has caught up.
+   which the emulation thread hands to the core's PWM integration at each vblank, after the queued Propeller work has run.
    Test hook PINHECK_DMD_PROOF also runs the row model (P18-P20 only, a row's dots from hub RAM at its latch) and
    counts the subframes in which it differs. */
 #define PINHECK_DMD_RING 64
@@ -621,6 +640,14 @@ static void pinheck_dmd_pins_cb(void *ctx, uint64_t t, uint32_t out, uint32_t di
 	if (dmd_proof) pinheck_dmd_pins(&dmd_row, t, out, dir);
 }
 
+/* the scan cog running lazily (p8x32a.h): the changes of its pins */
+static void pinheck_dmd_lazy_cb(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
+{
+	(void)ctx;
+	pinheck_dmd_pins(&dmd, t, out, dir);
+	if (dmd_proof) pinheck_dmd_pins(&dmd_row, t, out, dir);
+}
+
 /* test hook PINHECK_DMD_LOG: at each vblank, the number of subframes the decoder queued since the last (uint32) and
    those subframes, as the core is to get them */
 static FILE *dmd_log;
@@ -681,8 +708,10 @@ static void pinheck_disp_init(void)
 		ser.level = 1;
 		ser.bit = -1;
 		prop_set_pins_mask(&prop, DMD_ALL_PINS | (ser_log ? PINHECK_SER_PIN : 0));
+		if (!getenv("PINHECK_LAZY") || atoi(getenv("PINHECK_LAZY")) != 0) prop_set_pins_lazy(&prop, pinheck_dmd_lazy_cb, NULL, DMD_ALL_PINS);
 		return;
 	}
+	prop_set_pins_lazy(&prop, NULL, NULL, 0);
 	prop_set_pins(&prop, pinheck_disp_pins, NULL);
 	prop_set_pins_mask(&prop, DISPLAY_P17 | DISPLAY_P20 | DISPLAY_P21 | DISPLAY_P22);
 }
@@ -875,7 +904,7 @@ static struct CustomSound_interface pinheck_sndInt = { pinheck_sh_start, pinheck
 
 static MACHINE_INIT(pinheck)
 {
-	pic32mx_board board = { NULL, pinheck_port_write, pinheck_port_read, pinheck_uart_tx, pinheck_i2c_pins, pinheck_unmapped, pinheck_exception, pinheck_hold };
+	pic32mx_board board = { NULL, pinheck_port_write, pinheck_port_read, pinheck_uart_tx, pinheck_i2c_pins, pinheck_unmapped, pinheck_exception, pinheck_hold, pinheck_port_settle };
 	const char *log = getenv("PINHECK_UART1_LOG"), *plog = getenv("PINHECK_PROP_LOG");
 
 	prop_stop_thread(&prop);
@@ -983,6 +1012,7 @@ static MACHINE_STOP(pinheck)
 	if (locals.uart1) fclose(locals.uart1);
 	if (locals.proplog) fclose(locals.proplog);
 	locals.uart1 = locals.proplog = NULL;
+	hex_bytes = 0; /* the next session's game may have no HEX */
 	if (locals.have_vol) vfat_free(&vol);
 	if (locals.have_zip) zipsrc_close(&zip);
 	locals.have_vol = locals.have_zip = 0;

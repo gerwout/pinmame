@@ -1,9 +1,11 @@
 #!/bin/sh
 # Headless benchmark and determinism check (Milestone 9).
 #   bench.sh [attract] [video]     time each workload with $SDL3PINMAME; with $REFERENCE set, run it too
-#                                  and require byte-identical UART1, frame, sound and NVRAM output; each timing
+#                                  and require byte-identical UART1, frame (a raw DMD's subframes too), sound and
+#                                  NVRAM output; each timing
 #                                  also gives the slowest 100 ms of host time (PINHECK_TIME_LOG)
-#   bench.sh profile WORKLOAD      perf record one workload with $SDL3PINMAME, then components.py
+#   bench.sh profile WORKLOAD      perf record one workload with $SDL3PINMAME, then components.py (BENCH_PERF_EV: perf
+#                                  record's event options, default -F 999)
 #   bench.sh contention [CASE...]  10 s of attract mode where CPUs are scarce (Linux, taskset; BENCH_CPU_A and BENCH_CPU_B,
 #                                  default 2 and 4, name two allowed CPUs): on one CPU (one), on two CPUs while a busy
 #                                  loop shares the first (busy), with the worker switched every second (flip); each
@@ -106,20 +108,20 @@ run() {
 	machine $ml $bin
 	D=$B/$label/$w
 	# the reference's runs are kept while its machine and the workload are the same
-	key="$FRAMES $MARK $SEND_AT $SEND $KEYS"
+	key="$FRAMES $MARK $SEND_AT $SEND $KEYS dmd.bin"
 	if [ $label = ref ] && [ -s $D/bench.txt ] && [ "$(cat $D/spec.txt 2> /dev/null)" = "$key" ]; then cat $D/bench.txt; return; fi
 	rm -rf $D && mkdir -p $D && cp -r $B/$ml/nvram.base $D/nvram || exit 2
 	echo "$key" > $D/spec.txt
 	wrap=
 	[ -n "$PERF" ] && wrap="$PERF stat -e task-clock,instructions:u,cycles:u -o $D/perf.txt"
-	[ -n "$PERF" ] && [ "$4" = record ] && wrap="$PERF record -F 999 -o $D/perf.data --"
+	[ -n "$PERF" ] && [ "$4" = record ] && wrap="$PERF record ${BENCH_PERF_EV:--F 999} -o $D/perf.data --"
 	{ echo "$MARK mark window"; [ -z "$KEYS" ] || echo "$KEYS"; } > $D/keys.txt
 	t0=$(date +%s.%N)
 	[ -n "$BENCH_CPUS" ] && wrap="taskset -c $BENCH_CPUS $wrap"
 	thr=-nothrottle
 	[ "$BENCH_THROTTLE" = 1 ] && thr=
 	(cd $D && LD_PRELOAD=$B/fixtime.so PINHECK_FIXTIME=$FIXTIME PINHECK_INSERVICE=6 PINHECK_UART1_LOG=$D/uart.log PINHECK_PROP_LOG=$D/prop.log \
-		PINHECK_FRAME_LOG=$D/frames.bin PINHECK_TIME_LOG=$D/time.log PINHECK_WAV=$D/snd.wav PINHECK_UART1_SEND_AT=$SEND_AT PINHECK_UART1_SEND_GAP=1 PINHECK_UART1_SEND="$SEND" \
+		PINHECK_FRAME_LOG=$D/frames.bin PINHECK_DMD_LOG=$D/dmd.bin PINHECK_TIME_LOG=$D/time.log PINHECK_WAV=$D/snd.wav PINHECK_UART1_SEND_AT=$SEND_AT PINHECK_UART1_SEND_GAP=1 PINHECK_UART1_SEND="$SEND" \
 		timeout -k 30 5400 $wrap "$bin" $GAME -rompath $B/$ml/roms -nvram_directory nvram -cfg_directory $B/$ml/cfg -headless \
 		-frames_to_run $FRAMES -skip_gamewarnings $thr -samplefreq 48000 -fakesound -key_script keys.txt > run.out 2>&1) \
 		|| { echo "BENCH FAIL: $w with $bin exited $?"; tail -3 $D/run.out; exit 1; }
@@ -239,7 +241,9 @@ for w in "$@"; do
 	[ -n "$REFERENCE" ] || continue
 	run ref "$REFERENCE" $w || exit 1
 	same=
-	for f in uart.log frames.bin snd.wav nvram/$GAME.nv; do
+	dmd=
+	[ -e $B/opt/$w/dmd.bin ] || [ -e $B/ref/$w/dmd.bin ] && dmd=dmd.bin
+	for f in uart.log frames.bin $dmd snd.wav nvram/$GAME.nv; do
 		if cmp -s $B/opt/$w/$f $B/ref/$w/$f; then same="$same $f"; else echo "DETERMINISM FAIL $w: $f differs from the reference build's"; fail=1; fi
 	done
 	echo "determinism $w: identical$same"

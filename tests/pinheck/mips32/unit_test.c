@@ -43,7 +43,7 @@ static void put(uint8_t *m, uint32_t off, uint32_t w)
 
 static void setup(mips32_state *s, uint32_t pc, uint32_t status)
 {
-	mips32_bus bus = { NULL, rd, wr, NULL, NULL };
+	mips32_bus bus = { NULL, rd, wr, NULL, NULL, NULL };
 	memset(kmem, 0, sizeof(kmem));
 	memset(umem, 0, sizeof(umem));
 	mips32_init(s, &bus, 2, 0x00018700u);

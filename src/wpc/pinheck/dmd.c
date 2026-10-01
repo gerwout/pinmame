@@ -41,6 +41,9 @@ static void latch(pinheck_dmd *d, uint32_t now)
 				const uint32_t b = (start + (uint32_t)x) % DMD_W;
 				if (d->shift[b >> 3] & (0x80 >> (b & 7))) d->latched[x >> 3] |= (uint8_t)(0x80 >> (x & 7));
 			}
+			/* the register in shifting order from bit 0: the next latches take the copy */
+			memcpy(d->shift, d->latched, DMD_ROW);
+			d->nbits = 0;
 		}
 	} else {
 		/* the cog shows subframe k after its start at level k mod 16: a dot is lit while its value is above the level */

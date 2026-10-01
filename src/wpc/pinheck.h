@@ -75,11 +75,13 @@ typedef struct {
   int inService;          /* PINHECK_INSERVICE seeds the update record (version: core.hw.gameSpecific1) */
   int dmdHub;             /* a raw 128 x 32 DMD scanned by a Propeller cog: hub address of its 4 bpp frame; 0: the display link */
   int bootHold;           /* ms the bootloader stand-in holds the PIC32 after a reset without a sign-on */
+  int onbLed2;            /* 1: a third on-board WS2801 LED, on outputs 62-64 (the external chain's LED 0 then has none) */
 } pinheck_tGameData;
 
 /* Domino's values: 128 x 32, POSITION 340, servo levels 1.0-2.0 ms, WS2801 as sent, PINHECK_INSERVICE applies,
-   the display link, a 3 s boot hold. Only Domino's and the system set use them; every other game spells out its own */
-#define PINHECK_DOMINOS_DATA 128, 32, 340, 1000, 2000, 0, 1, 0, 3000
+   the display link, a 3 s boot hold, two on-board LEDs. Only Domino's and the system set use them; every other game
+   spells out its own */
+#define PINHECK_DOMINOS_DATA 128, 32, 340, 1000, 2000, 0, 1, 0, 3000, 0
 
 extern PINMAME_VIDEO_UPDATE(pinheck_video);
 extern int pinheck_getsol(int solNo);

@@ -94,7 +94,7 @@ static int load(const char *path, uint8_t *dst, size_t max, size_t *got)
 
 int main(int argc, char **argv)
 {
-	pic32mx_board board = { NULL, port_write, port_read, uart_tx, i2c_pins, NULL, exception, hold };
+	pic32mx_board board = { NULL, port_write, port_read, uart_tx, i2c_pins, NULL, exception, hold, NULL };
 	unsigned long long cycles = 800000000ull, first = 0, send_at = 0;
 	const char *path = NULL, *rompath = NULL, *prp = NULL, *send = NULL, *zippath = NULL;
 	int boots = 1, b, i, inservice = -1, updatecode = 0, stale = 0;

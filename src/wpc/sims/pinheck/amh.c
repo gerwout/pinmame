@@ -281,7 +281,7 @@ static pinheck_tGameData amhGameData = {
     { FLIP_SWNO(PINHECK_SWLFLIP, PINHECK_SWRFLIP), 0, 1, PINHECK_CUSTSOLS, SNDBRD_NONE, 0, 23, 0,
       pinheck_getsol, amh_handleMech, amh_getMech },
     &amhSimData },
-  128, 32, 0, 544, 2400, 0, 0, 0x5B0C, 5000
+  128, 32, 0, 544, 2400, 0, 0, 0x5B0C, 5000, 1
 };
 
 static void init_amh(void) {
