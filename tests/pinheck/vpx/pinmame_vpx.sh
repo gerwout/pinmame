@@ -1,6 +1,6 @@
 #!/bin/sh
 # Domino's through libpinmame (spec M10 4.1): display, sound, outputs, switches and mechanics as a host receives them;
-# with PINHECK_GAME=jetsons The Jetsons' 128x64 display and its sound only
+# with PINHECK_GAME=jetsons The Jetsons' 128x64 display and its sound only; with amh America's Most Haunted's raw DMD
 : "${LIBPINMAME:?set LIBPINMAME to the built libpinmame.so}"
 : "${PINHECK_UPDATE_DIR:?set PINHECK_UPDATE_DIR to the game's unzipped update}"
 : "${P8X32A_ROM:?set P8X32A_ROM to the 32 KB Propeller mask ROM (crc32 f99b3070)}"
@@ -23,12 +23,22 @@ launch() {
 	[ -d $B/$name ] || cp -r $B/boot $B/$name || exit 2
 	rm -f $B/$name/*.log $B/$name/*.bin $B/$name/*.raw $B/$name/*.wav
 	(cd $B/$name && PINHECK_INSERVICE=6 PINHECK_OUT_LOG=$PWD/out.log PINHECK_FRAME_LOG=$PWD/frames.log PINHECK_WAV=$PWD/capture.wav \
-		PINHECK_UART1_LOG=$PWD/uart.log timeout -k 30 3000 ../host "$@" > run.out 2>&1) || { echo "VPX FAIL: $name exited $?"; tail -5 $B/$name/run.out; exit 1; }
+		PINHECK_DMD_LOG=$PWD/dmd.log PINHECK_UART1_LOG=$PWD/uart.log timeout -k 30 3000 ../host "$@" > run.out 2>&1) || { echo "VPX FAIL: $name exited $?"; tail -5 $B/$name/run.out; exit 1; }
 }
 fail=0
 # the first boot writes the NVRAM every other launch starts from
 launch boot $GAME 1200 .
 python3 vpx.py displays $B/boot || fail=1
+if [ $LOOK = dmd ]; then
+	# the DMD's frames through the callback and the plugin path, with a clip playing
+	python3 vpx.py dmd $B/boot || fail=1
+	PINHECK_UART1_SEND_AT=10 PINHECK_UART1_SEND="[E96000]~~[V00$CLIP]" launch media -p $GAME 1200 .
+	grep -aq "Playing Video" $B/media/uart.log || { echo "VPX FAIL: [V00$CLIP] not acknowledged"; fail=1; }
+	python3 vpx.py dmd $B/media || fail=1
+	[ $fail -eq 0 ] || exit 1
+	echo "pinmame vpx: ok ($GAME: the raw DMD)"
+	exit 0
+fi
 python3 vpx.py media $B/boot $B/boot/capture.wav || fail=1
 if [ $GAME = jetsons ]; then
 	# a video clip through the plugin message API, after The Jetsons' later sync

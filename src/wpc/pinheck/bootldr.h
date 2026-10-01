@@ -24,7 +24,7 @@ typedef struct pic32_boot {
 	uint8_t *flash;
 	uint32_t flash_size;
 	int state;
-	uint64_t window_end, app_at, tx_free;
+	uint64_t window, window_end, app_at, tx_free; /* window: the hold after a reset, BOOT_WINDOW unless set */
 	int line;
 	uint64_t edge_t[BOOT_EDGES];
 	uint8_t edge_l[BOOT_EDGES];
@@ -45,6 +45,7 @@ typedef struct pic32_boot {
 
 void boot_init(pic32_boot *b, uint8_t *flash, uint32_t flash_size, boot_tx_fn tx, void *tx_ctx);
 void boot_set_log(pic32_boot *b, boot_log_fn fn, void *ctx);
+void boot_set_window(pic32_boot *b, uint64_t pic_cycles); /* from the next reset on */
 void boot_reset(pic32_boot *b, uint64_t pic_cycle);
 void boot_rx(pic32_boot *b, uint64_t pic_cycle, int level);
 void boot_advance(pic32_boot *b, uint64_t pic_cycle);

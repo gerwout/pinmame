@@ -849,7 +849,7 @@ extern "C" void OnStateChange(const int state)
 			else if ((layout->type & CORE_SEGMASK) == CORE_DMD) {
 				pDisplay->layout.width = layout->length;
 				pDisplay->layout.height = layout->start;
-				const int shade_16_enabled = (core_gameData->gen & (GEN_SAM | GEN_SPA | GEN_ALVG | GEN_ALVG_DMD2 | GEN_GTS3)) != 0;
+				const int shade_16_enabled = (core_gameData->gen & (GEN_SAM | GEN_SPA | GEN_ALVG | GEN_ALVG_DMD2 | GEN_GTS3 | GEN_PINHECK)) != 0; // pinHeck: the raw DMD's 16 levels
 				pDisplay->layout.depth = shade_16_enabled ? 4 : 2;
 				pDisplay->size = pDisplay->layout.width * pDisplay->layout.height;
 			}
@@ -2661,7 +2661,7 @@ static void SetupMsgApiVideoDisplays()
          def.srcId.GetRenderFrame = &GetDisplayFrame;
          if ((layout->type & CORE_SEGMASK) != CORE_VIDEO)
          {
-            def.srcId.identifyFormat = ((core_gameData->gen & (GEN_SAM | GEN_SPA | GEN_ALVG_DMD2)) || (strncasecmp(Machine->gamedrv->name, "smb", 3) == 0) || (strncasecmp(Machine->gamedrv->name, "cueball", 7) == 0)) ? CTLPI_DISPLAY_ID_FORMAT_BITPLANE4 : CTLPI_DISPLAY_ID_FORMAT_BITPLANE2;
+            def.srcId.identifyFormat = ((core_gameData->gen & (GEN_SAM | GEN_SPA | GEN_ALVG_DMD2 | GEN_PINHECK)) || (strncasecmp(Machine->gamedrv->name, "smb", 3) == 0) || (strncasecmp(Machine->gamedrv->name, "cueball", 7) == 0)) ? CTLPI_DISPLAY_ID_FORMAT_BITPLANE4 : CTLPI_DISPLAY_ID_FORMAT_BITPLANE2; // pinHeck: the raw DMD's 16 levels
             def.srcId.GetIdentifyFrame = &GetDisplayIdFrame;
          }
          msgLocals.nDisplays++;

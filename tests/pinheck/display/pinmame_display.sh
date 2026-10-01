@@ -20,6 +20,29 @@ launch() {
 		timeout -k 30 3000 "$SDL3PINMAME" $GAME -rompath roms -nvram_directory nvram -cfg_directory cfg -headless -frames_to_run $2 -skip_gamewarnings -nothrottle $3 > run$1.out 2>&1) \
 		|| { echo "PINMAME FAIL: launch $1 exited $?"; tail -5 $B/run$1.out; exit 1; }
 }
+if [ $LOOK = dmd ]; then
+	# the raw DMD: launch 1 compares the decoder with the row model (PINHECK_DMD_PROOF) and takes a snapshot of the
+	# service menu, a still screen; launch 2 turns video attract mode off and plays the clip, then takes one more
+	printf '600 tap 6 KEYCODE_0\n1190 tap 2 KEYCODE_F12\n' > $B/snap.ks
+	PINHECK_DMD_PROOF=1 launch 1 1200 "-key_script $PWD/$B/snap.ks -snapshot_directory $PWD/$B/snap"
+	echo "1190 tap 2 KEYCODE_F12" > $B/snap2.ks
+	PINHECK_UART1_SEND_AT=$((SEND_AT - 2)) PINHECK_UART1_SEND="[E96000]~~[V00$CLIP]" launch 2 1200 "-key_script $PWD/$B/snap2.ks -snapshot_directory $PWD/$B/snap2"
+	fail=0
+	grep -aq "Playing Video" $B/uart2.log || { echo "PINMAME FAIL: [V00$CLIP] not acknowledged"; fail=1; }
+	grep "^display:" $B/prop1.log $B/prop2.log && { echo "PINMAME FAIL: the display link decoder ran for a raw DMD"; fail=1; }
+	# the row model differs only where the firmware's frame copy overtook the row being shifted: one row in under 1%
+	grep "^dmd: proof:" $B/prop1.log
+	python3 -c "import re, sys; m = re.search(r'^dmd: proof: (\d+) subframes, the row model differs in (\d+) \((\d+) rows\)', open(sys.argv[1]).read(), re.M); sys.exit(not m or int(m[1]) < 10000 or int(m[2]) != int(m[3]) or 100 * int(m[2]) >= int(m[1]))" $B/prop1.log ||
+		{ echo "PINMAME FAIL: no proof line, under 10000 subframes, or the row model differs by more than one row in 1% of them"; fail=1; }
+	python3 frames.py $B/frames1.bin || fail=1
+	python3 render.py $B/snap/$GAME.png $B/frames1.bin --dmd || fail=1
+	dir=$(echo "$CLIP" | cut -c1)
+	python3 frames.py $B/frames2.bin --after "$SEND_AT" --vid "$PINHECK_UPDATE_DIR/DMD/_D$dir/$CLIP.VID" || fail=1
+	python3 render.py $B/snap2/$GAME.png $B/frames2.bin --dmd || fail=1
+	[ $fail -eq 0 ] || exit 1
+	echo "pinmame display: ok"
+	exit 0
+fi
 # F12 just before the end of launch 1: a screen snapshot for render.py
 echo "1190 tap 2 KEYCODE_F12" > $B/snap.ks
 launch 1 1200 "-key_script $PWD/$B/snap.ks -snapshot_directory $PWD/$B/snap"

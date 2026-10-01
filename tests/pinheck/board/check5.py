@@ -5,7 +5,7 @@ PinMAME lamps, solenoids and switches of spec 4.5.
   check5.py timing LOG    board edges in one CPU slice carry distinct PinMAME times
   check5.py verify DIR    check DIR/out2.log and DIR/frames2.bin against the plan
   check5.py selftest      the verifier's helpers
-PINHECK_GAME (dominos, rzspook, jetsons) selects the game's servo and RGB tests, its menu, its switch-test
+PINHECK_GAME (dominos, rzspook, jetsons, amh) selects the game's servo and RGB tests, its menu, its switch-test
 screen and its resting balls."""
 import os
 import struct
@@ -31,9 +31,11 @@ LAMPS = ['L%d' % lamp(n) for n in range(64)]
 COILS = ['S%d' % (c + 1) for c in range(24)]
 GI = ['S%d' % s for s in list(range(25, 33)) + list(range(37, 45))]
 RGB = ['S%d' % s for s in range(51, 57)]
-if GAME == 'rzspook':
-    RGB += ['S62', 'S63', 'S64']                    # the LDG light, the external WS2801 LED
-SERVO_US = (544, 2400) if GAME in ('rzspook', 'jetsons') else (1000, 2000)   # the game's servo levels 0 and 255
+if GAME in ('rzspook', 'amh'):
+    RGB += ['S62', 'S63', 'S64']                    # the LDG light, the external WS2801 LED; America's Most Haunted's ghost
+SERVO_US = (544, 2400) if GAME in ('rzspook', 'jetsons', 'amh') else (1000, 2000)   # the game's servo levels 0 and 255
+# America's Most Haunted's ALL ON steps leave lamp 56 (Spook Again, 81) off
+ALL_LAMPS = tuple(l for l in LAMPS if not (GAME == 'amh' and l == 'L81'))
 # the switch test: the matrix's and the cabinet columns' x; cabinet inputs closed at rest (the coin door, and
 # The Jetsons' trough opto under the ball the tests leave in the trough)
 MX, CX = (8, 0) if GAME == 'jetsons' else (0, 32)
@@ -54,16 +56,19 @@ def uart_plan():
 
 def key_plan():
     """(time, keys, hold frames, expectation for the window after it)"""
-    ev, t = [(MENU_AT, '0', 6, None)], KEYS_AT     # main menu: SWITCH EDGE
+    ev, t = [(MENU_AT, '0', 6, None)], KEYS_AT     # main menu: SWITCH EDGE (America's Most Haunted: MAIN SETTINGS)
 
     def tap(keys, dt, exp=None, hold=6):
         nonlocal t
         ev.append((t, keys, hold, exp))
         t += dt
+    if GAME == 'amh':                               # MAIN SETTINGS, GAME SETTINGS, GAME AUDITS, then SWITCH EDGE
+        for i in range(3):
+            tap('RSHIFT', 1.0)
     tap('RSHIFT', 1.0)
     tap('RSHIFT', 1.0)                              # SOLENOID
-    tap('0', 1.0)                                   # SOLENOID TEST: KNOCKER (Rob Zombie: AUTOPLUNGER)
-    for c in (list(range(16, 24)) + list(range(16)) if GAME == 'rzspook' else range(24)):
+    tap('0', 1.0)                                   # SOLENOID TEST: KNOCKER (Rob Zombie: AUTOPLUNGER, AMH: RFLIP HIGH)
+    for c in (list(range(16, 24)) + list(range(16)) if GAME in ('rzspook', 'amh') else range(24)):
         tap('0', 1.5 if c == 1 else 0.5, ('fire', c))   # the shaker test ignores keys for a second
         tap('RSHIFT', 0.5)
     tap('7', 1.0)                                   # back to SOLENOID
@@ -71,6 +76,14 @@ def key_plan():
         tap('RSHIFT', 1.0)                          # SERVO
     if GAME == 'jetsons':
         pass
+    elif GAME == 'amh':
+        # SERVO TEST: DOOR OPEN, DOOR CLOSE, TARGET UP, TARGET DOWN, GHOST LEFT, MIDDLE, RIGHT, HELL UP, HELL DOWN
+        # (the factory angles 5, 90, 5, 160, 10, 90, 170, 160, 10 degrees on servos 1, 3, 2 and 0)
+        tap('0', 1.0)
+        for i, (s, us) in enumerate(((1, 593), (1, 1476), (3, 593), (3, 2200), (2, 647), (2, 1476), (2, 2305), (0, 2200), (0, 647))):
+            if i:
+                tap('RSHIFT', 1.0)
+            tap('0', 1.5, ('position', s, us))
     elif GAME == 'rzspook':
         tap('0', 1.0)                               # SERVO TEST: GATE OPEN
         tap('0', 1.5, ('position', 0, 2222))        # the Spaulding gate opens
@@ -89,6 +102,8 @@ def key_plan():
         tap('0', 1.5, ('servo', 0, 255))            # servo 0 runs at 180 deg
     if GAME != 'jetsons':
         tap('7', 1.0)                               # back to SERVO
+    if GAME == 'amh':
+        tap('RSHIFT', 1.0)                          # SERVO DEFAULT
     tap('RSHIFT', 1.0)                              # LAMP
     tap('0', 0.5, ('gi', ()))                       # LAMP TEST: ALL OFF
     for n in range(8):
@@ -107,17 +122,24 @@ def key_plan():
     tap('RSHIFT', 1.0)                              # RGB LIGHTING
     rgb = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)]
     ext = (255, 255, 255) if GAME == 'rzspook' else ()          # the LDG light stays white from attract
-    tap('0', 1.0, ('rgb', rgb[0] + (0, 0, 0) + ext))    # RGB1 RED
-    for v in rgb[1:]:
-        tap('RSHIFT', 1.0, ('rgb', v + (0, 0, 0) + ext))
-    for v in rgb:
-        tap('RSHIFT', 1.0, ('rgb', (0, 0, 0) + v + ext))
+    if GAME == 'amh':
+        # GHOST=RED, GREEN, BLUE, then RGB1 and RGB2 RED, GREEN, BLUE: one LED lit at a time
+        steps = [(0, 0, 0) * 2 + v for v in rgb[:3]] + [v + (0, 0, 0) * 2 for v in rgb[:3]] + [(0, 0, 0) + v + (0, 0, 0) for v in rgb[:3]]
+        tap('0', 1.0, ('rgb', steps[0]))
+        for v in steps[1:]:
+            tap('RSHIFT', 1.0, ('rgb', v))
+    else:
+        tap('0', 1.0, ('rgb', rgb[0] + (0, 0, 0) + ext))    # RGB1 RED
+        for v in rgb[1:]:
+            tap('RSHIFT', 1.0, ('rgb', v + (0, 0, 0) + ext))
+        for v in rgb:
+            tap('RSHIFT', 1.0, ('rgb', (0, 0, 0) + v + ext))
     if GAME == 'rzspook':
         # LDG RED, GREEN, BLUE, WHITE: the LDG light's lines are red, blue, green (SWAP G <-> B: NO)
         for v in [(255, 0, 0), (0, 0, 255), (0, 255, 0), (255, 255, 255)]:
             tap('RSHIFT', 1.0, ('rgb', (0, 0, 0) * 2 + v))
     tap('7', 1.0)                                   # back to RGB LIGHTING
-    for i in range(4 if GAME == 'jetsons' else 5):
+    for i in range(4 if GAME == 'jetsons' else 6 if GAME == 'amh' else 5):
         tap('LSHIFT', 1.0)                          # back to SWITCH EDGE
     tap('DEL', 0.5)                                 # simulator keys off: column/row keys reach the matrix
     tap('0', 1.5)                                   # SWITCH TEST
@@ -211,9 +233,11 @@ def grid(f):
     g, c2 = px(MX, 0), px(CX, 0)
     if not g or not c2:
         return None
+    # America's Most Haunted draws the grid in two shades: any lit dot is a grid line
+    line = (lambda x, y: px(x, y) != 0) if GAME == 'amh' else (lambda x, y: px(x, y) == (g if MX <= x < MX + 32 else c2))
     for y in range(32):
         for x in range(40):
-            if (x % 4 in (0, 3) or y % 4 in (0, 3)) and px(x, y) != (g if MX <= x < MX + 32 else c2):
+            if (x % 4 in (0, 3) or y % 4 in (0, 3)) and not line(x, y):
                 return None
     if any(px(x, y) == g for x in range(MX + 1, MX + 31, 4) for y in range(1, 31, 4)):
         return None
@@ -242,7 +266,8 @@ def verify(d):
     o = Out(d + '/out2.log')
     raw = open(d + '/frames2.bin', 'rb').read()
     rec = 20 + FRAME
-    frames = [(struct.unpack_from('<Q', raw, i + 8)[0] / 80e6, raw[i + 20:i + rec]) for i in range(0, len(raw) - rec + 1, rec)]
+    frames = [(struct.unpack_from('<Q', raw, i + 8)[0] / 80e6, raw[i + 20:i + rec]) for i in range(0, len(raw) - rec + 1, rec)
+              if GAME != 'amh' or struct.unpack_from('<I', raw, i + 16)[0] != 0xFFFFFFFF]   # a raw DMD cycle the frame copy crossed
     fails = []
 
     def check(ok, what):
@@ -260,11 +285,26 @@ def verify(d):
             level = round((us - SERVO_US[0]) * 255 / (SERVO_US[1] - SERVO_US[0]))
             check(w and all(abs(u - us) < 10 for u in w), 'attract servo %d pulses %s us, expected %d' % (n, w, us))
             check(abs(o.at('S%d' % (57 + n), MENU_AT) - level) <= 1, 'attract servo output %d is %d, expected %d' % (57 + n, o.at('S%d' % (57 + n), MENU_AT), level))
+    elif GAME == 'amh':
+        # the start lamp stays off; the ghost (on-board LED 2, 62-64) stays dark while RGB1 and RGB2 fade; the servos
+        # rest at HELL DOWN, DOOR OPEN, GHOST MIDDLE and TARGET DOWN
+        check(not o.rises('L91', 5, MENU_AT), 'start lamp 91 lit in attract')
+        check([o.at('S%d' % s, MENU_AT) for s in (62, 63, 64)] == [0] * 3, 'the ghost on 62-64 is lit in attract')
+        check(len(set(v for t, v in o.ev.get('S51', []) if 5 <= t < MENU_AT)) > 3, 'RGB1 (51) does not fade in attract')
+        for n, us in ((0, 647), (1, 593), (2, 1476), (3, 2200)):
+            w = sorted(set(round(u) for tt, u in o.servo.get(n, []) if MENU_AT - 1.0 <= tt < MENU_AT))
+            level = round((us - SERVO_US[0]) * 255 / (SERVO_US[1] - SERVO_US[0]))
+            check(w and all(abs(u - us) < 10 for u in w), 'attract servo %d pulses %s us, expected %d' % (n, w, us))
+            check(abs(o.at('S%d' % (57 + n), MENU_AT) - level) <= 1, 'attract servo output %d is %d, expected %d' % (57 + n, o.at('S%d' % (57 + n), MENU_AT), level))
     else:
         check(o.rises('L91', 5, MENU_AT), 'start lamp 91 never lit in attract')
         check([o.at('S%d' % s, MENU_AT) for s in (62, 63, 64)] == [255] * 3, 'external LED 0 is not white on 62-64')
     if GAME == 'jetsons':
         pass
+    elif GAME == 'amh':
+        # the attract show uses the four playfield GI circuits (GI_8-11: 37-40) and no other GI
+        check(all(o.rises('S%d' % s, 5, MENU_AT) for s in range(37, 41)), 'attract playfield GI 37-40 never all lit')
+        check(not any(o.rises('S%d' % s, 5, MENU_AT) for s in list(range(25, 33)) + list(range(41, 45))), 'attract lit GI other than 37-40')
     elif GAME == 'rzspook':
         gi = [o.at('S%d' % s, MENU_AT) for s in range(37, 45)]
         check(gi == [255] * 4 + [0, 0] + [255] * 2, 'attract playfield GI 37-44 is %s, expected all on but the flashers 41 and 42' % gi)
@@ -298,7 +338,9 @@ def verify(d):
     base = set(rest[-1][0]) if rest else set()
     # The Jetsons: the console's load and launch and the solenoid test's LOAD COIL and PLUNGER put two balls on the
     # playfield; the third rests on trough opto 1 (cabinet 10)
-    want = {0, 1, 2, 3, 4, 5} if GAME == 'rzspook' else set() if GAME == 'jetsons' else {0, 1}
+    # America's Most Haunted: the console's ball load and the solenoid test's BALL LOAD each put a ball in the shooter
+    # lane, which the firmware's autoplunger launched; the other two rest in trough 1 and 2 (59, 60)
+    want = {0, 1, 2, 3, 4, 5} if GAME == 'rzspook' else set() if GAME == 'jetsons' else {59, 60} if GAME == 'amh' else {0, 1}
     check(rest and base - {39} == want and rest[-1][1] == CAB_REST, 'switch test at rest shows %s, expected switches %s, maybe Noid Home (39), and cabinet inputs %s' % (rest[-1:], sorted(want), CAB_REST))
     for i, (t, k, hold, e) in enumerate(ev):
         if not e:
@@ -322,7 +364,7 @@ def verify(d):
             want = tuple('S%d' % s for s in (e[1] if e[0] == 'gi' else (range(25, 33) if e[1] == 'all' else ()))) if e[0] == 'gi' else None
             if e[0] == 'gi+lamps':
                 want = tuple(GI) if e[1] == 'all' else ()
-                check(o.on(LAMPS, t1 - 0.05) == (tuple(LAMPS) if e[1] == 'all' else ()), 'GI AND LAMPS %s: lamps %s' % (e[1], o.on(LAMPS, t1 - 0.05)))
+                check(o.on(LAMPS, t1 - 0.05) == (ALL_LAMPS if e[1] == 'all' else ()), 'GI AND LAMPS %s: lamps %s' % (e[1], o.on(LAMPS, t1 - 0.05)))
             got = o.on(GI, t1 - 0.05)
             check(sorted(got) == sorted(want), 'lamp test GI step at %.1f: %s, expected %s' % (t, got, want))
         elif e[0] == 'onelamp':
@@ -330,7 +372,7 @@ def verify(d):
             check(got == (LAMPS[e[1]],), 'LAMP = %d lit %s' % (e[1], got))
         elif e[0] == 'lamps':
             got = o.on(LAMPS, t1 - 0.05)
-            check(got == (tuple(LAMPS) if e[1] == 'all' else ()), 'lamp test ALL %s: %d lamps' % (e[1], len(got)))
+            check(got == (ALL_LAMPS if e[1] == 'all' else ()), 'lamp test ALL %s: %d lamps' % (e[1], len(got)))
         elif e[0] == 'rgb':
             got = tuple(o.at(s, t1 - 0.05) for s in RGB)
             check(got == e[1], 'RGB test at %.1f: %s, expected %s' % (t, got, e[1]))

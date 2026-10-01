@@ -20,12 +20,17 @@ GROUPS = [
      'DRVLIBS += $(PINOBJ)/pinheck/display.o\n'),
     (['src/wpc/pinheck/board.c', 'src/wpc/pinheck/board.h'],
      'DRVLIBS += $(PINOBJ)/pinheck/board.o\n'),
+    (['src/wpc/pinheck/hexload.c', 'src/wpc/pinheck/hexload.h'],
+     'DRVLIBS += $(PINOBJ)/pinheck/hexload.o\n'),
+    (['src/wpc/pinheck/dmd.c', 'src/wpc/pinheck/dmd.h'],
+     'DRVLIBS += $(PINOBJ)/pinheck/dmd.o\n'),
 ]
 # game definitions with a playfield simulator: (source, pinmame.mak line after pinheckgames.o)
 SIMS = [
     ('src/wpc/sims/pinheck/dominos.c', 'PINGAMES += $(PINOBJ)/sims/pinheck/dominos.o\n'),
     ('src/wpc/sims/pinheck/rzspook.c', 'PINGAMES += $(PINOBJ)/sims/pinheck/rzspook.o\n'),
     ('src/wpc/sims/pinheck/jetsons.c', 'PINGAMES += $(PINOBJ)/sims/pinheck/jetsons.o\n'),
+    ('src/wpc/sims/pinheck/amh.c', 'PINGAMES += $(PINOBJ)/sims/pinheck/amh.o\n'),
 ]
 changed = []
 

@@ -7,6 +7,7 @@
 #define PINHECK_CPUREGION  REGION_CPU1
 #define PINHECK_PROPREGION REGION_USER1
 #define PINHECK_BIOSREGION REGION_USER2
+#define PINHECK_HEXREGION  REGION_USER3 /* a PIC32 image as Intel HEX, converted into PINHECK_CPUREGION */
 
 /* the panel is drawn 2x2 per dot in the PinMAME and VPinMAME windows; libpinmame hosts
    draw their own dots, so they get the panel as sent */
@@ -53,6 +54,15 @@
     ROM_REGION(0x8000, PINHECK_PROPREGION, 0) \
       ROM_LOAD(prp, 0x0000, 0x8000, prphash)
 
+/* a game whose PIC32 image is Intel HEX: the driver programs flash from it at start (pinheck_flash_hex) */
+#define PINHECK_HEX_ROMSTART(name, hex, hexsize, hexhash, prp, prphash) \
+  PINHECK_BIOS_ROMSTART(name) \
+    ROM_REGION(0x80000, PINHECK_CPUREGION, ROMREGION_ERASEFF) \
+    ROM_REGION(hexsize, PINHECK_HEXREGION, 0) \
+      ROM_LOAD(hex, 0x0000, hexsize, hexhash) \
+    ROM_REGION(0x8000, PINHECK_PROPREGION, 0) \
+      ROM_LOAD(prp, 0x0000, 0x8000, prphash)
+
 #define PINHECK_ROMEND ROM_END
 
 /* per-game data: a pinHeck game's core_gameData points at the core member of one of these */
@@ -63,16 +73,21 @@ typedef struct {
   int servoMin, servoMax; /* servo pulse widths in us drawn as servo levels 0 and 255 */
   int rgbInverted;        /* WS2801 lines inverted on the board; the driver supports 0 */
   int inService;          /* PINHECK_INSERVICE seeds the update record (version: core.hw.gameSpecific1) */
+  int dmdHub;             /* a raw 128 x 32 DMD scanned by a Propeller cog: hub address of its 4 bpp frame; 0: the display link */
+  int bootHold;           /* ms the bootloader stand-in holds the PIC32 after a reset without a sign-on */
 } pinheck_tGameData;
 
-/* Domino's values: 128 x 32, POSITION 340, servo levels 1.0-2.0 ms, WS2801 as sent, PINHECK_INSERVICE applies.
-   Only Domino's and the system set use them; every other game spells out its own */
-#define PINHECK_DOMINOS_DATA 128, 32, 340, 1000, 2000, 0, 1
+/* Domino's values: 128 x 32, POSITION 340, servo levels 1.0-2.0 ms, WS2801 as sent, PINHECK_INSERVICE applies,
+   the display link, a 3 s boot hold. Only Domino's and the system set use them; every other game spells out its own */
+#define PINHECK_DOMINOS_DATA 128, 32, 340, 1000, 2000, 0, 1, 0, 3000
 
 extern PINMAME_VIDEO_UPDATE(pinheck_video);
 extern int pinheck_getsol(int solNo);
 extern int pinheck_servo(int servo);
+extern void pinheck_flash_hex(void);
 extern MACHINE_DRIVER_EXTERN(PINHECK);
+extern MACHINE_DRIVER_EXTERN(PINHECKDMD);
 #define gl_mPINHECK PINHECK
+#define gl_mPINHECKDMD PINHECKDMD
 
 #endif

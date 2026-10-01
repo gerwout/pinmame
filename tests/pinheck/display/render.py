@@ -26,17 +26,20 @@ def read_png(path):
     d = open(path, 'rb').read()
     if d[:8] != b'\x89PNG\r\n\x1a\n':
         sys.exit('render: FAIL, %s is not a PNG' % path)
-    i, idat = 8, b''
+    i, idat, plte = 8, b'', b''
     while i < len(d):
         n, t = struct.unpack('>I4s', d[i:i + 8])
         if t == b'IHDR':
             w, h, depth, ctype = struct.unpack('>IIBB', d[i + 8:i + 18])
+        elif t == b'PLTE':
+            plte = d[i + 8:i + 8 + n]
         elif t == b'IDAT':
             idat += d[i + 8:i + 8 + n]
         i += 12 + n
-    if (depth, ctype) != (8, 2):
-        sys.exit('render: FAIL, %s is not 8 bit RGB' % path)
-    raw, bpp, stride = zlib.decompress(idat), 3, 3 * w
+    if (depth, ctype) not in ((8, 2), (8, 3)):
+        sys.exit('render: FAIL, %s is not 8 bit RGB or palette' % path)
+    bpp = 3 if ctype == 2 else 1  # a palette snapshot: the core's pens (a raw DMD game)
+    raw, stride = zlib.decompress(idat), bpp * w
     rows, prev = [], bytearray(stride)
     for y in range(h):
         f, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
@@ -50,7 +53,10 @@ def read_png(path):
                 p = a + b - c
                 pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
                 line[x] = (line[x] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
-        rows.append([tuple(line[3 * x:3 * x + 3]) for x in range(w)])
+        if bpp == 3:
+            rows.append([tuple(line[3 * x:3 * x + 3]) for x in range(w)])
+        else:
+            rows.append([tuple(plte[3 * p:3 * p + 3]) for p in line])
         prev = line
     return w, h, rows
 
@@ -72,6 +78,22 @@ def frame_matches(rows, f, look):
     return all(near(rows[y][x], img[y][x]) for y in range(H * SCALE) for x in range(W * SCALE))
 
 
+def dmd_check(rows, frames):
+    """the core's DMD rendering (2x2 per dot, its colour at the dot's top left pixel): one colour per shade of the
+    frame shown, brighter for every higher shade; returns the matched frame's index or None"""
+    for k in range(len(frames) - 1, -1, -1):
+        f, pens = frames[k], {}
+        for y in range(H):
+            for x in range(W):
+                pens.setdefault(f[y * W + x], set()).add(rows[2 * y][2 * x])
+        if any(len(p) != 1 for p in pens.values()):
+            continue
+        lum = [sum(next(iter(pens[v]))) for v in sorted(pens)]
+        if all(a < b for a, b in zip(lum, lum[1:])):
+            return k
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('png')
@@ -79,6 +101,7 @@ def main():
     ap.add_argument('--last', type=int, default=8, help='the snapshot must show one of the last N logged frames')
     ap.add_argument('--config', help='the last config packet (hex bytes) before the snapshot; none = the exact look')
     ap.add_argument('--sol-log', action='store_true', help='the core\'s solenoid log must show')
+    ap.add_argument('--dmd', action='store_true', help='a raw DMD (frames of shades 0-15) in the core\'s DMD rendering')
     a = ap.parse_args()
     look, _ = parse_look(bytes.fromhex(a.config) if a.config else None)
     w, h, rows = read_png(a.png)
@@ -89,21 +112,30 @@ def main():
     if w < W * SCALE or h < H * SCALE:
         sys.exit('render: FAIL, the visible area cannot hold the scaled frame')
     frames = [f for _, _, _, f in read_log(a.log)][-a.last:]
-    hit = next((k for k in range(len(frames) - 1, -1, -1) if frame_matches(rows, frames[k], look)), None)
-    if hit is None:
-        print('render: FAIL, the frame region shows none of the last %d decoded frames' % len(frames))
-        fail = 1
-    elif frames[hit].count(frames[hit][0]) == FRAME:
-        print('render: FAIL, the matched frame is uniform, nothing was checked')
-        fail = 1
+    if a.dmd:
+        hit = dmd_check(rows, frames)
+        shades = sorted(set(frames[hit])) if hit is not None else []
+        if hit is None or len(shades) < 2:
+            print('render: FAIL, the DMD region shows none of the last %d decoded frames with one rising colour per shade' % len(frames))
+            fail = 1
+        else:
+            print('render: DMD region equals decoded frame %d of the last %d: shades %s, one colour each, rising' % (hit, len(frames), shades))
     else:
-        print('render: frame region equals decoded frame %d of the last %d, %dx%d per pixel' % (hit, len(frames), SCALE, SCALE))
+        hit = next((k for k in range(len(frames) - 1, -1, -1) if frame_matches(rows, frames[k], look)), None)
+        if hit is None:
+            print('render: FAIL, the frame region shows none of the last %d decoded frames' % len(frames))
+            fail = 1
+        elif frames[hit].count(frames[hit][0]) == FRAME:
+            print('render: FAIL, the matched frame is uniform, nothing was checked')
+            fail = 1
+        else:
+            print('render: frame region equals decoded frame %d of the last %d, %dx%d per pixel' % (hit, len(frames), SCALE, SCALE))
     panel = H * SCALE + 3
     bad = [(x, y) for y in range(min(h, panel)) for x in range(w)
            if not (y < H * SCALE and x < W * SCALE) and not near(rows[y][x], (0, 0, 0))]
     pens = set(rows[y][x] for y in range(panel, h) for x in range(min(w, SIM_X))) - {(0, 0, 0)}
     shown = [tuple((c >> 3) << 3 | c >> 5 for c in rgb332(v)) for v in range(1, 256)]  # as a 15 bpp screen shows them
-    frame_pens = [p for p in pens if any(all(abs(a - b) <= 1 for a, b in zip(p, q)) for q in shown)]
+    frame_pens = [] if a.dmd else [p for p in pens if any(all(abs(a - b) <= 1 for a, b in zip(p, q)) for q in shown)]
     if bad:
         x, y = bad[0]
         print('render: FAIL, %d pixels between the frame and the core panel are not black, first at (%d,%d) = %s' % (len(bad), x, y, rows[y][x]))

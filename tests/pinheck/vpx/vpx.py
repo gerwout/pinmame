@@ -6,6 +6,7 @@
   vpx.py outputs DIR            lamps, solenoids, GI, RGB, servos and switches through the API equal the driver's
   vpx.py media DIR REF.wav      display frames and sound through the API equal the driver's frame log and capture;
                                 every frame on the panel for a vblank (1/60 s) or more reaches the host
+  vpx.py dmd DIR                America's Most Haunted's raw DMD through the API: 16 shades, the driver's decoded frames
   vpx.py mech ON_DIR OFF_DIR    HandleMechanics bit 0 turns the simulated Noid on and off
   vpx.py restart DIR            a second session in the same process: the link log is complete at the first
                                 session's end, and the second session's packets start whole
@@ -301,6 +302,65 @@ def media(d, ref):
     return 1 if fails else 0
 
 
+def dmd(d):
+    """America's Most Haunted's raw DMD as a libpinmame host gets it: one 128x32 DMD of 16 shades (depth 4). The
+    driver hands the core each vblank's subframes (PINHECK_DMD_LOG); the core shows the sum of the last 16, so each
+    frame of the callback path (bytes, 255 * sum / 16) and of the plugin path (floats, sum / 16) must equal that sum
+    at a vblank, the frames in the order of their vblanks (libpinmame passes a frame on when it changed)"""
+    fails = []
+    _, other = api_log(d)
+    avail = [l for l in other if l.startswith('avail ')]
+    if avail != ['avail 0 1 type 14 128x32 depth 4 length 0']:
+        fails.append('display announced as %s, expected one 128x32 DMD of depth 4' % avail)
+    raw, i, subs, cum = open(os.path.join(d, 'dmd.log'), 'rb').read(), 0, [], []
+    while i + 4 <= len(raw):
+        n = struct.unpack_from('<I', raw, i)[0]
+        subs += [raw[i + 4 + 512 * k:i + 4 + 512 * (k + 1)] for k in range(n)]
+        cum.append(len(subs))
+        i += 4 + 512 * n
+    dots = [bytes((v >> (7 - b)) & 1 for b in range(8)) for v in range(256)]   # a subframe byte as 8 dots of 0/1
+    expanded, sums = {}, {}
+
+    def window(k):
+        """the dots' sums (one byte each) over the last 16 subframes the core had after vblank k"""
+        if k not in sums:
+            total = 0
+            for j in range(max(0, cum[k] - 16), cum[k]):
+                if j not in expanded:
+                    expanded[j] = int.from_bytes(b''.join(dots[v] for v in subs[j]), 'big')
+                total += expanded[j]                     # no carries: a byte sums at most 16 dots
+            sums[k] = total.to_bytes(W * H, 'big')
+        return sums[k]
+    host = {False: [], True: []}
+    raw, i = open(os.path.join(d, 'frames.bin'), 'rb').read(), 0
+    while i + 4 <= len(raw):
+        plugin = struct.unpack_from('<I', raw, i)[0] >= 0x80000000
+        n = W * H * (4 if plugin else 1)
+        host[plugin].append(raw[i + 4:i + 4 + n])
+        i += 4 + n
+    lum8 = bytes(min(255, int(255.0 * v / 16.0)) for v in range(256))   # sums 0-16
+    for plugin in (False, True):
+        frames = host[plugin]
+        if plugin and not frames:
+            continue
+        path = 'plugin' if plugin else 'callback'
+        conv = (lambda w: struct.pack('<%df' % (W * H), *(v / 16.0 for v in w))) if plugin else (lambda w: w.translate(lum8))
+        k, good, lit = 0, 0, 0
+        for x in frames:
+            lit += any(x)
+            hit = next((j for j in range(k, len(cum)) if conv(window(j)) == x), None)
+            if hit is None:
+                continue
+            good += 1
+            k = hit
+        print('dmd: %s path: %d of %d frames (%d not blank) equal the sum of the last 16 subframes at a vblank, in order' % (path, good, len(frames), lit))
+        if not frames or good != len(frames) or lit < len(frames) // 2:
+            fails.append('%s path: %d of %d frames are not the sum of the last 16 subframes at a vblank' % (path, len(frames) - good, len(frames)))
+    for f in fails:
+        print('VPX FAIL: ' + f)
+    return 1 if fails else 0
+
+
 def mech(on, off):
     fails = []
     for d, want in ((on, True), (off, False)):
@@ -419,6 +479,8 @@ if __name__ == '__main__':
         sys.exit(outputs(a[1]))
     if a[:1] == ['media'] and len(a) == 3:
         sys.exit(media(a[1], a[2]))
+    if a[:1] == ['dmd'] and len(a) == 2:
+        sys.exit(dmd(a[1]))
     if a[:1] == ['mech'] and len(a) == 3:
         sys.exit(mech(a[1], a[2]))
     if a[:1] == ['restart'] and len(a) == 2:

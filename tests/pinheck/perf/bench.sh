@@ -10,7 +10,7 @@
 #                                  against the same run without the worker thread, byte-identical and at least 0.9x,
 #                                  0.8x, - its speed. stall: throttled, the process stopped 0.3 s at 10 s emulated,
 #                                  and the worker must stay on
-# PINHECK_GAME selects the game (tests/pinheck/games.sh); rzspook and jetsons have attract, video and play (a game
+# PINHECK_GAME selects the game (tests/pinheck/games.sh); rzspook, jetsons and amh have attract, video and play (a game
 # started and played from the simulator's keys), each in build/GAME
 : "${SDL3PINMAME:?set SDL3PINMAME to the built sdl3pinmame binary}"
 : "${P8X32A_ROM:?set P8X32A_ROM to the 32 KB Propeller mask ROM (crc32 f99b3070)}"
@@ -53,6 +53,19 @@ jet_play_keys() {
 	done
 }
 
+# America's Most Haunted's play: coin and start, the plunger, then a shot every 1.5 s from 15 s on (none to the
+# Hellevator or the ghost loop, whose car and magnet hold the ball); the ball never drains
+amh_play_keys() {
+	printf '480 tap 6 KEYCODE_5\n540 tap 6 KEYCODE_1\n660 tap 40 KEYCODE_SPACE\n'
+	i=0
+	for k in B 'LCONTROL R' 'RCONTROL R' 'LCONTROL MINUS' 'RCONTROL MINUS' H V J W K M Z X C T Y U 'LCONTROL B' 'RCONTROL B' \
+		'LCONTROL N' 'RCONTROL N' F S D B 'LCONTROL R' 'RCONTROL R' 'LCONTROL MINUS' 'RCONTROL MINUS' H V J W K M Z X C T Y U \
+		'LCONTROL B' 'RCONTROL B' 'LCONTROL N' 'RCONTROL N' F S D; do
+		printf '%d tap 1 KEYCODE_%s\n' $((900 + 90 * i)) "$(echo "$k" | sed 's/ / KEYCODE_/')"
+		i=$((i + 1))
+	done
+}
+
 # workload: frames to run, frame the timed window starts at, UART1 commands, keys
 spec() {
 	KEYS=
@@ -64,6 +77,8 @@ spec() {
 	rzspook/play) FRAMES=4800 MARK=1500 SEND_AT=10 SEND='[E97000]' KEYS=$(play_keys) ;;
 	jetsons/video) FRAMES=2400 MARK=960 SEND_AT=13 SEND='[E96000]~[V00WZA]~[F00ZM0]~[F00G00]~[F00J00]~[F00NAA]~~~~~~~~~~[F00SAU]~~~~[F00H00]' ;;
 	jetsons/play) FRAMES=5100 MARK=1800 SEND_AT=13 SEND='[E97000]' KEYS=$(jet_play_keys) ;;
+	amh/video) FRAMES=2400 MARK=960 SEND_AT=10 SEND='[E96000]~[V00D01]~[F00ZB1]~[F00AD2]~[F00B0O]~[F00CBG]~~~~~~~~~~[F00D1A]~~~~[F00EVG]' ;;
+	amh/play) FRAMES=4800 MARK=1500 SEND_AT=7 SEND='[E97000]' KEYS=$(amh_play_keys) ;;
 	*) echo "bench: no workload $1 for $GAME"; exit 2 ;;
 	esac
 }

@@ -26,7 +26,13 @@ void boot_init(pic32_boot *b, uint8_t *flash, uint32_t flash_size, boot_tx_fn tx
 	b->flash_size = flash_size;
 	b->tx = tx;
 	b->tx_ctx = tx_ctx;
+	b->window = BOOT_WINDOW;
 	boot_reset(b, 0);
+}
+
+void boot_set_window(pic32_boot *b, uint64_t pic_cycles)
+{
+	b->window = pic_cycles;
 }
 
 void boot_set_log(pic32_boot *b, boot_log_fn fn, void *ctx)
@@ -38,7 +44,7 @@ void boot_set_log(pic32_boot *b, boot_log_fn fn, void *ctx)
 void boot_reset(pic32_boot *b, uint64_t t)
 {
 	b->state = BOOT_WAIT;
-	b->window_end = t + BOOT_WINDOW;
+	b->window_end = t + b->window;
 	b->app_at = 0;
 	b->tx_free = t;
 	b->line = 1;

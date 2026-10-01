@@ -106,6 +106,18 @@ static void window_without_host(void)
 	CHECK(tx_l[ntx - 1] == 0 && tx_t[ntx - 1] == 1000 + BOOT_WINDOW);
 }
 
+/* a game's own hold (America's Most Haunted: 5 s) applies from the next reset on */
+static void window_set(void)
+{
+	start();
+	boot_set_window(&b, 400000000u);
+	boot_reset(&b, now);
+	run_until(1000 + 400000000u - 1);
+	CHECK(b.state == BOOT_WAIT && boot_hold(&b, now) > 0);
+	run_until(1000 + 400000000u);
+	CHECK(b.state == BOOT_APP && boot_hold(&b, now) == 0 && tx_t[ntx - 1] == 1000 + 400000000u);
+}
+
 static void sign_on_holds(void)
 {
 	static const uint8_t sign_on[1] = { 0x01 };
@@ -236,6 +248,7 @@ int main(void)
 {
 	reply_timing_independent_of_step();
 	window_without_host();
+	window_set();
 	sign_on_holds();
 	program_verify_leave();
 	unknown_and_bad();

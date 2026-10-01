@@ -13,6 +13,8 @@
 #include "pinheck/audio.h"
 #include "pinheck/display.h"
 #include "pinheck/board.h"
+#include "pinheck/dmd.h"
+#include "pinheck/hexload.h"
 #include "pinheck.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,8 +54,9 @@ static struct {
 #define PINHECK_SOL_GI8 40  /* GI 8-15: solenoids 37-44 through core.c's S11 layout */
 #define PINHECK_SOL_RGB 50  /* on-board RGB left R,G,B, right R,G,B: 51-56 */
 #define PINHECK_SOL_SRV 56  /* servos 0-4: 57-61 */
-#define PINHECK_SOL_EXT 61  /* external WS2801 LED 0 R,G,B: 62-64 */
+#define PINHECK_SOL_EXT 61  /* external WS2801 LED 0 R,G,B, or on-board LED 2 R,G,B: 62-64 */
 #define PINHECK_EXT_LEDS 1  /* the firmware drives one external LED */
+#define PINHECK_ONB_LEDS 3  /* on-board LEDs 0 and 1; a third (America's Most Haunted's ghost) on 62-64 */
 #define PINHECK_NSOLS   64
 #define PINHECK_LAMP_ST 64  /* start button lamp: lamp 91 */
 #define PINHECK_NLAMPS  72
@@ -77,7 +80,10 @@ static void pinheck_unsupported(void)
 		fprintf(stderr, "pinheck: %s: inverted WS2801 lines are not supported, the RGB outputs are as sent\n", Machine->gamedrv->name);
 		logerror("pinheck: %s: inverted WS2801 lines are not supported\n", Machine->gamedrv->name);
 	}
-	if (!DISPLAY_SIZE_OK(g->width, g->height)) {
+	if (g->dmdHub && (g->width != DMD_W || g->height != DMD_H)) {
+		fprintf(stderr, "pinheck: %s: a %dx%d raw DMD is not supported, it is taken as 128x32\n", Machine->gamedrv->name, g->width, g->height);
+		logerror("pinheck: %s: a %dx%d raw DMD is not supported\n", Machine->gamedrv->name, g->width, g->height);
+	} else if (!g->dmdHub && !DISPLAY_SIZE_OK(g->width, g->height)) {
 		fprintf(stderr, "pinheck: %s: a %dx%d display is not supported, frames are taken as 128x32\n", Machine->gamedrv->name, g->width, g->height);
 		logerror("pinheck: %s: a %dx%d display is not supported\n", Machine->gamedrv->name, g->width, g->height);
 	}
@@ -132,8 +138,8 @@ static void pinheck_brd_rgb(void *ctx, uint64_t t, int chain, int led, uint8_t r
 {
 	(void)ctx;
 	if (brd_log) fprintf(brd_log, "%.9f R %d %d %02x%02x%02x %llu\n", timer_get_time(), chain, led, r, g, b, (unsigned long long)t);
-	if ((chain == BOARD_RGB_ONBOARD && led < 2) || (chain == BOARD_RGB_EXTERNAL && led < PINHECK_EXT_LEDS)) {
-		int idx = chain == BOARD_RGB_ONBOARD ? PINHECK_SOL_RGB + 3 * led : PINHECK_SOL_EXT + 3 * led;
+	if ((chain == BOARD_RGB_ONBOARD && led < PINHECK_ONB_LEDS) || (chain == BOARD_RGB_EXTERNAL && led < PINHECK_EXT_LEDS)) {
+		int idx = chain == BOARD_RGB_ONBOARD && led < 2 ? PINHECK_SOL_RGB + 3 * led : PINHECK_SOL_EXT + 3 * (chain == BOARD_RGB_ONBOARD ? led - 2 : led);
 		pinheck_brd_level(idx, r);
 		pinheck_brd_level(idx + 1, g);
 		pinheck_brd_level(idx + 2, b);
@@ -527,6 +533,132 @@ static void pinheck_disp_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 	pinheck_display_pins(&disp, t, out, dir);
 }
 
+/* The raw DMD (game data dmdHub): the Propeller thread decodes subframes from the scan pins (P16-P20) into a ring,
+   which the emulation thread hands to the core's PWM integration at each vblank, after the Propeller has caught up.
+   Test hook PINHECK_DMD_PROOF also runs the row model (P18-P20 only, a row's dots from hub RAM at its latch) and
+   counts the subframes in which it differs. */
+#define PINHECK_DMD_RING 64
+static pinheck_dmd dmd, dmd_row;
+static int dmd_on, dmd_proof;
+static uint8_t dmd_ring[PINHECK_DMD_RING][DMD_SUB];
+static unsigned dmd_head, dmd_tail, dmd_dropped;
+static unsigned long dmd_subs, dmd_differ;
+static uint64_t dmd_first;
+
+static void pinheck_dmd_sub(void *ctx, const uint8_t *sub, int level, uint64_t t)
+{
+	(void)ctx; (void)level; (void)t;
+	if (dmd_head - dmd_tail == PINHECK_DMD_RING) { dmd_tail++; dmd_dropped++; }
+	memcpy(dmd_ring[dmd_head % PINHECK_DMD_RING], sub, DMD_SUB);
+	dmd_head++;
+}
+
+/* called after the decoder's: its subframe for the same row clock is complete in dmd.sub; dmd_rows counts the rows */
+static unsigned long dmd_rows;
+
+static void pinheck_dmd_row_sub(void *ctx, const uint8_t *sub, int level, uint64_t t)
+{
+	int r, n = 0;
+	(void)ctx; (void)level;
+	dmd_subs++;
+	for (r = 0; r < DMD_H; r++) n += memcmp(sub + r * DMD_ROW, dmd.sub + r * DMD_ROW, DMD_ROW) != 0;
+	if (!n) return;
+	if (!dmd_differ++) dmd_first = t;
+	dmd_rows += (unsigned long)n;
+}
+
+/* test log (PINHECK_FRAME_LOG): each complete cycle of 16 subframes, one byte per dot (0-15); hub address = dmdHub
+   when the frame buffer holds that frame at its end */
+static void pinheck_dmd_frame(void *ctx, const uint8_t *shades, uint64_t t)
+{
+	uint8_t stamp[20];
+	uint64_t pic = prop_stamp(&prop);
+	uint32_t at = (uint32_t)pinheck_game()->dmdHub;
+	int k;
+	(void)ctx;
+	for (k = 0; k < DMD_W * DMD_H && at != 0xFFFFFFFFu; k += 2)
+		if (prop.chip.hub[(at + k / 2) & 0xFFFF] != (shades[k] << 4 | shades[k + 1])) at = 0xFFFFFFFFu;
+	for (k = 0; k < 8; k++) stamp[k] = (uint8_t)(t >> (8 * k));
+	for (k = 0; k < 8; k++) stamp[8 + k] = (uint8_t)(pic >> (8 * k));
+	for (k = 0; k < 4; k++) stamp[16 + k] = (uint8_t)(at >> (8 * k));
+	fwrite(stamp, 1, 20, disp_log);
+	fwrite(shades, 1, DMD_W * DMD_H, disp_log);
+}
+
+/* test hook PINHECK_PROP_SERIAL: the raw DMD game's Propeller serial output on P30 (57,600 baud, 8N1, at its clock of
+   104 MHz), one line per text line: its watchdog's status */
+#define PINHECK_SER_PIN (1u << 30)
+static FILE *ser_log;
+static int ser_opened;
+static struct { int level, bit; uint64_t edge, start; uint8_t byte; char line[256]; int n; } ser;
+
+static void pinheck_ser_pins(uint64_t t, uint32_t out, uint32_t dir)
+{
+	const uint64_t bit = 104000000u / 57600u;
+	int level = !(dir & PINHECK_SER_PIN) || (out & PINHECK_SER_PIN);
+	/* the data bits whose centres passed since the last edge had the old level */
+	while (ser.bit >= 0 && ser.bit < 8 && ser.start + bit * (uint64_t)(2 * ser.bit + 3) / 2 < t) {
+		if (ser.level) ser.byte |= (uint8_t)(1u << ser.bit);
+		if (++ser.bit == 8) {
+			if (ser.byte == '\n' || ser.byte == '\r' || ser.n == (int)sizeof(ser.line) - 1) {
+				if (ser.n) { ser.line[ser.n] = 0; fprintf(ser_log, "%.6f %s\n", t / 104e6, ser.line); }
+				ser.n = 0;
+			} else if (ser.byte >= 32 && ser.byte < 127) ser.line[ser.n++] = (char)ser.byte;
+			ser.bit = -1;
+		}
+	}
+	if (level == ser.level) return;
+	if (!level && ser.bit < 0 && t - ser.edge >= bit) { ser.start = t; ser.bit = 0; ser.byte = 0; }
+	ser.level = level;
+	ser.edge = t;
+}
+
+static void pinheck_dmd_pins_cb(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
+{
+	(void)ctx;
+	if (ser_log) pinheck_ser_pins(t, out, dir);
+	pinheck_dmd_pins(&dmd, t, out, dir);
+	if (dmd_proof) pinheck_dmd_pins(&dmd_row, t, out, dir);
+}
+
+/* test hook PINHECK_DMD_LOG: at each vblank, the number of subframes the decoder queued since the last (uint32) and
+   those subframes, as the core is to get them */
+static FILE *dmd_log;
+static int dmd_log_opened;
+
+/* at each vblank: the subframes the Propeller drew since the last one */
+static void pinheck_dmd_vblank(void)
+{
+	uint32_t n;
+	unsigned k;
+	prop_sync(&prop);
+	n = dmd_head - dmd_tail;
+	if (dmd_log) {
+		fwrite(&n, 4, 1, dmd_log);
+		for (k = dmd_tail; k != dmd_head; k++) fwrite(dmd_ring[k % PINHECK_DMD_RING], 1, DMD_SUB, dmd_log);
+	}
+	for (; dmd_tail != dmd_head; dmd_tail++) core_dmd_submit_frame(core_gameData->lcdLayout, dmd_ring[dmd_tail % PINHECK_DMD_RING], 1);
+}
+
+static void pinheck_dmd_stop(void)
+{
+	char msg[160];
+	if (dmd_proof) {
+		sprintf(msg, "dmd: proof: %lu subframes, the row model differs in %lu (%lu rows)", dmd_subs, dmd_differ, dmd_rows);
+		if (dmd_differ) sprintf(msg + strlen(msg), ", the first at Propeller cycle %llu", (unsigned long long)dmd_first);
+		pinheck_prop_log(NULL, msg);
+	}
+	if (dmd_dropped) {
+		sprintf(msg, "dmd: %u subframes dropped between vblanks", dmd_dropped);
+		pinheck_prop_log(NULL, msg);
+	}
+	dmd_subs = dmd_differ = dmd_rows = 0;
+	dmd_dropped = 0;
+	if (dmd_log) fclose(dmd_log);
+	if (ser_log) fclose(ser_log);
+	dmd_log = ser_log = NULL;
+}
+
 static void pinheck_disp_init(void)
 {
 	const char *path = getenv("PINHECK_FRAME_LOG");
@@ -539,12 +671,30 @@ static void pinheck_disp_init(void)
 	if (disp_log) fclose(disp_log);
 	disp_log = path ? fopen(path, disp_opened ? "ab" : "wb") : NULL;
 	disp_opened = 1;
+	dmd_on = pinheck_game()->dmdHub != 0;
+	if (dmd_on) {
+		dmd_proof = getenv("PINHECK_DMD_PROOF") != NULL;
+		if (!dmd_log && getenv("PINHECK_DMD_LOG")) dmd_log = fopen(getenv("PINHECK_DMD_LOG"), dmd_log_opened++ ? "ab" : "wb");
+		prop_set_pins(&prop, pinheck_dmd_pins_cb, NULL);
+		if (!ser_log && getenv("PINHECK_PROP_SERIAL")) ser_log = fopen(getenv("PINHECK_PROP_SERIAL"), ser_opened++ ? "a" : "w");
+		memset(&ser, 0, sizeof(ser));
+		ser.level = 1;
+		ser.bit = -1;
+		prop_set_pins_mask(&prop, DMD_ALL_PINS | (ser_log ? PINHECK_SER_PIN : 0));
+		return;
+	}
 	prop_set_pins(&prop, pinheck_disp_pins, NULL);
 	prop_set_pins_mask(&prop, DISPLAY_P17 | DISPLAY_P20 | DISPLAY_P21 | DISPLAY_P22);
 }
 
 static void pinheck_disp_reset(void)
 {
+	if (dmd_on) {
+		pinheck_dmd_init(&dmd, 1, NULL, 0, NULL, pinheck_dmd_sub, disp_log ? pinheck_dmd_frame : NULL);
+		pinheck_dmd_init(&dmd_row, 0, prop.chip.hub, (uint32_t)pinheck_game()->dmdHub, NULL, pinheck_dmd_row_sub, NULL);
+		dmd_head = dmd_tail = 0;
+		return;
+	}
 	pinheck_display_init(&disp, NULL, pinheck_disp_frame, pinheck_disp_config, pinheck_prop_log);
 	pinheck_display_size(&disp, pinheck_game()->width, pinheck_game()->height); /* any other size is named at start */
 	memset(disp_shown, 0, sizeof(disp_shown));
@@ -602,12 +752,35 @@ static INTERRUPT_GEN(pinheck_vblank)
 	/* the system set refuses to run: leave its on-screen message up, then stop with an error */
 	if (locals.idle && timer_get_time() >= PINHECK_REFUSE_SECS) mame_schedule_error_exit();
 	if (!locals.idle) pinheck_brd_vblank();
+	if (!locals.idle && dmd_on) pinheck_dmd_vblank();
 	core_updateSw(0);
 }
 
 static int pinheck_system_only(void)
 {
 	return !memory_region(PINHECK_CPUREGION) || !memory_region(PINHECK_PROPREGION);
+}
+
+static int hex_bad;   /* the game's Intel HEX did not convert: the machine refuses to run */
+static long hex_bytes; /* data bytes the Intel HEX programmed */
+
+/* driver init of a game whose PIC32 image is Intel HEX (PINHECK_HEXREGION): program flash from it, once a launch */
+void pinheck_flash_hex(void)
+{
+	char err[96], msg[200];
+	long n;
+	hex_bad = 0;
+	hex_bytes = 0;
+	if (!memory_region(PINHECK_HEXREGION) || !memory_region(PINHECK_CPUREGION)) return;
+	n = pinheck_hex_flash(memory_region(PINHECK_HEXREGION), memory_region_length(PINHECK_HEXREGION), memory_region(PINHECK_CPUREGION),
+	                      memory_region_length(PINHECK_CPUREGION), 0x1D000000u, err);
+	if (n >= 0) {
+		hex_bytes = n;
+		return;
+	}
+	hex_bad = 1;
+	sprintf(msg, "pinheck: %.16s: the PIC32 image (Intel HEX) does not convert: %.80s", Machine->gamedrv->name, err);
+	pinheck_warn(msg);
 }
 
 /* sound: Propeller DUTY counters on P15/P14 integrated by audio.c */
@@ -717,11 +890,18 @@ static MACHINE_INIT(pinheck)
 	if (plog && (locals.proplog = fopen(plog, opened ? "a" : "w")) != NULL) setvbuf(locals.proplog, NULL, _IONBF, 0);
 	opened = 1;
 	locals.reset_at = !reset_done && getenv("PINHECK_RESET_AT") ? atof(getenv("PINHECK_RESET_AT")) : 0.0;
+	/* the core draws a CORE_DMD layout from its PWM integration, also while the machine refuses to run */
+	if (pinheck_game()->dmdHub) core_dmd_pwm_init(core_gameData->lcdLayout, CORE_DMD_PWM_FILTER_PINHECK_16, CORE_DMD_PWM_COMBINER_SUM_16, 0);
 	if (pinheck_system_only()) {
 		locals.idle = 1;
 		fprintf(stderr, "pinheck: '%s' is the pinHeck system set, not a game; run a game such as dominos\n", Machine->gamedrv->name);
 		usrintf_showmessage_secs(PINHECK_REFUSE_SECS, "'%.16s' is the pinHeck system set, not a game. Run a game such as dominos.", Machine->gamedrv->name);
 		logerror("pinheck: '%s' is the pinHeck system set, not a game\n", Machine->gamedrv->name);
+		return;
+	}
+	if (hex_bad && memory_region(PINHECK_HEXREGION)) {
+		locals.idle = 1;
+		usrintf_showmessage_secs(PINHECK_REFUSE_SECS, "%.16s: the PIC32 image (Intel HEX) does not convert.", Machine->gamedrv->name);
 		return;
 	}
 	pinheck_unsupported();
@@ -742,6 +922,12 @@ static MACHINE_INIT(pinheck)
 	}
 	boot_init(&boot, memory_region(PINHECK_CPUREGION), memory_region_length(PINHECK_CPUREGION), pinheck_boot_tx, NULL);
 	boot_set_log(&boot, pinheck_prop_log, NULL);
+	if (hex_bytes) {
+		char msg[64];
+		sprintf(msg, "hex: %ld bytes of program flash", hex_bytes);
+		pinheck_prop_log(NULL, msg);
+	}
+	boot_set_window(&boot, (uint64_t)pinheck_game()->bootHold * (PINHECK_CLOCK / 1000));
 	pinheck_open_card();
 	pinheck_disp_init();
 	pinheck_brd_init();
@@ -793,6 +979,7 @@ static MACHINE_STOP(pinheck)
 	prop.chip.jit = NULL;
 	prop.chip.jit_build = NULL;
 #endif
+	if (!locals.idle && dmd_on) pinheck_dmd_stop();
 	if (locals.uart1) fclose(locals.uart1);
 	if (locals.proplog) fclose(locals.proplog);
 	locals.uart1 = locals.proplog = NULL;
@@ -829,4 +1016,10 @@ MACHINE_DRIVER_START(PINHECK)
 	MDRV_SOUND_ADD(CUSTOM, pinheck_sndInt)
 	MDRV_SOUND_ATTRIBUTES(SOUND_SUPPORTS_STEREO)
 	MDRV_VIDEO_ATTRIBUTES(VIDEO_TYPE_RASTER | VIDEO_RGB_DIRECT)
+MACHINE_DRIVER_END
+
+/* a raw DMD (game data dmdHub): the core draws the CORE_DMD layout with its palette pens */
+MACHINE_DRIVER_START(PINHECKDMD)
+	MDRV_IMPORT_FROM(PINHECK)
+	MDRV_VIDEO_ATTRIBUTES(VIDEO_TYPE_RASTER)
 MACHINE_DRIVER_END
