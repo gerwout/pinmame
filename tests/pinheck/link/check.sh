@@ -18,19 +18,25 @@ if command -v clang > /dev/null; then python3 relax_check.py $S/wpc/pinheck/prop
 [ -x "$TOOLS/openspin/build/openspin" ] || { echo "TOOLS MISSING: run ../p8x32a/tools.sh or set TOOLS"; exit 2; }
 "$TOOLS/openspin/build/openspin" -q echo.spin -o $B/echo.binary > $B/echo.log 2>&1 || { cat $B/echo.log; exit 2; }
 python3 ../p8x32a/mkrom.py $B/echo.binary $B/echo.rom $B/echo.ram || exit 2
+# echo80: echo with the CLKSET reset bit, which reboots the chip
+sed 's/^pll     long    \$6F$/pll     long    $EF/' echo.spin > $B/echo80.spin
+grep -q 'long    \$EF$' $B/echo80.spin || exit 2
+"$TOOLS/openspin/build/openspin" -q $B/echo80.spin -o $B/echo80.binary > $B/echo80.log 2>&1 || { cat $B/echo80.log; exit 2; }
+python3 ../p8x32a/mkrom.py $B/echo80.binary $B/echo80.rom $B/echo80.ram || exit 2
+E80="$B/echo80.rom $B/echo80.ram"
 cc $CF -o $B/prop_test prop_test.c $CORE || exit 2
-timeout -k 5 300 ./$B/prop_test $B/echo.rom $B/echo.ram || fail=$((fail + 1))
+timeout -k 5 300 ./$B/prop_test $B/echo.rom $B/echo.ram $E80 || fail=$((fail + 1))
 # the worker thread's lifetime under AddressSanitizer
 cc $CF -g -fsanitize=address -fno-omit-frame-pointer -o $B/prop_test_asan prop_test.c $CORE || exit 2
-ASAN_OPTIONS=detect_leaks=0 timeout -k 5 300 ./$B/prop_test_asan $B/echo.rom $B/echo.ram > $B/prop_test_asan.log 2>&1 || { head -c 4000 $B/prop_test_asan.log; fail=$((fail + 1)); }
+ASAN_OPTIONS=detect_leaks=0 timeout -k 5 300 ./$B/prop_test_asan $B/echo.rom $B/echo.ram $E80 > $B/prop_test_asan.log 2>&1 || { head -c 4000 $B/prop_test_asan.log; fail=$((fail + 1)); }
 # and under ThreadSanitizer
 cc $CF -O1 -g -fsanitize=thread -o $B/prop_test_tsan prop_test.c $CORE || exit 2
-TSAN_OPTIONS=halt_on_error=1 timeout -k 5 300 ./$B/prop_test_tsan $B/echo.rom $B/echo.ram > $B/prop_test_tsan.log 2>&1 || { head -c 4000 $B/prop_test_tsan.log; fail=$((fail + 1)); }
+TSAN_OPTIONS=halt_on_error=1 timeout -k 5 300 ./$B/prop_test_tsan $B/echo.rom $B/echo.ram $E80 > $B/prop_test_tsan.log 2>&1 || { head -c 4000 $B/prop_test_tsan.log; fail=$((fail + 1)); }
 # PINHECK_WINE=1: the Windows worker (x86-64 and i686, mingw-w64) under wine, in a private prefix
 if [ "$PINHECK_WINE" = 1 ]; then
 	for t in x86_64 i686; do
 		$t-w64-mingw32-gcc -O2 -std=c99 -Wall -Wextra -Werror -static -pthread -I$S/cpu/pic32mx -o $B/prop_test_$t.exe prop_test.c $CORE || exit 2
-		WINEPREFIX=$PWD/$B/wine WINEDEBUG=-all timeout -k 30 600 wine $B/prop_test_$t.exe $B/echo.rom $B/echo.ram > $B/prop_test_$t.log 2>&1
+		WINEPREFIX=$PWD/$B/wine WINEDEBUG=-all timeout -k 30 600 wine $B/prop_test_$t.exe $B/echo.rom $B/echo.ram $E80 > $B/prop_test_$t.log 2>&1
 		tr -d '\r' < $B/prop_test_$t.log | grep -qx "prop: ok" || { echo "wine $t:"; tr -d '\r' < $B/prop_test_$t.log | grep -v "^[0-9a-f]*:\(err\|fixme\)" | head -20; fail=$((fail + 1)); }
 	done
 	WINEPREFIX=$PWD/$B/wine wineserver -k 2> /dev/null
