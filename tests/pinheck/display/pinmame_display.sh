@@ -36,9 +36,15 @@ if [ $LOOK = none ]; then
 		{ echo "PINMAME FAIL: $GAME's module must get 12-byte config packets only, drawn as sent"; fail=1; }
 fi
 # The Jetsons' display cog starts with a lone 1024-byte burst, and its reboot before the sync cuts a frame short
-skip='^$'
-[ $LOOK = none ] && skip='display: frame of \(1024\|7168\) bytes discarded$'
-grep "^display: \(frame\|latch\|mode\)" $B/prop1.log $B/prop2.log | grep -v "$skip" && { echo "PINMAME FAIL: malformed display transfers"; fail=1; }
+# and starts it again: each launch discards exactly 1024, 7168 and 1024 bytes. The 128x32 module discards none.
+want=
+[ $LOOK = none ] && want='1024 7168 1024'
+for n in 1 2; do
+	got=$(sed -n 's/^display: frame of \([0-9]*\) bytes discarded$/\1/p' $B/prop$n.log | tr '\n' ' ' | sed 's/ $//')
+	[ "$got" = "$want" ] || { echo "PINMAME FAIL: launch $n discarded frames of [$got] bytes, expected [$want]"; fail=1; }
+done
+grep "^display: \(frame\|latch\|mode\|further\)" $B/prop1.log $B/prop2.log | grep -v "display: frame of [0-9]* bytes discarded$" &&
+	{ echo "PINMAME FAIL: malformed display transfers"; fail=1; }
 python3 frames.py $B/frames1.bin || fail=1
 python3 render.py $B/snap/$GAME.png $B/frames1.bin --config "$(grep '^display: config ' $B/prop1.log | tail -1 | cut -d' ' -f3-)" || fail=1
 dir=$(echo "$CLIP" | cut -c1)

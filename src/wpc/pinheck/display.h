@@ -13,6 +13,7 @@ extern "C" {
 #define DISPLAY_FRAME_MAX (DISPLAY_W * 2 * DISPLAY_H) /* the 128 x 64 module */
 #define DISPLAY_SIZE_OK(w, h) ((w) == DISPLAY_W && ((h) == DISPLAY_H || (h) == 2 * DISPLAY_H))
 #define DISPLAY_CFG_MAX 64
+#define DISPLAY_LOG_FRAMES 16 /* discarded frames logged one by one */
 
 #define DISPLAY_P17 (1u << 17)
 #define DISPLAY_P20 (1u << 20)
@@ -48,7 +49,8 @@ typedef struct display {
 	long frame;     /* bytes in a frame: DISPLAY_FRAME, or as pinheck_display_size set it */
 	long nbits;
 	int mode;
-	int logged_bits, logged_frame, logged_mixed, logged_cfg;
+	int logged_bits, logged_mixed, logged_cfg;
+	int logged_frame; /* discarded frames logged, up to DISPLAY_LOG_FRAMES + 1 */
 } display;
 
 void pinheck_display_init(display *d, void *ctx, display_frame_fn on_frame, display_config_fn on_config, display_log_fn log);

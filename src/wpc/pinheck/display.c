@@ -32,7 +32,9 @@ static void latch(display *d, uint64_t t, int cfg)
 		if (d->on_config) d->on_config(d->ctx, d->buf, (int)n, t);
 	} else if (n != d->frame) {
 		sprintf(msg, "display: frame of %ld bytes discarded", n);
-		say(d, &d->logged_frame, msg);
+		if (d->logged_frame < DISPLAY_LOG_FRAMES && d->log) d->log(d->ctx, msg);
+		else if (d->logged_frame == DISPLAY_LOG_FRAMES && d->log) d->log(d->ctx, "display: further discarded frames not logged");
+		if (d->logged_frame <= DISPLAY_LOG_FRAMES) d->logged_frame++;
 	} else if (d->on_frame)
 		d->on_frame(d->ctx, d->buf, t);
 	d->nbits = 0;
