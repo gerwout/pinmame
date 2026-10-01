@@ -1,5 +1,6 @@
-/* Domino's Spectacular Pinball Adventure (pinHeck): switch, lamp and output names for table scripts.
+/* pinHeck games: switch, lamp and output names for table scripts, one section per game.
 
+   Domino's Spectacular Pinball Adventure (pinheck_dominos_*).
    Sources: Dominos-Switch-Matrix.pdf, Dominos-Lamp-Matrix.pdf and Spooky_Pinball_Domino's_Solenoid_List.pdf
    (Ken Layton, 2019). Not in them: User (2) and Back (5), the board's USER_0 and BACK inputs in the firmware's
    cabinet read order (design spec 2.2); the optos 95 (Center Ramp) and 96 (Oven Ramp), from the firmware's
@@ -10,12 +11,19 @@
      coil n (0-23)                   solenoid n + 1
      GI_0..7, GI_8..15               solenoids 25-32, 37-44
      on-board RGB left R, G, B, right R, G, B    51-56 (0-255)
-     servos 0-4                      57-61 (0-255 = 1.0-2.0 ms pulse)
+     servos 0-4                      57-61 (0-255: the game's pulse range, Domino's 1.0-2.0 ms)
      external RGB LED R, G, B        62-64 (0-255)
    A table presses the flipper buttons through PinMAME's flipper column, 114 (left) and 112 (right),
    which PinMAME copies to cabinet switches 4 and 3 every frame. Numbers not listed are unused.
    HandleMechanics bit 0 simulates the Noid (servo 0, closing Noid Home 58), bit 1 the target bank (servo 1);
-   a table that moves them itself clears the bit. */
+   a table that moves them itself clears the bit.
+
+   Rob Zombie's Spookshow International (pinheck_rzspook_*).
+   Sources: RZ_Switch_Matrix_Production.pdf, RZ_Lamp_Matrix_Production.pdf and wiring-board-chart.png (coils, GI,
+   servos); numbering as above. Not in them: User (2) and Back (5), as for Domino's. Servo levels 0-255 are
+   0-180 degrees (0.544-2.4 ms). The LDG light (external RGB LED) gets red, blue, green on 62-64 while the
+   service menu's SWAP G <-> B is NO, its factory setting. HandleMechanics bit 0 raises the drop target (48) on
+   its coil, bit 1 closes the flippers' end-of-stroke switches while their coils are on. */
 #ifndef PINHECK_NAMES_H
 #define PINHECK_NAMES_H
 
@@ -172,6 +180,171 @@ static const pinheck_name_t pinheck_dominos_solenoid_names[] = {
   { 62, "sExtR",       "External RGB LED red" },
   { 63, "sExtG",       "External RGB LED green" },
   { 64, "sExtB",       "External RGB LED blue" },
+  { 0 }
+};
+
+static const pinheck_name_t pinheck_rzspook_switch_names[] = {
+  {   1, "swCoinDoor",  "Coin Door (closed)" },
+  {   2, "swUser",      "User" },
+  {   3, "swRFlip",     "Right Flipper" },
+  {   4, "swLFlip",     "Left Flipper" },
+  {   5, "swBack",      "Back" },
+  {   6, "swEnter",     "Enter (menu)" },
+  {   7, "swCoin",      "Coin Mech" },
+  {   8, "swTilt",      "Tilt" },
+  {  11, "swShooter",   "Shooter Lane" },
+  {  12, "swTrough1",   "Trough 1" },
+  {  13, "swTrough2",   "Trough 2" },
+  {  14, "swTrough3",   "Trough 3" },
+  {  15, "swTrough4",   "Trough 4" },
+  {  16, "swTrough5",   "Trough 5" },
+  {  17, "swTrough6",   "Trough 6" },
+  {  18, "swTrough7",   "Trough 7" },
+  {  21, "swROutlane",  "Right Out Lane" },
+  {  22, "swRInlane",   "Right In Lane" },
+  {  23, "swRSling",    "Right Lower Sling" },
+  {  24, "swRFlipEOS",  "Right Flip EOS" },
+  {  25, "swLFlipEOS",  "Left Flip EOS" },
+  {  26, "swLSling",    "Left Lower Sling" },
+  {  27, "swLInlane",   "Left In Lane" },
+  {  28, "swLOutlane",  "Left Out Lane" },
+  {  31, "swExtraBall", "Extra Ball" },
+  {  32, "swRUSling",   "Right Upper Sling" },
+  {  33, "swRailLow",   "Right Rail Lower" },
+  {  34, "swRailUp",    "Right Rail Upper" },
+  {  35, "swRInner",    "Right Inner Orbit" },
+  {  36, "swRPop",      "Right Pop Bumper" },
+  {  37, "swChicken",   "Left Upper Playfield (Chicken)" },
+  {  38, "swGasoline",  "Right Upper Playfield (Gasoline)" },
+  {  41, "swUFlipEOS",  "Upper Flipper EOS" },
+  {  42, "swROrbit",    "Right Outer Orbit" },
+  {  43, "swVUK",       "VUK" },
+  {  44, "swSecret",    "Secret Passage" },
+  {  45, "swLInner",    "Left Inner Orbit" },
+  {  46, "swRLDG",      "Right Living Dead Girl" },
+  {  47, "swLLDG",      "Left Living Dead Girl" },
+  {  48, "swDrop",      "Drop Target (down)" },
+  {  51, "swRampTgt",   "Ramp Target" },
+  {  52, "swRattle",    "Right Rattle Switch" },
+  {  54, "swLLPop",     "Lower Left Pop" },
+  {  55, "swULPop",     "Upper Left Pop" },
+  {  56, "swPopTarget", "Pop Target" },
+  {  57, "swLUSling",   "Left Upper Sling" },
+  {  58, "swLOrbit",    "Left Orbit" },
+  {  61, "swRamp",      "Ramp" },
+  {  94, "swStart",     "Start Button" },
+  {  95, "swGateOpto",  "Upper PF Opto Spaulding (gate)" },
+  {  96, "swExitOpto",  "Upper PF Opto (exit)" },
+  { 112, "swLRFlip",    "Right Flipper button (reaches switch 3)" },
+  { 114, "swLLFlip",    "Left Flipper button (reaches switch 4)" },
+  { 0 }
+};
+
+static const pinheck_name_t pinheck_rzspook_lamp_names[] = {
+  {  11, "lRockAgain",         "Rock Again" },
+  {  12, "lLDG",               "LDG" },
+  {  13, "lRedHot",            "Red Hot" },
+  {  14, "lDragula",           "Dragula" },
+  {  15, "lHouse100K",         "House 100K" },
+  {  16, "lSuperBeast",        "Super Beast" },
+  {  17, "lDeadCityRadio",     "Dead City Radio" },
+  {  18, "lMurderRide",        "Murder Ride" },
+  {  21, "lWhat",              "What" },
+  {  22, "lDemonoid",          "Demonoid Phen" },
+  {  23, "lAmerWitch",         "Amer. Witch" },
+  {  24, "lHellBound",         "Hell Bound" },
+  {  25, "lExtraBall",         "Extra Ball" },
+  {  26, "lNum3",              "3" },
+  {  27, "lLetterO",           "O" },
+  {  28, "lLetterP",           "P" },
+  {  31, "lSkillShot2",        "Skill Shot 2" },
+  {  32, "lGein",              "Gein" },
+  {  33, "lFish",              "Fish" },
+  {  34, "lDrSatan",           "Dr. Satan" },
+  {  35, "lInnerRightArrow",   "Inner Right Arrow" },
+  {  36, "lRightOrbitArrow",   "Right Orbit Arrow" },
+  {  37, "lTopX",              "Top X" },
+  {  38, "lBottomX",           "Bottom X" },
+  {  41, "lLetterC",           "C" },
+  {  42, "lLetterH",           "H" },
+  {  43, "lSkillShot1",        "Skill Shot 1" },
+  {  44, "lNum1",              "1" },
+  {  45, "lHurryUp",           "Hurry Up" },
+  {  46, "lVideoMode",         "Video Mode" },
+  {  47, "lModeStart",         "Mode Start" },
+  {  48, "lLeftOrbitArrow",    "Left Orbit Arrow" },
+  {  51, "lSkillShot3",        "Skill Shot 3" },
+  {  52, "lLock1",             "Lock 1" },
+  {  53, "lLock2",             "Lock 2" },
+  {  54, "lLock3",             "Lock 3" },
+  {  55, "lInnerLeftArrow",    "Inner Left Arrow" },
+  {  56, "lAdvJackpot",        "Adv. Jackpot" },
+  {  57, "lLDGLeftArrow",      "LDG Left Arrow" },
+  {  58, "lLDGRightArrow",     "LDG Right Arrow" },
+  {  61, "lCollectJackpot",    "Collect Jackpot" },
+  {  62, "lRampArrow",         "Ramp Arrow" },
+  {  63, "lNum2",              "2" },
+  {  64, "lChicken",           "Chicken" },
+  {  65, "lGasoline",          "Gasoline" },
+  {  66, "l2X",                "2X" },
+  {  67, "l5X",                "5X" },
+  {  68, "l10X",               "10X" },
+  {  91, "lStart",             "Start Button" },
+  { 0 }
+};
+
+/* solenoid outputs: coils, GI strings, RGB channels and servos */
+static const pinheck_name_t pinheck_rzspook_solenoid_names[] = {
+  {  1, "sKnocker",    "Knocker" },
+  {  2, "sShaker",     "Shaker" },
+  {  3, "sUFlipHigh",  "Upper Flipper High" },
+  {  4, "sVUK",        "VUK" },
+  {  5, "sPost",       "Ball Stop (stop post, right inner orbit)" },
+  {  6, "sRPop",       "Right Pop Bumper" },
+  {  7, "sDrop",       "Drop Target (raise)" },
+  {  8, "sUFlipLow",   "Upper Flipper Low" },
+  {  9, "sLLPop",      "Lower Left Pop" },
+  { 10, "sULPop",      "Upper Left Pop" },
+  { 11, "sLUSling",    "Upper Left Sling" },
+  { 12, "sLSling",     "Left Sling" },
+  { 13, "sLFlipLow",   "Left Flipper Low" },
+  { 14, "sLFlipHigh",  "Left Flipper High" },
+  { 17, "sLaunch",     "Autoplunger" },
+  { 18, "sLoad",       "Ball Load (trough)" },
+  { 19, "sRFlipLow",   "Right Flipper Low" },
+  { 20, "sRFlipHigh",  "Right Flipper High" },
+  { 21, "sRSling",     "Right Sling" },
+  { 22, "sRUSling",    "Upper Right Sling" },
+  { 25, "sGI0",        "GI_0 (backbox)" },
+  { 26, "sGI1",        "GI_1 (backbox)" },
+  { 27, "sGI2",        "GI_2 (backbox)" },
+  { 28, "sGI3",        "GI_3 (backbox)" },
+  { 29, "sGI4",        "GI_4 (backbox)" },
+  { 30, "sGI5",        "GI_5 (backbox)" },
+  { 31, "sGI6",        "GI_6 (backbox)" },
+  { 32, "sGI7",        "GI_7 (backbox)" },
+  { 37, "sGI8",        "GI_8 (no wire on the chart)" },
+  { 38, "sGI9",        "GI_9 bottom playfield GI 1" },
+  { 39, "sGI10",       "GI_10 bottom playfield GI 2" },
+  { 40, "sGI11",       "GI_11 red GI" },
+  { 41, "sGI12",       "GI_12 purple flasher" },
+  { 42, "sGI13",       "GI_13 red flasher" },
+  { 43, "sGI14",       "GI_14 white GI" },
+  { 44, "sGI15",       "GI_15 (no driver fitted)" },
+  { 51, "sRGB1R",      "RGB1 red" },
+  { 52, "sRGB1G",      "RGB1 green" },
+  { 53, "sRGB1B",      "RGB1 blue" },
+  { 54, "sRGB2R",      "RGB2 red" },
+  { 55, "sRGB2G",      "RGB2 green" },
+  { 56, "sRGB2B",      "RGB2 blue" },
+  { 57, "sGate",       "Servo 0: Spaulding gate" },
+  { 58, "sRobot",      "Servo 1: robot" },
+  { 59, "sServo2",     "Servo 2" },
+  { 60, "sServo3",     "Servo 3" },
+  { 61, "sServo4",     "Servo 4" },
+  { 62, "sLDGR",       "LDG light red" },
+  { 63, "sLDGB",       "LDG light blue" },
+  { 64, "sLDGG",       "LDG light green" },
   { 0 }
 };
 

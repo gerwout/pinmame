@@ -54,6 +54,19 @@
 
 #define PINHECK_ROMEND ROM_END
 
+/* per-game data: a pinHeck game's core_gameData points at the core member of one of these */
+typedef struct {
+  core_tGameData core;
+  int width, height;      /* display module in dots; the driver supports 128 x 32 */
+  int aligned;            /* the POSITION the look draws unshifted: the game's factory POSITION */
+  int servoMin, servoMax; /* servo pulse widths in us drawn as servo levels 0 and 255 */
+  int rgbInverted;        /* WS2801 lines inverted on the board; the driver supports 0 */
+  int inService;          /* PINHECK_INSERVICE seeds the update record (version: core.hw.gameSpecific1) */
+} pinheck_tGameData;
+
+/* Domino's values: 128 x 32, POSITION 340, servo levels 1.0-2.0 ms, WS2801 as sent, PINHECK_INSERVICE applies */
+#define PINHECK_GAME_DEFAULTS 128, 32, 340, 1000, 2000, 0, 1
+
 extern PINMAME_VIDEO_UPDATE(pinheck_video);
 extern int pinheck_getsol(int solNo);
 extern int pinheck_servo(int servo);

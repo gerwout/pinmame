@@ -246,16 +246,17 @@ static core_tLCDLayout dominos_disp[] = {
   {0, 0, PINHECK_VIDEO_H, PINHECK_VIDEO_W, CORE_VIDEO, (genf *)pinheck_video, NULL}, {0}
 };
 
-static core_tGameData dominosGameData = {
-  GEN_PINHECK, dominos_disp,
-  { FLIP_SWNO(PINHECK_SWLFLIP, PINHECK_SWRFLIP), 0, 1, PINHECK_CUSTSOLS, SNDBRD_NONE, 0, 6, 0,
-    pinheck_getsol, dominos_handleMech, dominos_getMech },
-  &dominosSimData
+static pinheck_tGameData dominosGameData = {
+  { GEN_PINHECK, dominos_disp,
+    { FLIP_SWNO(PINHECK_SWLFLIP, PINHECK_SWRFLIP), 0, 1, PINHECK_CUSTSOLS, SNDBRD_NONE, 0, 6, 0,
+      pinheck_getsol, dominos_handleMech, dominos_getMech },
+    &dominosSimData },
+  PINHECK_GAME_DEFAULTS
 };
 
 static void init_dominos(void) {
   int i;
-  core_gameData = &dominosGameData;
+  core_gameData = &dominosGameData.core;
   memset(&locals, 0, sizeof(locals));
   for (i = 0; i <= 24; i++) locals.since[i] = 10000;
   locals.home = -1;

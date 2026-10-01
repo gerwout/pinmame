@@ -24,6 +24,7 @@ GROUPS = [
 # game definitions with a playfield simulator: (source, pinmame.mak line after pinheckgames.o)
 SIMS = [
     ('src/wpc/sims/pinheck/dominos.c', 'PINGAMES += $(PINOBJ)/sims/pinheck/dominos.o\n'),
+    ('src/wpc/sims/pinheck/rzspook.c', 'PINGAMES += $(PINOBJ)/sims/pinheck/rzspook.o\n'),
 ]
 changed = []
 
