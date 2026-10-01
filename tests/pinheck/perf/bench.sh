@@ -10,8 +10,8 @@
 #                                  against the same run without the worker thread, byte-identical and at least 0.9x,
 #                                  0.8x, - its speed. stall: throttled, the process stopped 0.3 s at 10 s emulated,
 #                                  and the worker must stay on
-# PINHECK_GAME selects the game (tests/pinheck/games.sh); rzspook has attract, video and play (a game started and
-# played from the simulator's keys), each in build/rzspook
+# PINHECK_GAME selects the game (tests/pinheck/games.sh); rzspook and jetsons have attract, video and play (a game
+# started and played from the simulator's keys), each in build/GAME
 : "${SDL3PINMAME:?set SDL3PINMAME to the built sdl3pinmame binary}"
 : "${P8X32A_ROM:?set P8X32A_ROM to the 32 KB Propeller mask ROM (crc32 f99b3070)}"
 : "${PINHECK_ZIP:?set PINHECK_ZIP to the game's romset zip}"
@@ -40,6 +40,19 @@ play_keys() {
 	done
 }
 
+# The Jetsons' play: coin and start once attract mode runs (its sync is later), the Launch Button (9), then a shot every
+# 1.5 s from 25 s on (none to the scoop or the kickout hole, which hold the ball); the ball never drains
+jet_play_keys() {
+	printf '900 tap 6 KEYCODE_5\n960 tap 6 KEYCODE_1\n1200 tap 6 KEYCODE_9\n'
+	i=0
+	for k in B 'LCONTROL R' 'RCONTROL R' 'LCONTROL MINUS' 'RCONTROL MINUS' E C X G H J T Y U 'LCONTROL B' 'RCONTROL B' \
+		'LCONTROL L' 'RCONTROL L' L B 'LCONTROL R' 'RCONTROL R' 'LCONTROL MINUS' 'RCONTROL MINUS' E C X G H J T Y U \
+		'LCONTROL B' 'RCONTROL B' 'LCONTROL L' 'RCONTROL L' L; do
+		printf '%d tap 1 KEYCODE_%s\n' $((1500 + 90 * i)) "$(echo "$k" | sed 's/ / KEYCODE_/')"
+		i=$((i + 1))
+	done
+}
+
 # workload: frames to run, frame the timed window starts at, UART1 commands, keys
 spec() {
 	KEYS=
@@ -49,6 +62,8 @@ spec() {
 	dominos/video) FRAMES=2400 MARK=960 SEND_AT=10 SEND='[E96000]~[V00AT9]~[F00ZM0]~[F00BWI]~[F00IF0]~[F00NBI]~~~~~~~~~~[F00NBI]~~~~[F00IF0]' ;;
 	rzspook/video) FRAMES=2400 MARK=960 SEND_AT=10 SEND='[E96000]~[V00AT9]~[F00ZM0]~[F00ZAA]~[F00ZAB]~[F00ZAC]~~~~~~~~~~[F00ZAD]~~~~[F00ZAE]' ;;
 	rzspook/play) FRAMES=4800 MARK=1500 SEND_AT=10 SEND='[E97000]' KEYS=$(play_keys) ;;
+	jetsons/video) FRAMES=2400 MARK=960 SEND_AT=13 SEND='[E96000]~[V00WZA]~[F00ZM0]~[F00G00]~[F00J00]~[F00NAA]~~~~~~~~~~[F00SAU]~~~~[F00H00]' ;;
+	jetsons/play) FRAMES=5100 MARK=1800 SEND_AT=13 SEND='[E97000]' KEYS=$(jet_play_keys) ;;
 	*) echo "bench: no workload $1 for $GAME"; exit 2 ;;
 	esac
 }
