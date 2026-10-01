@@ -9,6 +9,10 @@ fail=0
 cc -std=c89 -pedantic-errors -Wno-long-long -fsyntax-only $S/cpu/pic32mx/pic32mx.c || { echo "C89 FAIL pic32mx.c"; fail=$((fail + 1)); }
 cc $CF -o $B/soc_test soc_test.c $S/cpu/pic32mx/pic32mx.c $S/cpu/mips32/mips32.c || exit 2
 ./$B/soc_test || fail=$((fail + 1))
+# Intel HEX into program flash; AMH_HEX (America's Most Haunted's AMH_V023.hex) adds the real file
+cc -std=c89 -pedantic-errors -Wno-long-long -fsyntax-only $S/wpc/pinheck/hexload.c || { echo "C89 FAIL hexload.c"; fail=$((fail + 1)); }
+cc $CF -fsanitize=address,undefined -fno-sanitize-recover=all -I$S/wpc/pinheck -o $B/hex_test hex_test.c $S/wpc/pinheck/hexload.c || exit 2
+./$B/hex_test || fail=$((fail + 1))
 if [ -f boot.c ]; then
 	if [ -n "$PINHECK_UPDATE_DIR" ]; then
 		cc $CF -o $B/pic32boot boot.c linkstub.c $S/wpc/pinheck/eeprom.c $S/cpu/pic32mx/pic32mx.c $S/cpu/mips32/mips32.c || exit 2

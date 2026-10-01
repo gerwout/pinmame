@@ -20,6 +20,8 @@ GROUPS = [
      'DRVLIBS += $(PINOBJ)/pinheck/display.o\n'),
     (['src/wpc/pinheck/board.c', 'src/wpc/pinheck/board.h'],
      'DRVLIBS += $(PINOBJ)/pinheck/board.o\n'),
+    (['src/wpc/pinheck/hexload.c', 'src/wpc/pinheck/hexload.h'],
+     'DRVLIBS += $(PINOBJ)/pinheck/hexload.o\n'),
 ]
 # game definitions with a playfield simulator: (source, pinmame.mak line after pinheckgames.o)
 SIMS = [

@@ -13,6 +13,7 @@
 #include "pinheck/audio.h"
 #include "pinheck/display.h"
 #include "pinheck/board.h"
+#include "pinheck/hexload.h"
 #include "pinheck.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -610,6 +611,28 @@ static int pinheck_system_only(void)
 	return !memory_region(PINHECK_CPUREGION) || !memory_region(PINHECK_PROPREGION);
 }
 
+static int hex_bad;   /* the game's Intel HEX did not convert: the machine refuses to run */
+static long hex_bytes; /* data bytes the Intel HEX programmed */
+
+/* driver init of a game whose PIC32 image is Intel HEX (PINHECK_HEXREGION): program flash from it, once a launch */
+void pinheck_flash_hex(void)
+{
+	char err[96], msg[200];
+	long n;
+	hex_bad = 0;
+	hex_bytes = 0;
+	if (!memory_region(PINHECK_HEXREGION) || !memory_region(PINHECK_CPUREGION)) return;
+	n = pinheck_hex_flash(memory_region(PINHECK_HEXREGION), memory_region_length(PINHECK_HEXREGION), memory_region(PINHECK_CPUREGION),
+	                      memory_region_length(PINHECK_CPUREGION), 0x1D000000u, err);
+	if (n >= 0) {
+		hex_bytes = n;
+		return;
+	}
+	hex_bad = 1;
+	sprintf(msg, "pinheck: %.16s: the PIC32 image (Intel HEX) does not convert: %.80s", Machine->gamedrv->name, err);
+	pinheck_warn(msg);
+}
+
 /* sound: Propeller DUTY counters on P15/P14 integrated by audio.c */
 static audio snd;
 static struct {
@@ -724,6 +747,11 @@ static MACHINE_INIT(pinheck)
 		logerror("pinheck: '%s' is the pinHeck system set, not a game\n", Machine->gamedrv->name);
 		return;
 	}
+	if (hex_bad && memory_region(PINHECK_HEXREGION)) {
+		locals.idle = 1;
+		usrintf_showmessage_secs(PINHECK_REFUSE_SECS, "%.16s: the PIC32 image (Intel HEX) does not convert.", Machine->gamedrv->name);
+		return;
+	}
 	pinheck_unsupported();
 	memcpy(propmem, memory_region(PINHECK_PROPREGION), 0x8000);
 	prop_init(&prop, memory_region(PINHECK_BIOSREGION), propmem);
@@ -742,6 +770,11 @@ static MACHINE_INIT(pinheck)
 	}
 	boot_init(&boot, memory_region(PINHECK_CPUREGION), memory_region_length(PINHECK_CPUREGION), pinheck_boot_tx, NULL);
 	boot_set_log(&boot, pinheck_prop_log, NULL);
+	if (hex_bytes) {
+		char msg[64];
+		sprintf(msg, "hex: %ld bytes of program flash", hex_bytes);
+		pinheck_prop_log(NULL, msg);
+	}
 	pinheck_open_card();
 	pinheck_disp_init();
 	pinheck_brd_init();

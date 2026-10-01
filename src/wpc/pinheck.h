@@ -7,6 +7,7 @@
 #define PINHECK_CPUREGION  REGION_CPU1
 #define PINHECK_PROPREGION REGION_USER1
 #define PINHECK_BIOSREGION REGION_USER2
+#define PINHECK_HEXREGION  REGION_USER3 /* a PIC32 image as Intel HEX, converted into PINHECK_CPUREGION */
 
 /* the panel is drawn 2x2 per dot in the PinMAME and VPinMAME windows; libpinmame hosts
    draw their own dots, so they get the panel as sent */
@@ -53,6 +54,15 @@
     ROM_REGION(0x8000, PINHECK_PROPREGION, 0) \
       ROM_LOAD(prp, 0x0000, 0x8000, prphash)
 
+/* a game whose PIC32 image is Intel HEX: the driver programs flash from it at start (pinheck_flash_hex) */
+#define PINHECK_HEX_ROMSTART(name, hex, hexsize, hexhash, prp, prphash) \
+  PINHECK_BIOS_ROMSTART(name) \
+    ROM_REGION(0x80000, PINHECK_CPUREGION, ROMREGION_ERASEFF) \
+    ROM_REGION(hexsize, PINHECK_HEXREGION, 0) \
+      ROM_LOAD(hex, 0x0000, hexsize, hexhash) \
+    ROM_REGION(0x8000, PINHECK_PROPREGION, 0) \
+      ROM_LOAD(prp, 0x0000, 0x8000, prphash)
+
 #define PINHECK_ROMEND ROM_END
 
 /* per-game data: a pinHeck game's core_gameData points at the core member of one of these */
@@ -72,6 +82,7 @@ typedef struct {
 extern PINMAME_VIDEO_UPDATE(pinheck_video);
 extern int pinheck_getsol(int solNo);
 extern int pinheck_servo(int servo);
+extern void pinheck_flash_hex(void);
 extern MACHINE_DRIVER_EXTERN(PINHECK);
 #define gl_mPINHECK PINHECK
 
