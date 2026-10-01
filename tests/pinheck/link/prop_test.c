@@ -414,6 +414,32 @@ static void spin_bound(void)
 	nap_calls = 0;
 	prop_stop_thread(&p);
 }
+
+/* PINHECK_SPIN_US sets the bound when the worker starts: at 20 ms the waiter spins through 2 ms waits */
+static void spin_env(void)
+{
+	uint64_t pic = 200000;
+	double c0, w0;
+	int b;
+	setenv("PINHECK_SPIN_US", "20000", 1);
+	boot();
+	prop_set_pins(&p, nap_pins, NULL);
+	CHECK(prop_start_thread(&p) == 0);
+	prop_catch_up(&p, pic);
+	prop_sync(&p);
+	nap_calls = 1000;
+	c0 = cpu_s();
+	w0 = wall_s();
+	for (b = 0; b < 50; b++) {
+		pulse(&pic, b & 1);
+		prop_catch_up(&p, pic);
+		prop_sync(&p);
+	}
+	CHECK(cpu_s() - c0 > 0.5 * (wall_s() - w0));
+	nap_calls = 0;
+	prop_stop_thread(&p);
+	unsetenv("PINHECK_SPIN_US");
+}
 #endif
 
 /* with one CPU allowed the worker does not start and the calls run inline */
@@ -658,6 +684,7 @@ int main(int argc, char **argv)
 	blocking_sync();
 #ifndef _WIN32
 	spin_bound();
+	spin_env();
 #endif
 	one_cpu();
 	gov_contention();

@@ -301,7 +301,7 @@ int prop_p24(pinheck_prop *p, uint64_t pic_cycle)
    would inline, each with the PIC32 cycle at which it was made. The caller waits for the queue to drain before
    it reads Propeller state (prop_sync). */
 #define PROP_Q 4096
-#define PROP_SPIN_NS 50000 /* a wait spins this long, then blocks */
+#define PROP_SPIN_NS 50000 /* a wait spins this long, then blocks; PINHECK_SPIN_US (1-100000) sets it at thread start */
 
 enum { CMD_PINS, CMD_CATCH_UP, CMD_QUIT };
 
@@ -383,13 +383,15 @@ static int cpus_allowed(void)
 }
 #endif
 
-/* one step of a bounded spin; 1 when it has lasted PROP_SPIN_NS (the clock is read every 64 steps) */
+static uint64_t spin_ns = PROP_SPIN_NS;
+
+/* one step of a bounded spin; 1 when it has lasted spin_ns (the clock is read every 64 steps) */
 static int spin(uint64_t *t0, unsigned *k)
 {
 	if (!(*k & 63)) {
 		uint64_t n = now_ns();
 		if (!*k) *t0 = n;
-		else if (n - *t0 >= PROP_SPIN_NS) return 1;
+		else if (n - *t0 >= spin_ns) return 1;
 	}
 	++*k;
 	CPU_RELAX_ANY();
@@ -534,6 +536,11 @@ int prop_start_thread(pinheck_prop *p)
 	if (cpus_allowed() < 2) {
 		if (p->log) p->log(p->log_ctx, "prop: one CPU allowed, no worker thread");
 		return -1;
+	}
+	{
+		const char *us = getenv("PINHECK_SPIN_US");
+		long v = us ? strtol(us, NULL, 10) : 0;
+		spin_ns = v >= 1 && v <= 100000 ? (uint64_t)v * 1000 : PROP_SPIN_NS;
 	}
 	w = (prop_worker *)calloc(1, sizeof(*w));
 	if (!w) return -1;
