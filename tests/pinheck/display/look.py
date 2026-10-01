@@ -3,7 +3,9 @@
 and the look check, which steps the service menu's display settings through every value.
   look.py crosscheck BIN   the model against display.c through BIN (lookdump)
   look.py plan DIR         write DIR/keys.txt and DIR/frames for launch 2
-  look.py verify DIR       check DIR/prop2.log's config packets and DIR/snap/*.png against the model"""
+  look.py verify DIR       check DIR/prop2.log's config packets and DIR/snap/*.png against the model
+PINHECK_GAME (dominos, rzspook) selects the game: its factory POSITION is drawn unshifted (the driver
+moves it to display.c's 340), its menu and its Propeller's packets."""
 import os
 import struct
 import subprocess
@@ -20,6 +22,12 @@ SHAPES = ('ROUND', 'SQUARE', 'HIGHREZ')
 EXACT = {'shape': SQUARE, 'brightness': 255, 'position': 340, 'bar': 62}
 PROP_DEFAULT = '00 b1 01 54 00 00 00 ff 00 80 00 20 00 3e'   # the Propeller's own packet at start-up
 SAVED = '00 b1 01 55 -- -- 00 af 00 80 00 20 00 00'          # at the next start-up: POSITION, BRIGHTNESS, BAR BRIGHT kept
+ALIGNED, TO_SHAPE = 340, 12                                   # factory POSITION; MAIN SETTINGS steps to PIXEL SHAPE
+GAME = os.environ.get('PINHECK_GAME', 'dominos')
+if GAME == 'rzspook':
+    PROP_DEFAULT = '00 fa 01 cc 00 00 00 ff 00 80 00 20 00 3e'
+    SAVED = '00 fa 01 cd -- -- 00 af 00 80 00 20 00 00'
+    ALIGNED, TO_SHAPE = 460, 10
 # (PIXEL SHAPE: the stored block kept 1 in runs without the simulator and 0 with it; cause not established)
 FPS = 60
 TOL = 7                   # 8 -> 5 bit -> 8 bit rounding of a 15 bpp screen
@@ -33,7 +41,12 @@ def parse(cfg):
     if (w[4], w[5]) != (W, H):
         return dict(EXACT), False
     return {'shape': w[2] if w[2] <= HIGHREZ else SQUARE, 'brightness': min(w[3], 255),
-            'position': w[1], 'bar': min(w[6], 62)}, True
+            'position': w[1] + 340 - ALIGNED, 'bar': min(w[6], 62)}, True
+
+
+def shown(st):
+    """the look display.c draws for the menu state st: the game's factory POSITION is its 340"""
+    return dict(st, position=st['position'] + 340 - ALIGNED)
 
 
 def rgb332(v):
@@ -109,7 +122,7 @@ def step(st, item):
 def key_plan():
     """(frame, key, hold, packet expected after it or None, look of a snapshot or None)"""
     ev, t = [], 630
-    st = {'shape': ROUND, 'brightness': 255, 'position': 340, 'bar': 62}
+    st = {'shape': ROUND, 'brightness': 255, 'position': ALIGNED, 'bar': 62}
 
     def tap(key, dt, exp=None, snap=None, hold=6):
         nonlocal t
@@ -119,7 +132,7 @@ def key_plan():
     for _ in range(7):
         tap('RSHIFT', 30)                           # ... CHANGE: MAIN SETTINGS
     tap('0', 60)                                    # MAIN SETTINGS: FREE PLAY
-    for _ in range(12):
+    for _ in range(TO_SHAPE):
         tap('RSHIFT', 30)                           # ... PIXEL SHAPE
     tap('F12', 36, snap=dict(st))                   # the start-up look
     # every value; the shape ends at SQUARE and the stored three one past a full turn (175, 341, 0).
@@ -196,7 +209,7 @@ def verify(d):
             fail += 1
     frames = [(pic / 80e6, f) for _, pic, _, f in read_log(os.path.join(d, 'frames2.bin'))]
     snaps = [e for e in ev if e[4]]
-    files = ['dominos.png'] + ['domi%04d.png' % k for k in range(len(snaps) - 1)]
+    files = [GAME + '.png'] + [GAME[:4] + '%04d.png' % k for k in range(len(snaps) - 1)]
     for (t, _, _, _, st), fn in zip(snaps, files):
         path = os.path.join(d, 'snap', fn)
         if not os.path.exists(path):
@@ -205,11 +218,11 @@ def verify(d):
             continue
         rows = read_png(path)
         recent = [f for ft, f in frames if ft <= t / FPS][-8:]
-        hit = next((f for f in reversed(recent) if matches(rows, render(st, f))), None)
+        hit = next((f for f in reversed(recent) if matches(rows, render(shown(st), f))), None)
         if hit is None:
             print('LOOK FAIL: %s shows none of the last %d frames in the look %s' % (fn, len(recent), name(st)))
             fail += 1
-        elif st != EXACT and matches(rows, render(EXACT, hit)):
+        elif shown(st) != EXACT and matches(rows, render(EXACT, hit)):
             print('LOOK FAIL: %s (%s) equals the exact square rendering' % (fn, name(st)))
             fail += 1
         else:
@@ -221,7 +234,7 @@ def verify(d):
         fail += 1
     else:
         st = parse(bytes.fromhex(got[0]))[0]
-        rows = read_png(os.path.join(d, 'snap3', 'dominos.png'))
+        rows = read_png(os.path.join(d, 'snap3', GAME + '.png'))
         recent = [f for _, pic, _, f in read_log(os.path.join(d, 'frames3.bin')) if pic / 80e6 <= 1190 / FPS][-8:]
         if not any(matches(rows, render(st, f)) for f in recent):
             print('LOOK FAIL: after the restart the snapshot shows none of the last %d frames in the look %s' % (len(recent), name(st)))

@@ -10,7 +10,18 @@ def boots(text):
     return {int(parts[i]): TRACE.sub('', parts[i + 1]).replace('\r', '') for i in range(1, len(parts), 2)}
 
 
+def uart(path, want):
+    """a PinMAME UART1 log, its EEPROM traces taken out, has each of the |-separated lines in want"""
+    text = TRACE.sub('', open(path, encoding='latin-1').read()).replace('\r', '')
+    bad = [w for w in want.split('|') if w not in text]
+    for w in bad:
+        print('PINMAME FAIL: UART1 log %s lacks %r' % (path, w))
+    return 1 if bad else 0
+
+
 def main():
+    if sys.argv[1] == 'uart':
+        return uart(sys.argv[2], sys.argv[3])
     b = boots(open(sys.argv[1], encoding='latin-1').read())
     o = int(sys.argv[2]) - 1 if len(sys.argv) > 2 else 0
     want = [

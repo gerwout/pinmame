@@ -3,7 +3,9 @@
 PinMAME lamps, solenoids and switches of spec 4.5.
   check5.py plan DIR      write DIR/send, send_at, send_gap, keys.txt, frames
   check5.py timing LOG    board edges in one CPU slice carry distinct PinMAME times
-  check5.py verify DIR    check DIR/out2.log and DIR/frames2.bin against the plan"""
+  check5.py verify DIR    check DIR/out2.log and DIR/frames2.bin against the plan
+PINHECK_GAME (dominos, rzspook) selects the game's servo and RGB tests and its resting balls."""
+import os
 import struct
 import sys
 
@@ -24,6 +26,10 @@ LAMPS = ['L%d' % lamp(n) for n in range(64)]
 COILS = ['S%d' % (c + 1) for c in range(24)]
 GI = ['S%d' % s for s in list(range(25, 33)) + list(range(37, 45))]
 RGB = ['S%d' % s for s in range(51, 57)]
+GAME = os.environ.get('PINHECK_GAME', 'dominos')
+if GAME == 'rzspook':
+    RGB += ['S62', 'S63', 'S64']                    # the LDG light, the external WS2801 LED
+SERVO_US = (544, 2400) if GAME == 'rzspook' else (1000, 2000)   # the game's servo levels 0 and 255
 
 
 def uart_plan():
@@ -48,18 +54,28 @@ def key_plan():
         t += dt
     tap('RSHIFT', 1.0)
     tap('RSHIFT', 1.0)                              # SOLENOID
-    tap('0', 1.0)                                   # SOLENOID TEST: KNOCKER
-    for c in range(24):
+    tap('0', 1.0)                                   # SOLENOID TEST: KNOCKER (Rob Zombie: AUTOPLUNGER)
+    for c in (list(range(16, 24)) + list(range(16)) if GAME == 'rzspook' else range(24)):
         tap('0', 1.5 if c == 1 else 0.5, ('fire', c))   # the shaker test ignores keys for a second
         tap('RSHIFT', 0.5)
     tap('7', 1.0)                                   # back to SOLENOID
     tap('RSHIFT', 1.0)                              # SERVO
-    tap('0', 1.0)                                   # SERVO TEST: NOID RIGHT
-    tap('0', 1.5, ('servo', 0, 0))                  # servo 0 runs at 0 deg
-    tap('RSHIFT', 1.0)                              # NOID STOP
-    tap('0', 1.0)                                   # Enter: pulses stop
-    tap('RSHIFT', 1.0)                              # NOID LEFT
-    tap('0', 1.5, ('servo', 0, 255))                # servo 0 runs at 180 deg
+    if GAME == 'rzspook':
+        tap('0', 1.0)                               # SERVO TEST: GATE OPEN
+        tap('0', 1.5, ('position', 0, 2222))        # the Spaulding gate opens
+        tap('RSHIFT', 1.0)                          # GATE CLOSE
+        tap('0', 1.5, ('position', 0, 1227))
+        tap('RSHIFT', 1.0)                          # ROBOT START
+        tap('0', 1.5, ('position', 1, 1476))
+        tap('RSHIFT', 1.0)                          # ROBOT END
+        tap('0', 1.5, ('position', 1, 2097))
+    else:
+        tap('0', 1.0)                               # SERVO TEST: NOID RIGHT
+        tap('0', 1.5, ('servo', 0, 0))              # servo 0 runs at 0 deg
+        tap('RSHIFT', 1.0)                          # NOID STOP
+        tap('0', 1.0)                               # Enter: pulses stop
+        tap('RSHIFT', 1.0)                          # NOID LEFT
+        tap('0', 1.5, ('servo', 0, 255))            # servo 0 runs at 180 deg
     tap('7', 1.0)                                   # back to SERVO
     tap('RSHIFT', 1.0)                              # LAMP
     tap('0', 0.5, ('gi', ()))                       # LAMP TEST: ALL OFF
@@ -78,11 +94,16 @@ def key_plan():
     tap('7', 1.0)                                   # back to LAMP
     tap('RSHIFT', 1.0)                              # RGB LIGHTING
     rgb = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)]
-    tap('0', 1.0, ('rgb', rgb[0] + (0, 0, 0)))      # RGB1 RED
+    ext = (255, 255, 255) if GAME == 'rzspook' else ()          # the LDG light stays white from attract
+    tap('0', 1.0, ('rgb', rgb[0] + (0, 0, 0) + ext))    # RGB1 RED
     for v in rgb[1:]:
-        tap('RSHIFT', 1.0, ('rgb', v + (0, 0, 0)))
+        tap('RSHIFT', 1.0, ('rgb', v + (0, 0, 0) + ext))
     for v in rgb:
-        tap('RSHIFT', 1.0, ('rgb', (0, 0, 0) + v))
+        tap('RSHIFT', 1.0, ('rgb', (0, 0, 0) + v + ext))
+    if GAME == 'rzspook':
+        # LDG RED, GREEN, BLUE, WHITE: the LDG light's lines are red, blue, green (SWAP G <-> B: NO)
+        for v in [(255, 0, 0), (0, 0, 255), (0, 255, 0), (255, 255, 255)]:
+            tap('RSHIFT', 1.0, ('rgb', (0, 0, 0) * 2 + v))
     tap('7', 1.0)                                   # back to RGB LIGHTING
     for i in range(5):
         tap('LSHIFT', 1.0)                          # back to SWITCH EDGE
@@ -198,10 +219,15 @@ def verify(d):
     def check(ok, what):
         if not ok:
             fails.append(what)
-    # attract mode: blinking start lamp 91, external WS2801 LED white, GI_14 flashing
+    # attract mode: blinking start lamp 91, external WS2801 LED white; Domino's flashes GI_14, Rob Zombie
+    # lights the playfield GI but its flashers GI_12 and GI_13
     check(o.rises('L91', 5, MENU_AT), 'start lamp 91 never lit in attract')
     check([o.at('S%d' % s, MENU_AT) for s in (62, 63, 64)] == [255] * 3, 'external LED 0 is not white on 62-64')
-    check(o.rises('S43', 5, MENU_AT), 'attract flasher GI_14 never reached solenoid 43')
+    if GAME == 'rzspook':
+        gi = [o.at('S%d' % s, MENU_AT) for s in range(37, 45)]
+        check(gi == [255] * 4 + [0, 0] + [255] * 2, 'attract playfield GI 37-44 is %s, expected all on but the flashers 41 and 42' % gi)
+    else:
+        check(o.rises('S43', 5, MENU_AT), 'attract flasher GI_14 never reached solenoid 43')
     levels = {}
     for t, cmd, e in uart_plan():
         if not e:
@@ -223,11 +249,13 @@ def verify(d):
     ev, _ = key_plan()
     wanted = set()
     # the simulator's balls: [M17020] loaded one into the shooter lane, the solenoid test's PLUNGER launched it
-    # and its LOAD BALL loaded the next, so the shooter lane (0) and trough 1 (1) rest closed; Noid Home (39) may
+    # and its LOAD BALL loaded the next, so the shooter lane (0) and trough 1 (1) rest closed; Noid Home (39) may.
+    # Rob Zombie's trough keeps the other five of its seven balls (trough 1-5)
     t0 = min(t for t, k, hold, e in ev if e and e[0] == 'switch')
     rest = [g for g in (grid(f) for tt, f in frames if t0 - 1.0 <= tt < t0 - 0.1) if g]
     base = set(rest[-1][0]) if rest else set()
-    check(rest and base - {39} == {0, 1} and rest[-1][1] == (1,), 'switch test at rest shows %s, expected the shooter lane (0), trough 1 (1), maybe Noid Home (39), and the closed coin door' % (rest[-1:],))
+    want = {0, 1, 2, 3, 4, 5} if GAME == 'rzspook' else {0, 1}
+    check(rest and base - {39} == want and rest[-1][1] == (1,), 'switch test at rest shows %s, expected switches %s, maybe Noid Home (39), and the closed coin door' % (rest[-1:], sorted(want)))
     for i, (t, k, hold, e) in enumerate(ev):
         if not e:
             continue
@@ -241,6 +269,11 @@ def verify(d):
             check(w and all(abs(us - (544 if e[2] == 0 else 2400)) < 10 for us in w), 'servo %d pulses %s' % (e[1], sorted(w)[::max(1, len(w) // 3)]))
             check(o.at('S%d' % (57 + e[1]), t + 1.1) == e[2], 'servo output %d is %d' % (57 + e[1], o.at('S%d' % (57 + e[1]), t + 1.1)))
             check(o.at('S58', t + 1.1) == 161, 'target bank servo 58 is %d, expected 161 (1631 us)' % o.at('S58', t + 1.1))
+        elif e[0] == 'position':
+            w = [us for tt, us in o.servo.get(e[1], []) if t + 0.2 <= tt < t + 0.5]
+            level = round((e[2] - SERVO_US[0]) * 255 / (SERVO_US[1] - SERVO_US[0]))
+            check(w and all(abs(us - e[2]) < 10 for us in w), 'servo %d pulses %s, expected %d us' % (e[1], sorted(set(round(us) for us in w)), e[2]))
+            check(abs(o.at('S%d' % (57 + e[1]), t + 0.5) - level) <= 1, 'servo output %d is %d, expected %d' % (57 + e[1], o.at('S%d' % (57 + e[1]), t + 0.5), level))
         elif e[0] in ('gi', 'gi+lamps'):
             want = tuple('S%d' % s for s in (e[1] if e[0] == 'gi' else (range(25, 33) if e[1] == 'all' else ()))) if e[0] == 'gi' else None
             if e[0] == 'gi+lamps':

@@ -78,7 +78,7 @@ int pinheck_display_look(display_look *look, const uint8_t *cfg, int n)
 {
 	look->shape = DISPLAY_SQUARE;
 	look->brightness = 255;
-	look->position = 340;
+	look->position = DISPLAY_ALIGNED;
 	look->bar = 62;
 	if (!cfg || n != 14 || word(cfg, 4) != DISPLAY_W || word(cfg, 5) != DISPLAY_H) return 0;
 	look->position = word(cfg, 1);
@@ -119,7 +119,7 @@ static uint8_t scale2x(const uint8_t *f, int x, int y, int sx, int sy)
 /* frame (128x32 RGB332) -> rgb (256x64, 3 bytes per pixel) in the look */
 void pinheck_display_render(const display_look *look, const uint8_t *frame, uint8_t *rgb)
 {
-	int x, y, k, dy = look->position - 340;
+	int x, y, k, dy = look->position - DISPLAY_ALIGNED;
 	dy = dy >= 0 ? dy / 4 : -((3 - dy) / 4);
 	memset(rgb, 0, DISPLAY_LOOK_W * DISPLAY_LOOK_H * 3);
 	for (y = 0; y < DISPLAY_LOOK_H; y++) {

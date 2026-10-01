@@ -23,11 +23,12 @@ extern "C" {
 #define DISPLAY_ROUND   0
 #define DISPLAY_SQUARE  1
 #define DISPLAY_HIGHREZ 2
+#define DISPLAY_ALIGNED 340 /* the POSITION drawn unshifted */
 
 typedef struct display_look {
 	int shape;      /* PIXEL SHAPE: DISPLAY_ROUND, DISPLAY_SQUARE or DISPLAY_HIGHREZ */
 	int brightness; /* BRIGHTNESS: 175-255 in the menu, 255 = the colours as sent */
-	int position;   /* POSITION: 300-500 in the menu, 340 = aligned */
+	int position;   /* POSITION: 300-500 in the menu, DISPLAY_ALIGNED = aligned */
 	int bar;        /* BAR BRIGHT: 0-62 in the menu, the light between round dots */
 } display_look;
 

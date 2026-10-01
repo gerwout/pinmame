@@ -67,6 +67,8 @@ static UINT8 brd_cust[PINHECK_NSOLS - PINHECK_SOL_RGB], brd_logged[PINHECK_NLAMP
 static int brd_servo_us[BOARD_SERVOS];
 static UINT8 brd_sw_logged[10], brd_lamps_logged[9];
 
+static const pinheck_tGameData *pinheck_game(void) { return (const pinheck_tGameData *)core_gameData; }
+
 static uint8_t pinheck_brd_swcol(void *ctx, int col) { (void)ctx; return coreGlobals.swMatrix[col + 1]; }
 static uint16_t pinheck_brd_cab(void *ctx) { (void)ctx; return (uint16_t)(coreGlobals.swMatrix[0] | coreGlobals.swMatrix[9] << 8); }
 
@@ -129,7 +131,8 @@ static void pinheck_brd_rgb(void *ctx, uint64_t t, int chain, int led, uint8_t r
 
 static void pinheck_brd_servo(void *ctx, uint64_t t, int servo, uint32_t pulse)
 {
-	double us = pulse / (PINHECK_CLOCK / 1e6), v = (us - 1000.0) / 1000.0;
+	const double lo = pinheck_game()->servoMin, hi = pinheck_game()->servoMax;
+	double us = pulse / (PINHECK_CLOCK / 1e6), v = (us - lo) / (hi - lo);
 	(void)ctx;
 	if (brd_log) fprintf(brd_log, "%.9f V %d %.1f %llu\n", timer_get_time(), servo, us, (unsigned long long)t);
 	brd_servo_us[servo] = pulse ? (int)(us + 0.5) : 0;
@@ -499,6 +502,7 @@ static void pinheck_disp_config(void *ctx, const uint8_t *bytes, int n, uint64_t
 	for (k = 0; k < n; k++) len += sprintf(msg + len, " %02x", bytes[k]);
 	pinheck_prop_log(NULL, msg);
 	if (!pinheck_display_look(&disp_look, bytes, n)) pinheck_prop_log(NULL, "display: unknown config packet, exact pixels");
+	else disp_look.position += DISPLAY_ALIGNED - pinheck_game()->aligned; /* the game's factory POSITION is aligned */
 	disp_dirty = 1;
 }
 
@@ -758,7 +762,7 @@ static NVRAM_HANDLER(pinheck)
 	prop_sync(&prop);
 	core_nvram(file, read_or_write, u13mem, sizeof(u13mem), 0xFF);
 	core_nvram(file, read_or_write, propmem + 0x8000, sizeof(propmem) - 0x8000, 0xFF);
-	if (first && getenv("PINHECK_INSERVICE")) pinheck_in_service(propmem, core_gameData->hw.gameSpecific1);
+	if (first && getenv("PINHECK_INSERVICE") && pinheck_game()->inService) pinheck_in_service(propmem, core_gameData->hw.gameSpecific1);
 }
 
 static MACHINE_STOP(pinheck)

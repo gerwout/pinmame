@@ -10,8 +10,9 @@ B=build
 mkdir -p $B || exit 2
 fail=0
 python3 names.py check $S || fail=$((fail + 1))
+python3 names.py check $S rzspook || fail=$((fail + 1))
 if command -v x86_64-w64-mingw32-gcc > /dev/null; then python3 mingw_check.py $S/libpinmame/libpinmame.cpp x86_64-w64-mingw32-gcc || fail=$((fail + 1)); else echo "vpx: MinGW compiler missing, strcasecmp check skipped"; fi
-printf '#include "pinheck_names.h"\nint main(void) { return pinheck_dominos_switch_names[0].num != 1; }\n' > $B/names.c
+printf '#include "pinheck_names.h"\nint main(void) { return pinheck_dominos_switch_names[0].num != 1 || pinheck_rzspook_switch_names[0].num != 1; }\n' > $B/names.c
 cc -std=c89 -pedantic-errors -Wall -Wextra -Werror -I$S/wpc $B/names.c -o $B/names && ./$B/names || { echo "NAMES FAIL: pinheck_names.h"; fail=$((fail + 1)); }
 srcs() { grep -o 'src/\(wpc/pinheck\|wpc/sims/pinheck\|cpu/mips32\|cpu/pic32mx\|cpu/p8x32a\)[^ )"]*' "$1" | sort -u; }
 srcs ../../../cmake/libpinmame/CMakeLists.txt > $B/srcs.ref

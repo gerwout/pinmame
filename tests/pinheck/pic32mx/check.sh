@@ -23,7 +23,7 @@ fi
 ./makefile_link_check.sh || fail=$((fail + 1))
 python3 ../link/symbol_check.py ../../.. || fail=$((fail + 1))
 # every PinMAME launch in a check can be killed: a plain SIGTERM may not stop the emulator
-bad=$(grep -n '"[$]SDL3PINMAME" \(dominos\|pinheck\|"[$]name"\)' ../*/*.sh | grep -v 'timeout -k')
+bad=$(grep -n '"[$]SDL3PINMAME" \(dominos\|pinheck\|[$]GAME\|"[$]name"\)' ../*/*.sh | grep -v 'timeout -k')
 [ -z "$bad" ] || { echo "LAUNCH FAIL: PinMAME launched without timeout -k:"; echo "$bad"; fail=$((fail + 1)); }
 # every timeout in a check can kill what it runs (emulators, machine programs, simulators)
 bad=$(grep -n 'timeou[t] [0-9]' ../*/*.sh)
