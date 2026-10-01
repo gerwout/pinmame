@@ -1,5 +1,6 @@
 #include "p8x32a.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 enum { EV_NONE, EV_HUB, EV_EXEC, EV_DONE, EV_WAITPIN, EV_RESTART, EV_SLEEP };
@@ -422,6 +423,10 @@ static void ctr_notify(p8x32a *p, int n, int k, uint64_t t)
 	if (p->bus.ctr_state) p->bus.ctr_state(p->bus.ctx, t, n, k, c->ctr[k], c->frq[k]);
 }
 
+#ifndef P8X32A_LZH_CAP
+#define P8X32A_LZH_CAP P8X32A_LZH /* lower in a test build: the overflow ends the run */
+#endif
+
 /* the lazy cog's OUTA write taking effect at e: its pins go to bus.lazy_pins once the catch-up reaches e */
 static void lazy_outa(p8x32a *p, uint32_t v, uint64_t e)
 {
@@ -432,7 +437,10 @@ static void lazy_outa(p8x32a *p, uint32_t v, uint64_t e)
 	r->at = e;
 	if (g == (p->lz_nh ? p->lz_hout[p->lz_nh - 1] : p->lz_out)) return;
 	if (e > p->lz_to || p->lz_nh) {
-		if (p->lz_nh == 4) { log_once(p, LOG_LAZY, "p8x32a: lazy cog's pin changes overflow"); return; }
+		if (p->lz_nh == P8X32A_LZH_CAP) {
+			log_once(p, LOG_LAZY, "p8x32a: lazy cog's pin changes overflow");
+			abort();
+		}
 		p->lz_ht[p->lz_nh] = e;
 		p->lz_hout[p->lz_nh++] = g;
 		return;
@@ -910,6 +918,8 @@ static void sys(p8x32a *p, int n, uint64_t h)
 	switch (op) {
 	case 0:
 		p->cfg = (uint8_t)dc;
+		/* the host retimes from h + 1: the lazy cog's pin changes before it reach it first */
+		lazy_catch(p, h);
 		if (p->bus.clkset) p->bus.clkset(p->bus.ctx, h + 1, p->cfg);
 		/* the host may retime its queued edges: sleepers re-check */
 		if (p->sleepers) loop_notify(p, h + 1, 0xFFFFFFFFu);
@@ -1486,6 +1496,7 @@ static int lazy_code(const p8x32a *p, int n)
 			if (!FIM(w) && SRC(w) >= 0x1F0 && SRC(w) != 0x1F0 && SRC(w) != 0x1F1 && SRC(w) != 0x1F4) return 0; /* INA, PHS, ... */
 			if (op <= 2) {
 				if (!FWR(w) || DST(w) >= 0x1F0) return 0;                  /* hub writes */
+				if (FWC(w)) return 0;                                        /* C from the hub's sys_c */
 			} else if (FWR(w) && DST(w) >= 0x1F0 && DST(w) != 0x1F4) return 0; /* special registers but OUTA */
 			if (FWR(w) && DST(w) < 0x1F0) wr[DST(w) >> 3] |= (uint8_t)(1u << (DST(w) & 7));
 			if (op == 0x17 || (op >= 0x39 && op <= 0x3B)) {
@@ -1546,6 +1557,8 @@ static void lazy_exit(p8x32a *p)
 	p->lz_on = 0;
 	c->ev_t = p->lz_evt;
 	c->outa = p->lz_reg;
+	/* its pins were left out of last_out: evaluated again from now */
+	add_pending(p, p->now, p->lz_pins, P8X32A_PEND_COG(p->lz));
 	jit_drop(p, p->lz);
 	p->pins_ok = 0;
 	p->sched_gen++;

@@ -28,7 +28,7 @@ static int stop_cog = -1;
 static uint32_t stop_ptr;
 static uint64_t stop_at = P8X32A_NEVER;
 static uint64_t known_to = P8X32A_NEVER;
-static uint64_t clkshift;
+static uint64_t clkshift, clk_at;
 static struct ev { uint64_t t; size_t seq; char line[96]; } *evs;
 static size_t nev, cap;
 
@@ -112,6 +112,8 @@ static void lazy_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 {
 	char b[48];
 	(void)ctx;
+	/* a host retimes at a CLKSET: the pin changes before it come first */
+	if (t < clk_at) fprintf(stderr, "p8run: lazy pin change at %llu after a CLKSET at %llu\n", (unsigned long long)t, (unsigned long long)clk_at);
 	if (notrace) return;
 	sprintf(b, "L %llu %08x %08x", (unsigned long long)t, (unsigned)out, (unsigned)dir);
 	emit(t, b);
@@ -193,6 +195,7 @@ static void clkset(void *ctx, uint64_t t, uint8_t cfg)
 	char b[48];
 	int k;
 	(void)ctx;
+	clk_at = t;
 	for (k = 0; k < nat; k++)
 		if (at_t[k] > t + 1) at_t[k] = at_t[k] - clkshift > t + 1 ? at_t[k] - clkshift : t + 1;
 	sprintf(b, "K %llu %02x", (unsigned long long)t, cfg);

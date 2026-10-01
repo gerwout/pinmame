@@ -90,6 +90,9 @@ typedef struct p8x32a_jst {
 	const uint8_t *hub;
 } p8x32a_jst;
 #define P8X32A_JOUT 256 /* the OUTA writes a run of blocks may leave */
+#ifndef P8X32A_LZH
+#define P8X32A_LZH 8    /* a lazy cog's pin changes after its catch-up end (at most 2: writes 4 cycles apart, in effect 1-5 cycles on) */
+#endif
 
 struct p8x32a_jblk {
 	uint32_t (*fn)(p8x32a_jst *st);
@@ -132,9 +135,9 @@ typedef struct p8x32a {
 	uint8_t sleepers;
 	uint8_t lz_on, lz, lz_nh;   /* the lazy cog; its pin changes waiting for their time */
 	uint32_t lazy_ok;           /* pins a lazy cog may drive (host: only bus.lazy_pins watches them); 0 = none */
-	uint32_t lz_pins, lz_out, lz_hout[4];
+	uint32_t lz_pins, lz_out, lz_hout[P8X32A_LZH];
 	p8x32a_reg lz_reg;          /* the lazy cog's OUTA */
-	uint64_t lz_at, lz_to, lz_evt, lz_ht[4], lz_try[8]; /* lz_evt: its next event (its ev_t is out of the schedule) */
+	uint64_t lz_at, lz_to, lz_evt, lz_ht[P8X32A_LZH], lz_try[8]; /* lz_evt: its next event (its ev_t is out of the schedule) */
 	uint32_t lz_wait[8];
 	uint64_t lazies;            /* lazy cogs entered */
 	unsigned sched_gen; /* counts changes one cog makes to another cog's next event */

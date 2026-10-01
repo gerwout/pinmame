@@ -74,7 +74,7 @@ rtl_case() {
 	if [ -n "$exp" ] && ! grep -qF "$exp" "$o.log"; then echo "LOG MISSING $1: $exp"; fail=$((fail + 1)); fi
 	if [ -n "$sleeps" ] && ! grep -qxF "p8run: $sleeps idle-loop sleeps" "$o.log"; then echo "SLEEPS $1: $(grep -F idle-loop "$o.log"), expected $sleeps"; fail=$((fail + 1)); fi
 	if [ -n "$lazies" ] && ! grep -qxF "p8run: $lazies lazy cogs" "$o.log"; then echo "LAZY $1: $(grep -F 'lazy cogs' "$o.log"), expected $lazies"; fail=$((fail + 1)); fi
-	if grep -q "p8x32a: lazy" "$o.log"; then echo "LAZY $1: $(grep "p8x32a: lazy" "$o.log")"; fail=$((fail + 1)); fi
+	if grep -q "p8x32a: lazy\|p8run: lazy" "$o.log"; then echo "LAZY $1: $(grep "p8x32a: lazy\|p8run: lazy" "$o.log" | head -3)"; fail=$((fail + 1)); fi
 	# EXPECT-CLKSHIFT: d v = with CLKSET moving queued edges d cycles earlier, the long at $6000 is v
 	set -- "$1" $(sed -n "s/^' EXPECT-CLKSHIFT: //p" "$1")
 	[ $# -eq 3 ] || return
@@ -100,12 +100,21 @@ mkdir -p $B/rtl-q && rtl_case chip/waitext.spin $B/rtl-q "-quantum 1000"
 rtl_case chip/idle_ina.spin $B/rtl-q "-quantum 1000"
 if [ -f gen.py ]; then
 	rm -rf $B/rtl/rand $B/spin/rand
-	python3 gen.py --out $B/rtl/rand --count "$SEEDS" --hubflags
+	python3 gen.py --out $B/rtl/rand --count "$SEEDS" --hubflags --workers 0.3
 	for f in $B/rtl/rand/*.spin; do rtl_case "$f" $B/rtl/rand; done
 	python3 gen.py --out $B/spin/rand --count "$SEEDS"
 	for f in $B/spin/rand/*.spin; do spin_case "$f" $B/spin/rand; done
 fi
 for f in isa/*.spin; do [ -e "$f" ] && spin_case "$f" $B/spin; done
+# a lazy cog's pin changes past the hold buffer end the run (built with no room: lazy.spin holds one)
+mkdir -p $B/lzh
+$CC -DP8X32A_LZH_CAP=0 -I$CORE -I$DEV -o $B/lzh/p8run run.c $CORE/p8x32a.c $DEV/eeprom.c $DEV/sd.c $DEV/vfat.c $DEV/zipsrc.c -lz || exit 2
+if ./$B/lzh/p8run -rom $B/rtl/lazy.rom -ram $B/rtl/lazy.ram -halt -cycles 400000 -quantum 1000 > /dev/null 2> $B/lzh/log ||
+   ! grep -q "lazy cog's pin changes overflow" $B/lzh/log; then
+	echo "LAZY HOLD: overflow did not end the run"; fail=$((fail + 1))
+else pass=$((pass + 1)); fi
+# mutations of the lazy-cog core that the cases above must catch
+TOOLS=$TOOLS ./mutate_lazy.sh || fail=$((fail + 1))
 
 boot_case() {
 	ext=$1
