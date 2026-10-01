@@ -301,7 +301,13 @@ int prop_p24(pinheck_prop *p, uint64_t pic_cycle)
    would inline, each with the PIC32 cycle at which it was made. The caller waits for the queue to drain before
    it reads Propeller state (prop_sync). */
 #define PROP_Q 4096
-#define PROP_SPIN_NS 50000 /* a wait spins this long, then blocks; PINHECK_SPIN_US (1-100000) sets it at thread start */
+/* a wait spins this long, then blocks; PINHECK_SPIN_US (1-100000) sets it at thread start. Windows' wake from a
+   blocked wait costs more: 1 ms there gives +5-6% speed for +16% CPU over 50 us (Threadripper 3970X) */
+#ifdef _WIN32
+#define PROP_SPIN_NS 1000000
+#else
+#define PROP_SPIN_NS 50000
+#endif
 
 enum { CMD_PINS, CMD_CATCH_UP, CMD_QUIT };
 
