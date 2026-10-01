@@ -48,6 +48,7 @@ void boot_set_log(pic32_boot *b, boot_log_fn fn, void *ctx);
 void boot_reset(pic32_boot *b, uint64_t pic_cycle);
 void boot_rx(pic32_boot *b, uint64_t pic_cycle, int level);
 void boot_advance(pic32_boot *b, uint64_t pic_cycle);
+void boot_stop(pic32_boot *b);
 uint64_t boot_hold(const pic32_boot *b, uint64_t pic_cycle);
 
 #ifdef __cplusplus

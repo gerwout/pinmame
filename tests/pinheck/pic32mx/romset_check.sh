@@ -10,7 +10,7 @@ cd "$(dirname "$0")" || exit 2
 B=build/romset
 rm -rf $B && mkdir -p $B/bios $B/nomedia $B/nvram $B/cfg || exit 2
 cp "$P8X32A_ROM" $B/p8x32a.rom && (cd $B && zip -q -j bios/pinheck.zip p8x32a.rom && cp bios/pinheck.zip nomedia/ && rm p8x32a.rom) || exit 2
-(cd "$PINHECK_UPDATE_DIR" && zip -q -0 "$OLDPWD/$B/nomedia/$GAME.zip" $PRG PRP_V008.BIN) || exit 2
+(cd "$PINHECK_UPDATE_DIR" && zip -q -0 "$OLDPWD/$B/nomedia/$GAME.zip" $PRG $PRP) || exit 2
 fail=0
 run() {
 	name=$1 path=$2 out=$3

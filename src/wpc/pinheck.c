@@ -786,6 +786,7 @@ static NVRAM_HANDLER(pinheck)
 
 static MACHINE_STOP(pinheck)
 {
+	if (!locals.idle) boot_stop(&boot);
 	prop_stop_thread(&prop);
 #ifdef PINMAME_JIT_ASMJIT
 	p8x32a_jit_free(prop.chip.jit);

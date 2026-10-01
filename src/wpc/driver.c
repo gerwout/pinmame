@@ -3651,5 +3651,6 @@ DRIVERNV(nstrpffp)      //      New Star's Phoenix (French Speech Free Play)
 DRIVERNV(pinheck)       //pinHeck System (not a game)
 DRIVERNV(dominos)       //pinHeck 07/16 Domino's Spectacular Pinball Adventure
 DRIVERNV(rzspook)       //pinHeck 2016 Rob Zombie's Spookshow International (V26)
+DRIVERNV(jetsons)       //pinHeck 2017 The Jetsons (V4)
 
 #endif /* DRIVER_RECURSIVE */

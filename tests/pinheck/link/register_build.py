@@ -25,6 +25,7 @@ GROUPS = [
 SIMS = [
     ('src/wpc/sims/pinheck/dominos.c', 'PINGAMES += $(PINOBJ)/sims/pinheck/dominos.o\n'),
     ('src/wpc/sims/pinheck/rzspook.c', 'PINGAMES += $(PINOBJ)/sims/pinheck/rzspook.o\n'),
+    ('src/wpc/sims/pinheck/jetsons.c', 'PINGAMES += $(PINOBJ)/sims/pinheck/jetsons.o\n'),
 ]
 changed = []
 

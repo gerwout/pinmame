@@ -583,6 +583,7 @@ add_executable(sdl3pinmame
    src/wpc/pinheck.c
    src/wpc/pinheck.h
    src/wpc/pinheckgames.c
+   src/wpc/sims/pinheck/jetsons.c
    src/wpc/sims/pinheck/rzspook.c
    src/wpc/sims/pinheck/dominos.c
    src/wpc/pinheck/board.c
