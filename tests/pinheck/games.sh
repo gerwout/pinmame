@@ -11,13 +11,14 @@
 #   BANNER      the UART1 banner lines checked (| separated)
 #   CLIP        a .VID clip the display check plays ([V00<CLIP>])
 #   SIM         the simulator check (tests/pinheck/sim)
+#   TROUGH1     the switch a ball in trough 1 (the eject position) closes
 GAME=${PINHECK_GAME:-dominos}
 case $GAME in
-dominos) PRG=DOM_V006.PRG PRP=PRP_V008.BIN PROGRAMMED=204288 UPDATE_END=leave REBOOTS=0 UPDATED_AT=138 STORED=600BAFA CLIP=LT5 SIM=sim.py
+dominos) PRG=DOM_V006.PRG PRP=PRP_V008.BIN PROGRAMMED=204288 UPDATE_END=leave REBOOTS=0 UPDATED_AT=138 STORED=600BAFA CLIP=LT5 SIM=sim.py TROUGH1=12
 	BANNER='pinHeck System 2011-2016|Game: DOM - DOMINOS|Version: 006' ;;
-rzspook) PRG=RZO_V026.PRG PRP=PRP_V008.BIN PROGRAMMED=309248 UPDATE_END=leave REBOOTS=0 UPDATED_AT=184 STORED=1A00BAFA CLIP=DMB SIM=rzsim.py
+rzspook) PRG=RZO_V026.PRG PRP=PRP_V008.BIN PROGRAMMED=309248 UPDATE_END=leave REBOOTS=0 UPDATED_AT=184 STORED=1A00BAFA CLIP=DMB SIM=rzsim.py TROUGH1=12
 	BANNER='pinHeck System 2011-2016|Game: RZO - SPOOK SHOW' ;;
-jetsons) PRG=JET_V004.PRG PRP=PRP_V002.BIN PROGRAMMED=197632 UPDATE_END='stopped in programming mode' REBOOTS=1 UPDATED_AT=104 STORED=400BAFA CLIP=TL1 SIM=jetsim.py
+jetsons) PRG=JET_V004.PRG PRP=PRP_V002.BIN PROGRAMMED=197632 UPDATE_END='stopped in programming mode' REBOOTS=1 UPDATED_AT=104 STORED=400BAFA CLIP=TL1 SIM=jetsim.py TROUGH1=92
 	BANNER='pinHeck System 2011-2016|Game: JET - JETSONS' ;;
 *) echo "PINHECK_GAME: no machine checks for '$GAME'"; exit 2 ;;
 esac
