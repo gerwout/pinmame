@@ -27,5 +27,9 @@ rc=$(run $GAME nomedia nomedia -frames_to_run 120)
 if [ "$rc" -gt 128 ] || ! grep -qF "pinheck: the SD card from $GAME.zip has no DMD/ and no SFX/" $B/nomedia.out; then
 	echo "ROMSET FAIL: $GAME without media exited $rc"; tail -3 $B/nomedia.out; fail=1
 fi
+# the driver supports everything the game's data asks for
+if grep -F "not supported" $B/nomedia.out; then
+	echo "ROMSET FAIL: $GAME's game data asks for something the driver does not support"; fail=1
+fi
 [ $fail -eq 0 ] && echo "romset: ok"
 exit $fail
