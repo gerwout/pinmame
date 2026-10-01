@@ -233,7 +233,7 @@ static pinheck_tGameData jetsonsGameData = {
     { FLIP_SWNO(PINHECK_SWLFLIP, PINHECK_SWRFLIP), 0, 1, PINHECK_CUSTSOLS, SNDBRD_NONE, 0, 4, 0,
       pinheck_getsol, jetsons_handleMech, jetsons_getMech },
     &jetsonsSimData },
-  128, 64, 55, 544, 2400, 0, 1
+  128, 64, 55, 544, 2400, 0, 1, 0, 3000
 };
 
 static void init_jetsons(void) {

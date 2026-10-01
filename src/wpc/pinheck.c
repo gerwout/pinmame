@@ -775,6 +775,7 @@ static MACHINE_INIT(pinheck)
 		sprintf(msg, "hex: %ld bytes of program flash", hex_bytes);
 		pinheck_prop_log(NULL, msg);
 	}
+	boot_set_window(&boot, (uint64_t)pinheck_game()->bootHold * (PINHECK_CLOCK / 1000));
 	pinheck_open_card();
 	pinheck_disp_init();
 	pinheck_brd_init();
