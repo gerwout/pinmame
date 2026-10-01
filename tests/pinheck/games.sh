@@ -5,7 +5,9 @@
 #   PROGRAMMED  bytes the first-boot update flashes
 #   UPDATE_END  how the update hands the PIC32 back: leave (STK500v2 LEAVE_PROGMODE), or stopped in
 #               programming mode (the Propeller asks for a restart and the PIC32 waits for it)
-#   REBOOTS     Propeller reboots (CLKSET $80) before the first PIC32 sync of a normal start
+#   REBOOTS     Propeller reboots (CLKSET $80) before the first PIC32 sync of a normal start. The Jetsons' 1
+#               follows from the stand-in bootloader's 3 s hold: any hold under 2.59 s gives 0, Domino's needs
+#               over 1.7 s, and the real bootloader's timeout is not known
 #   UPDATED_AT  emulated seconds by which the Propeller shows PLEASE RESTART on a first boot
 #   STORED      the version word the firmware prints after the sync check (version << 24 | $BAFA, hex)
 #   BANNER      the UART1 banner lines checked (| separated)
