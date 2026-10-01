@@ -1,19 +1,20 @@
 # The game a machine check runs, sourced by the checks: PINHECK_GAME (default dominos), whose romset is
 # PINHECK_ZIP and whose unzipped update is PINHECK_UPDATE_DIR.
-#   PRG         the PIC32 image in the update
+#   PRG         the PIC32 image in the update (America's Most Haunted: the Intel HEX next to the SD card's files)
 #   PRP         the Propeller image in the update
-#   PROGRAMMED  bytes the first-boot update flashes
+#   PROGRAMMED  bytes the first-boot update flashes (none: the romset's Intel HEX is converted at start)
 #   UPDATE_END  how the update hands the PIC32 back: leave (STK500v2 LEAVE_PROGMODE), or stopped in
-#               programming mode (the Propeller asks for a restart and the PIC32 waits for it)
+#               programming mode (the Propeller asks for a restart and the PIC32 waits for it); none: no update
 #   REBOOTS     Propeller reboots (CLKSET $80) before the first PIC32 sync of a normal start. The Jetsons' 1
 #               follows from the stand-in bootloader's 3 s hold: any hold under 2.59 s gives 0, Domino's needs
 #               over 1.7 s, and the real bootloader's timeout is not known
 #   UPDATED_AT  emulated seconds by which the Propeller shows PLEASE RESTART on a first boot
-#   STORED      the version word the firmware prints after the sync check (version << 24 | $BAFA, hex)
+#   STORED      the version word the firmware prints after the sync check (version << 24 | $BAFA, hex); with no
+#               update, the word the firmware stores at EEPROM $8000 on a blank NVRAM
 #   BANNER      the UART1 banner lines checked (| separated)
 #   CLIP        a .VID clip the display check plays ([V00<CLIP>])
-#   LOOK        the module's look: menu (the 128x32 module's 14-byte config packets), or none (The Jetsons'
-#               128x64 module: 12-byte packets, drawn as sent)
+#   LOOK        the module's look: menu (the 128x32 module's 14-byte config packets), none (The Jetsons'
+#               128x64 module: 12-byte packets, drawn as sent), or dmd (a raw DMD scanned by a Propeller cog)
 #   SIM         the simulator check (tests/pinheck/sim)
 #   TROUGH1     the switch a ball in trough 1 (the eject position) closes
 GAME=${PINHECK_GAME:-dominos}
@@ -24,5 +25,7 @@ rzspook) PRG=RZO_V026.PRG PRP=PRP_V008.BIN PROGRAMMED=309248 UPDATE_END=leave RE
 	BANNER='pinHeck System 2011-2016|Game: RZO - SPOOK SHOW' ;;
 jetsons) PRG=JET_V004.PRG PRP=PRP_V002.BIN PROGRAMMED=197632 UPDATE_END='stopped in programming mode' REBOOTS=1 UPDATED_AT=104 STORED=400BAFA LOOK=none CLIP=TL1 SIM=jetsim.py TROUGH1=92
 	BANNER='pinHeck System 2011-2016|Game: JET - JETSONS' ;;
+amh) PRG=AMH_V023.hex PRP=DMD/PROP_023.BIN PROGRAMMED=0 UPDATE_END=none REBOOTS=0 UPDATED_AT=0 STORED=1700BAFA LOOK=dmd CLIP=AB1 SIM=amhsim.py TROUGH1=84
+	BANNER='pinHeck System 2011-2016|Game:AMH - SPOOKY PIN|Version:023' ;;
 *) echo "PINHECK_GAME: no machine checks for '$GAME'"; exit 2 ;;
 esac

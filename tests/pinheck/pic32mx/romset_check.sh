@@ -10,7 +10,7 @@ cd "$(dirname "$0")" || exit 2
 B=build/romset
 rm -rf $B && mkdir -p $B/bios $B/nomedia $B/nvram $B/cfg || exit 2
 cp "$P8X32A_ROM" $B/p8x32a.rom && (cd $B && zip -q -j bios/pinheck.zip p8x32a.rom && cp bios/pinheck.zip nomedia/ && rm p8x32a.rom) || exit 2
-(cd "$PINHECK_UPDATE_DIR" && zip -q -0 "$OLDPWD/$B/nomedia/$GAME.zip" $PRG $PRP) || exit 2
+(cd "$PINHECK_UPDATE_DIR" && zip -q -0 -j "$OLDPWD/$B/nomedia/$GAME.zip" $PRG $PRP) || exit 2
 fail=0
 run() {
 	name=$1 path=$2 out=$3
@@ -27,6 +27,16 @@ rc=$(run $GAME nomedia nomedia -frames_to_run 120)
 if [ "$rc" -gt 128 ] || ! grep -qF "pinheck: the SD card from $GAME.zip has no DMD/ and no SFX/" $B/nomedia.out; then
 	echo "ROMSET FAIL: $GAME without media exited $rc"; tail -3 $B/nomedia.out; fail=1
 fi
+# an Intel HEX that does not convert (one data digit changed: the record's checksum fails) stops the game
+case $PRG in *.hex)
+	mkdir -p $B/badhex && cp $B/bios/pinheck.zip $B/badhex/ &&
+		sed '2s/^\(:..........\)./\1x/' "$PINHECK_UPDATE_DIR/$PRG" | tr x 7 > $B/$PRG &&
+		(cd $B && zip -q -0 -j badhex/$GAME.zip $PRG "$PINHECK_UPDATE_DIR/$PRP" && rm $PRG) || exit 2
+	rc=$(run $GAME badhex badhex)
+	if [ "$rc" -eq 0 ] || [ "$rc" -ge 124 ] || ! grep -qF "pinheck: $GAME: the PIC32 image (Intel HEX) does not convert: line 2: checksum" $B/badhex.out; then
+		echo "ROMSET FAIL: $GAME with a corrupt Intel HEX exited $rc, want the conversion error and an error exit"; tail -3 $B/badhex.out; fail=1
+	fi ;;
+esac
 # the driver supports everything the game's data asks for
 if grep -F "not supported" $B/nomedia.out; then
 	echo "ROMSET FAIL: $GAME's game data asks for something the driver does not support"; fail=1

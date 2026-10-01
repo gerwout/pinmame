@@ -24,3 +24,4 @@ GAMEX(2014,pinheck,0,PINHECK,pinheck,pinheck,ROT0,"Spooky Pinball","pinHeck Syst
 /* Domino's Spectacular Pinball Adventure: sims/pinheck/dominos.c */
 /* Rob Zombie's Spookshow International: sims/pinheck/rzspook.c */
 /* The Jetsons: sims/pinheck/jetsons.c */
+/* America's Most Haunted: sims/pinheck/amh.c */

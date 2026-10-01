@@ -138,6 +138,7 @@ PINGAMES += $(PINOBJ)/capgames.o
 PINGAMES += $(PINOBJ)/gts1games.o
 PINGAMES += $(PINOBJ)/recelgames.o
 PINGAMES += $(PINOBJ)/pinheckgames.o
+PINGAMES += $(PINOBJ)/sims/pinheck/amh.o
 PINGAMES += $(PINOBJ)/sims/pinheck/jetsons.o
 PINGAMES += $(PINOBJ)/sims/pinheck/rzspook.o
 PINGAMES += $(PINOBJ)/sims/pinheck/dominos.o

@@ -54,8 +54,9 @@ static struct {
 #define PINHECK_SOL_GI8 40  /* GI 8-15: solenoids 37-44 through core.c's S11 layout */
 #define PINHECK_SOL_RGB 50  /* on-board RGB left R,G,B, right R,G,B: 51-56 */
 #define PINHECK_SOL_SRV 56  /* servos 0-4: 57-61 */
-#define PINHECK_SOL_EXT 61  /* external WS2801 LED 0 R,G,B: 62-64 */
+#define PINHECK_SOL_EXT 61  /* external WS2801 LED 0 R,G,B, or on-board LED 2 R,G,B: 62-64 */
 #define PINHECK_EXT_LEDS 1  /* the firmware drives one external LED */
+#define PINHECK_ONB_LEDS 3  /* on-board LEDs 0 and 1; a third (America's Most Haunted's ghost) on 62-64 */
 #define PINHECK_NSOLS   64
 #define PINHECK_LAMP_ST 64  /* start button lamp: lamp 91 */
 #define PINHECK_NLAMPS  72
@@ -137,8 +138,8 @@ static void pinheck_brd_rgb(void *ctx, uint64_t t, int chain, int led, uint8_t r
 {
 	(void)ctx;
 	if (brd_log) fprintf(brd_log, "%.9f R %d %d %02x%02x%02x %llu\n", timer_get_time(), chain, led, r, g, b, (unsigned long long)t);
-	if ((chain == BOARD_RGB_ONBOARD && led < 2) || (chain == BOARD_RGB_EXTERNAL && led < PINHECK_EXT_LEDS)) {
-		int idx = chain == BOARD_RGB_ONBOARD ? PINHECK_SOL_RGB + 3 * led : PINHECK_SOL_EXT + 3 * led;
+	if ((chain == BOARD_RGB_ONBOARD && led < PINHECK_ONB_LEDS) || (chain == BOARD_RGB_EXTERNAL && led < PINHECK_EXT_LEDS)) {
+		int idx = chain == BOARD_RGB_ONBOARD && led < 2 ? PINHECK_SOL_RGB + 3 * led : PINHECK_SOL_EXT + 3 * (chain == BOARD_RGB_ONBOARD ? led - 2 : led);
 		pinheck_brd_level(idx, r);
 		pinheck_brd_level(idx + 1, g);
 		pinheck_brd_level(idx + 2, b);
