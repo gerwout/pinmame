@@ -4,6 +4,7 @@ PinMAME lamps, solenoids and switches of spec 4.5.
   check5.py plan DIR      write DIR/send, send_at, send_gap, keys.txt, frames
   check5.py timing LOG    board edges in one CPU slice carry distinct PinMAME times
   check5.py verify DIR    check DIR/out2.log and DIR/frames2.bin against the plan
+  check5.py selftest      the verifier's helpers
 PINHECK_GAME (dominos, rzspook, jetsons) selects the game's servo and RGB tests, its menu, its switch-test
 screen and its resting balls."""
 import os
@@ -221,6 +222,22 @@ def grid(f):
     return sw, cab
 
 
+def shown_states(grids):
+    """the switch-test screens shown; a first screen with nothing closed is drawn before the inputs are read"""
+    return set(grids[1:] if grids and grids[0] == ((), ()) else grids)
+
+
+def selftest():
+    fails = 0
+    a, b = ((0, 1), (1, 10)), ((0, 1, 5), (1, 10))
+    for got, want in ((shown_states([a, b]), {a, b}), (shown_states([((), ()), a]), {a}), (shown_states([]), set())):
+        if got != want:
+            print('CHECK5 FAIL: shown_states gave %s, expected %s' % (sorted(got), sorted(want)))
+            fails += 1
+    print('check5 selftest: %s' % ('FAIL' if fails else 'ok'))
+    return 1 if fails else 0
+
+
 def verify(d):
     o = Out(d + '/out2.log')
     raw = open(d + '/frames2.bin', 'rb').read()
@@ -326,8 +343,7 @@ def verify(d):
         elif e[0] == 'exit':
             after = [grid(f) for tt, f in frames if tt >= t + 0.1]
             check(after and after[-1] is None, 'Back did not leave the switch test')
-    shown = [g for g in (grid(f) for tt, f in frames if tt >= KEYS_AT) if g]
-    shown = set(shown[1:])                          # the test's first frame is drawn before the inputs are read
+    shown = shown_states([g for g in (grid(f) for tt, f in frames if tt >= KEYS_AT) if g])
     check(shown <= wanted, 'switch test showed unexpected states %s' % sorted(shown - wanted))
     for f in fails:
         print('BOARD FAIL: ' + f)
@@ -336,6 +352,8 @@ def verify(d):
 
 
 if __name__ == '__main__':
+    if sys.argv[1:] == ['selftest']:
+        sys.exit(selftest())
     if len(sys.argv) != 3 or sys.argv[1] not in ('plan', 'timing', 'verify'):
         sys.exit(__doc__)
     if sys.argv[1] == 'plan':
