@@ -302,11 +302,11 @@ def media(d, ref):
     return 1 if fails else 0
 
 
-def dmd(d):
+def dmd(d, rawmode=False):
     """America's Most Haunted's raw DMD as a libpinmame host gets it: one 128x32 DMD of 16 shades (depth 4). The
     driver hands the core each vblank's subframes (PINHECK_DMD_LOG); the core shows the sum of the last 16, so each
-    frame of the callback path (bytes, 255 * sum / 16) and of the plugin path (floats, sum / 16) must equal that sum
-    at a vblank, the frames in the order of their vblanks (libpinmame passes a frame on when it changed)"""
+    frame of the callback path (bytes, 255 * sum / 16; raw: the sum) and of the plugin path (floats, sum / 16) must
+    equal that sum at a vblank, the frames in the order of their vblanks (libpinmame passes a frame on when it changed)"""
     fails = []
     _, other = api_log(d)
     avail = [l for l in other if l.startswith('avail ')]
@@ -338,7 +338,8 @@ def dmd(d):
         n = W * H * (4 if plugin else 1)
         host[plugin].append(raw[i + 4:i + 4 + n])
         i += 4 + n
-    lum8 = bytes(min(255, int(255.0 * v / 16.0)) for v in range(256))   # sums 0-16
+    # sums 0-16; raw (PINMAME_DMD_MODE_RAW): the core's raw frame, the sum held to 15
+    lum8 = bytes(min(15, v) for v in range(256)) if rawmode else bytes(min(255, int(255.0 * v / 16.0)) for v in range(256))
     for plugin in (False, True):
         frames = host[plugin]
         if plugin and not frames:
@@ -481,6 +482,8 @@ if __name__ == '__main__':
         sys.exit(media(a[1], a[2]))
     if a[:1] == ['dmd'] and len(a) == 2:
         sys.exit(dmd(a[1]))
+    if a[:1] == ['dmd'] and len(a) == 3 and a[2] == 'raw':
+        sys.exit(dmd(a[1], True))
     if a[:1] == ['mech'] and len(a) == 3:
         sys.exit(mech(a[1], a[2]))
     if a[:1] == ['restart'] and len(a) == 2:

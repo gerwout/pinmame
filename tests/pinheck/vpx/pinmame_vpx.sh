@@ -22,7 +22,7 @@ launch() {
 	shift
 	[ -d $B/$name ] || cp -r $B/boot $B/$name || exit 2
 	rm -f $B/$name/*.log $B/$name/*.bin $B/$name/*.raw $B/$name/*.wav
-	(cd $B/$name && PINHECK_INSERVICE=6 PINHECK_OUT_LOG=$PWD/out.log PINHECK_FRAME_LOG=$PWD/frames.log PINHECK_WAV=$PWD/capture.wav \
+	(cd $B/$name && PINHECK_INSERVICE=6 PINHECK_OUT_LOG=$PWD/out.log PINHECK_FRAME_LOG=$PWD/frames.log PINHECK_WAV=$PWD/capture.wav PINHECK_PROP_LOG=$PWD/prop.log \
 		PINHECK_DMD_LOG=$PWD/dmd.log PINHECK_UART1_LOG=$PWD/uart.log timeout -k 30 3000 ../host "$@" > run.out 2>&1) || { echo "VPX FAIL: $name exited $?"; tail -5 $B/$name/run.out; exit 1; }
 }
 fail=0
@@ -35,6 +35,19 @@ if [ $LOOK = dmd ]; then
 	PINHECK_UART1_SEND_AT=10 PINHECK_UART1_SEND="[E96000]~~[V00$CLIP]" launch media -p $GAME 1200 .
 	grep -aq "Playing Video" $B/media/uart.log || { echo "VPX FAIL: [V00$CLIP] not acknowledged"; fail=1; }
 	python3 vpx.py dmd $B/media || fail=1
+	# the raw frames the core makes for colorizers (PINMAME_DMD_MODE_RAW): the sum of the last 16 subframes, held to 15
+	launch raw -D $GAME 600 .
+	python3 vpx.py dmd $B/raw raw || fail=1
+	# a second session of another game in the same process: no trace of the first one's Intel HEX
+	if [ -n "$DOMINOS_ZIP" ]; then
+		[ -d $B/twogames ] || cp -r $B/boot $B/twogames || exit 2
+		ln -sf "$(realpath "$DOMINOS_ZIP")" $B/twogames/roms/dominos.zip || exit 2
+		launch twogames -R -n dominos $GAME 300 .
+		n=$(grep -c '^hex: ' $B/twogames/prop.log)
+		[ "$n" = 1 ] && echo "sessions: the Intel HEX logged once over $GAME and dominos" || { echo "VPX FAIL: $n hex lines over $GAME and dominos"; fail=1; }
+	else
+		echo "sessions: DOMINOS_ZIP not set, the second game's session not run"
+	fi
 	[ $fail -eq 0 ] || exit 1
 	echo "pinmame vpx: ok ($GAME: the raw DMD)"
 	exit 0

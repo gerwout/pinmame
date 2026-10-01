@@ -272,7 +272,7 @@ static pinheck_tGameData rzspookGameData = {
     { FLIP_SWNO(PINHECK_SWLFLIP, PINHECK_SWRFLIP), 0, 1, PINHECK_CUSTSOLS, SNDBRD_NONE, 0, 26, 0,
       pinheck_getsol, rzspook_handleMech, rzspook_getMech },
     &rzspookSimData },
-  128, 32, 460, 544, 2400, 0, 1, 0, 3000
+  128, 32, 460, 544, 2400, 0, 1, 0, 3000, 0
 };
 
 static void init_rzspook(void) {

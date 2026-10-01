@@ -56,7 +56,7 @@ static struct {
 #define PINHECK_SOL_SRV 56  /* servos 0-4: 57-61 */
 #define PINHECK_SOL_EXT 61  /* external WS2801 LED 0 R,G,B, or on-board LED 2 R,G,B: 62-64 */
 #define PINHECK_EXT_LEDS 1  /* the firmware drives one external LED */
-#define PINHECK_ONB_LEDS 3  /* on-board LEDs 0 and 1; a third (America's Most Haunted's ghost) on 62-64 */
+#define PINHECK_ONB_LEDS 3  /* on-board LEDs 0 and 1; a third (game data onbLed2: America's Most Haunted's ghost) on 62-64 */
 #define PINHECK_NSOLS   64
 #define PINHECK_LAMP_ST 64  /* start button lamp: lamp 91 */
 #define PINHECK_NLAMPS  72
@@ -138,7 +138,7 @@ static void pinheck_brd_rgb(void *ctx, uint64_t t, int chain, int led, uint8_t r
 {
 	(void)ctx;
 	if (brd_log) fprintf(brd_log, "%.9f R %d %d %02x%02x%02x %llu\n", timer_get_time(), chain, led, r, g, b, (unsigned long long)t);
-	if ((chain == BOARD_RGB_ONBOARD && led < PINHECK_ONB_LEDS) || (chain == BOARD_RGB_EXTERNAL && led < PINHECK_EXT_LEDS)) {
+	if ((chain == BOARD_RGB_ONBOARD && led < (pinheck_game()->onbLed2 ? PINHECK_ONB_LEDS : 2)) || (chain == BOARD_RGB_EXTERNAL && led < PINHECK_EXT_LEDS)) {
 		int idx = chain == BOARD_RGB_ONBOARD && led < 2 ? PINHECK_SOL_RGB + 3 * led : PINHECK_SOL_EXT + 3 * (chain == BOARD_RGB_ONBOARD ? led - 2 : led);
 		pinheck_brd_level(idx, r);
 		pinheck_brd_level(idx + 1, g);
@@ -534,7 +534,7 @@ static void pinheck_disp_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 }
 
 /* The raw DMD (game data dmdHub): the Propeller thread decodes subframes from the scan pins (P16-P20) into a ring,
-   which the emulation thread hands to the core's PWM integration at each vblank, after the Propeller has caught up.
+   which the emulation thread hands to the core's PWM integration at each vblank, after the queued Propeller work has run.
    Test hook PINHECK_DMD_PROOF also runs the row model (P18-P20 only, a row's dots from hub RAM at its latch) and
    counts the subframes in which it differs. */
 #define PINHECK_DMD_RING 64
@@ -983,6 +983,7 @@ static MACHINE_STOP(pinheck)
 	if (locals.uart1) fclose(locals.uart1);
 	if (locals.proplog) fclose(locals.proplog);
 	locals.uart1 = locals.proplog = NULL;
+	hex_bytes = 0; /* the next session's game may have no HEX */
 	if (locals.have_vol) vfat_free(&vol);
 	if (locals.have_zip) zipsrc_close(&zip);
 	locals.have_vol = locals.have_zip = 0;
