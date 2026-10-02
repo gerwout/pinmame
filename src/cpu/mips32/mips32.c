@@ -663,6 +663,15 @@ static int fast_run(mips32_state *s, uint64_t lim)
 		const mips32_region *m;
 		if (off >= fsize || (off & 3)) break;
 		op = le32(fptr + off);
+		if (!op) {
+			/* NOP (sll $0, $0, 0): a quarter of some firmware's instructions, its delay slots */
+			pc = npc;
+			npc = tpc;
+			delay = 0;
+			cyc++;
+			n++;
+			continue;
+		}
 		rs = r[RS(op)];
 		rt = r[RT(op)];
 		switch (op >> 26) {
@@ -768,7 +777,25 @@ static int fast_run(mips32_state *s, uint64_t lim)
 			default: goto out;
 			}
 			break;
-		case 0x20: case 0x21: case 0x23: case 0x24: case 0x25: {
+		case 0x23: {
+			/* LW, the most frequent load, without the size dispatch */
+			ea = rs + SIMM(op);
+			if (ea & 3) goto out;
+			if (ea < 0x80000000u) pa = erl ? ea : ea + 0x40000000u;
+			else if (kern && ea < 0xC0000000u) pa = ea & 0x1FFFFFFFu;
+			else goto out;
+			m = &s->region[ds];
+			if (!(pa - m->base < m->size && m->size - (pa - m->base) >= 4)) {
+				int k = direct_slot(s, pa, 4, 0);
+				if (k < 0) goto out;
+				ds = k;
+				m = &s->region[k];
+			}
+			v = le32(m->rd + (pa - m->base));
+			d = RT(op);
+			break;
+		}
+		case 0x20: case 0x21: case 0x24: case 0x25: {
 			uint32_t sz = (op >> 26) == 0x23 ? 4 : ((op >> 26) & 1) ? 2 : 1;
 			const uint8_t *h;
 			ea = rs + SIMM(op);
@@ -787,7 +814,6 @@ static int fast_run(mips32_state *s, uint64_t lim)
 			switch (op >> 26) {
 			case 0x20: v = (uint32_t)(int32_t)(int8_t)h[0]; break;
 			case 0x21: v = (uint32_t)(int32_t)(int16_t)(h[0] | h[1] << 8); break;
-			case 0x23: v = le32(h); break;
 			case 0x24: v = h[0]; break;
 			default: v = (uint32_t)(h[0] | h[1] << 8); break;
 			}
