@@ -168,13 +168,23 @@ class Gen:
 
 def multi(r, hubflags, n, cogs):
     """Several cogs on shared hub bytes (RTL only): cog 0 starts cogs 1..cogs-1 on a second program,
-    each with PAR $6040 * k and its registers mixed with PAR. Their bodies mix hub reads and writes on $6200-$62FF
+    each with PAR $6040 * k and its registers mixed with PAR, and waits (asleep) until each has written its byte at
+    $6120 + k - 1. Their bodies mix hub reads and writes on $6200-$62FF
     (each cog its own share), INA reads, OUTA writes on P8 (cog 0 drives it), short WAITCNTs, CNT and PAR sources,
     lock operations, a jump
     through a register, a jump whose target and a hub read whose destination the code rewrites; the started cogs also
     wait in idle loops (sleep) for their flag byte at $6100 + k, which cog 0 writes now and then and at its end, or for
-    P8, which cog 0 toggles and leaves high."""
-    names = re.compile(r'(?<![$\w])(r\d+|h\d|L\d+|fl|t|ptr|done|one|zero|hmask|hbase|entry|lk|pin|tgt|myf|f6100|J\d+|D\d+|W\d+)\b')
+    P8, which cog 0 toggles and leaves high. A woken cog toggles P9 and writes the long at $6180; cog 0 reads both
+    a little after it wakes cogs, and now and then."""
+    names = re.compile(r'(?<![$\w])(r\d+|h\d|L\d+|fl|t|ptr|done|one|zero|hmask|hbase|entry|lk|pin|tgt|myf|f6100|p9|f6180|J\d+|D\d+|W\d+)\b')
+
+    def see(g):
+        # cog 0, a little after a wake: what the woken cogs wrote, and the pins
+        g.emit('mov     t, cnt')
+        g.emit('add     t, #%d' % g.r.randrange(40, 160))
+        g.emit('waitcnt t, #0')
+        g.emit('rdlong  %s, f6180' % g.r.choice(REGS))
+        g.emit('mov     %s, ina' % g.r.choice(REGS))
 
     def body(g, cog0):
         hub = g.r.choice([4, 8, 12])
@@ -186,6 +196,8 @@ def multi(r, hubflags, n, cogs):
                     g.emit('%-7s %s, ina%s' % (g.r.choice(['mov', 'and', 'xor', 'add']), g.r.choice(REGS), g.r.choice(['', ' wz', ' wc'])))
                 elif e == 1:
                     g.emit('%-7s outa, %s' % (g.r.choice(['xor', 'or', 'andn']), 'pin'))
+                    if cog0 and g.r.random() < 0.5:
+                        see(g)
                 else:
                     g.emit('mov     t, cnt')
                     g.emit('add     t, #%d' % g.r.randrange(9, 40))
@@ -221,10 +233,17 @@ def multi(r, hubflags, n, cogs):
                     g.out.append(lab)
                     g.out.append(lab2)
             elif k < 5 and cog0:
-                # a started cog's flag byte
-                g.emit('mov     t, #%d' % g.r.randrange(1, cogs))
-                g.emit('add     t, f6100')
-                g.emit('wrbyte  one, t')
+                e = g.r.randrange(3)
+                if e == 0:
+                    # what the woken cogs wrote
+                    g.emit('rdlong  %s, f6180' % g.r.choice(REGS))
+                else:
+                    # a started cog's flag byte
+                    g.emit('mov     t, #%d' % g.r.randrange(1, cogs))
+                    g.emit('add     t, f6100')
+                    g.emit('wrbyte  one, t')
+                    if g.r.random() < 0.5:
+                        see(g)
             elif k < 5 and g.r.random() < 0.3:
                 lab = 'W%d' % g.label
                 g.label += 1
@@ -239,6 +258,9 @@ def multi(r, hubflags, n, cogs):
                     g.out.append(lab)
                     g.emit('test    pin, ina wz')
                     g.emit('if_z    jmp     #%s' % lab)
+                # woken: a pin and a hub long the other cogs see
+                g.emit('xor     outa, p9')
+                g.emit('wrlong  %s, f6180' % g.r.choice(REGS))
             elif k < 6:
                 # CNT and PAR as sources
                 g.emit('%-12s %-7s %s, %s%s' % (g.cond(), g.r.choice(['add', 'xor', 'sub', 'mov']), g.r.choice(REGS),
@@ -264,6 +286,7 @@ def multi(r, hubflags, n, cogs):
                 g.emit('wrbyte  one, t')
                 g.emit('add     t, #1')
             g.emit('or      outa, pin')
+            see(g)
         g.emit('muxc    fl, #1')
         g.emit('muxz    fl, #2')
         for reg in REGS + ['fl']:
@@ -278,18 +301,19 @@ def multi(r, hubflags, n, cogs):
             g.out.append('%-7s long    $%04X' % ('h%d' % k, 0x6200 + r.randrange(0, 0x100, 4) + k))
         g.out += ['fl      long    0', 't       long    0', 'one     long    1', 'zero    long    0', 'hmask   long    $FF',
                   'hbase   long    $6200', 'lk      long    0', 'pin     long    $100', 'tgt     long    0', 'myf     long    0',
-                  'f6100   long    $6100'] + tail
+                  'f6100   long    $6100', 'p9      long    $200', 'f6180   long    $6180'] + tail
         return g.out
 
     start = ['mov     x, wk', 'shl     x, #2', 'or      x, #%1000', 'mov     cn, #%d' % (cogs - 1), 'mov     cpar, #$40',
              ':start', 'mov     y, cpar', 'add     y, par0', 'shl     y, #16', 'or      y, x', 'coginit y', 'add     cpar, #$40',
-             'djnz    cn, #:start', 'or      dira, pin']
+             'djnz    cn, #:start', 'or      dira, pin', ':ready', 'rdlong  y, f6120', 'cmp     y, rdy wz', 'if_nz   jmp     #:ready']
     a = block(start, ['ptr     long    $6000', 'done    long    $6FFC', 'x       long    0', 'y       long    0',
-                      'cn      long    0', 'cpar    long    0', 'par0    long    $6000', 'wk      long    $C0DEADD1'], True)
-    a = [('        ' + x[1:].strip() if x == ':start' else x) for x in a]
-    a = [(':start' if x.strip() == ':start' else x) for x in a]
+                      'cn      long    0', 'cpar    long    0', 'par0    long    $6000', 'wk      long    $C0DEADD1',
+                      'f6120   long    $6120', 'rdy     long    $%08X' % ((1 << 8 * (cogs - 1)) // 255)], True)
+    a = [(x.strip() if x.strip() in (':start', ':ready') else x) for x in a]
     mix = ['xor     %s, par' % reg for reg in REGS] + ['mov     ptr, par', 'mov     done, par', 'add     done, #$3C',
-                                                    'mov     myf, par', 'shr     myf, #6', 'and     myf, #7', 'add     myf, f6100']
+                                                    'mov     myf, par', 'shr     myf, #6', 'and     myf, #7', 'add     myf, f6100',
+                                                    'or      dira, p9', 'mov     t, myf', 'add     t, #$1F', 'wrbyte  one, t']
     w = block(mix, ['ptr     long    0', 'done    long    0'], False)
     w = [names.sub(lambda m: 'w' + m.group(1), x) for x in w]
     out = ['PUB main', 'DAT', '        long    $C0DE5EED', '        org     0'] + a
