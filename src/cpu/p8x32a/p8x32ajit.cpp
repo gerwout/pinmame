@@ -64,6 +64,9 @@ bool supported(uint32_t i, int outa)
 const x86::Gp ST = x86::r10, RAM = x86::r9, FL = x86::r8d, NEXTW = x86::ebx, CURW = x86::r12d, DADR = x86::r13d,
               T2 = x86::r14, BUDGET = x86::r15d, TOTAL = x86::ebp;
 
+// the link table's index is the address shifted left by 5
+static_assert(sizeof(p8x32a_jlink) == 32, "p8x32a_jlink must be 32 bytes");
+
 // every block and the tail share this frame, so a block can continue in another
 void make_frame(FuncDetail &func, FuncFrame &frame, const Environment &env)
 {

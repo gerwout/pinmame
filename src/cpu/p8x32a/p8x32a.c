@@ -1419,7 +1419,6 @@ static int run_local(p8x32a *p, int n, uint64_t t, uint64_t lim, unsigned gen)
 #else
 	st.chkfn = NULL;
 #endif
-	st.hiss = 0;
 	st.tl = tl;
 	st.slot = p->slot_base + 3 + 2 * (uint64_t)n;
 	st.hub = p->hub;
@@ -1478,7 +1477,7 @@ static int run_local(p8x32a *p, int n, uint64_t t, uint64_t lim, unsigned gen)
 				st.budget = b && b->part ? 0x7FFFFFFFu : (uint32_t)((tl - t2) / 4 + 1);
 				st.ix = ix;
 				st.fl = fl & 3;
-				st.inv = st.edge = 0;
+				st.inv = st.edge = st.hiss = 0;
 				if (!b) {
 					k = p->jres[n](&st);
 					c->latch = st.latch;
