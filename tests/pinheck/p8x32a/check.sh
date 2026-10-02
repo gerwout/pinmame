@@ -120,6 +120,10 @@ if [ -f gen.py ]; then
 	for f in $B/rtl/rand/*.spin; do rtl_case "$f" $B/rtl/rand; done
 	python3 gen.py --out $B/spin/rand --count "$SEEDS"
 	for f in $B/spin/rand/*.spin; do spin_case "$f" $B/spin/rand; done
+	# three cogs on shared hub bytes, sleepers, locks, rewritten code, CNT and PAR sources
+	rm -rf $B/rtl/multi
+	python3 gen.py --out $B/rtl/multi --count "$SEEDS" --cogs 3 --hubflags
+	for f in $B/rtl/multi/*.spin; do rtl_case "$f" $B/rtl/multi; done
 fi
 for f in isa/*.spin; do [ -e "$f" ] && spin_case "$f" $B/spin; done
 # a lazy cog's pin changes past the hold buffer end the run (built with no room: lazy.spin holds one)

@@ -1720,20 +1720,31 @@ static void lazy_try(p8x32a *p, uint64_t t)
 	}
 }
 
+/* a cog's scheduling key: earliest event first, then hub events, then the lowest cog (P8X32A_NEVER: none) */
+static uint64_t ev_key(const p8x32a_cog *c, int n)
+{
+	uint64_t e = c->ev_t < ((uint64_t)1 << 59) ? c->ev_t : (uint64_t)1 << 59;
+	return c->ev == EV_NONE ? P8X32A_NEVER : e << 4 | (uint64_t)(c->ev != EV_HUB) << 3 | (uint64_t)n;
+}
+
 void p8x32a_run_until(p8x32a *p, uint64_t t)
 {
+	uint64_t key[8];
+	unsigned kgen = p->sched_gen - 1;
 	p->horizon = t;
 	for (;;) {
 		int n, best;
 		uint64_t bk = P8X32A_NEVER, bk2 = P8X32A_NEVER;
 		unsigned gen;
 		p8x32a_cog *b;
-		/* the next event: earliest, then hub events, then the lowest cog; bk2 is the one after it */
+		/* the keys change only for the cog that ran, unless sched_gen counts a change to another cog's event */
+		if (kgen != p->sched_gen) {
+			for (n = 0; n < 8; n++) key[n] = ev_key(&p->cog[n], n);
+			kgen = p->sched_gen;
+		}
+		/* the next event, and bk2 the one after it */
 		for (n = 0; n < 8; n++) {
-			const p8x32a_cog *c = &p->cog[n];
-			uint64_t e = c->ev_t < ((uint64_t)1 << 59) ? c->ev_t : (uint64_t)1 << 59;
-			uint64_t k = e << 4 | (uint64_t)(c->ev != EV_HUB) << 3 | (uint64_t)n;
-			if (c->ev == EV_NONE) continue;
+			uint64_t k = key[n];
 			if (k < bk) { bk2 = bk; bk = k; }
 			else if (k < bk2) bk2 = k;
 		}
@@ -1771,6 +1782,7 @@ void p8x32a_run_until(p8x32a *p, uint64_t t)
 			uint64_t e = b->ev_t < ((uint64_t)1 << 59) ? b->ev_t : (uint64_t)1 << 59;
 			if ((e << 4 | (uint64_t)(b->ev != EV_HUB) << 3 | (uint64_t)best) < bk2) goto again;
 		}
+		key[best] = ev_key(b, best);
 	}
 	lazy_catch(p, t);
 	flush(p, t);

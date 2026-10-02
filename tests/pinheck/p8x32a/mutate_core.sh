@@ -16,6 +16,7 @@ B=build/mutcore
 mkdir -p $B/case $B/obj build/asmjit
 rm -rf $B/gen
 python3 gen.py --out $B/gen --count "$SEEDS" --first 700001 --hubflags --workers 0.3
+python3 gen.py --out $B/gen --count "$SEEDS" --first 800001 --cogs 3 --hubflags
 cases="$(ls chip/*.spin) $(ls $B/gen/*.spin)"
 for f in $cases; do
 	o=$B/case/$(basename "$f" .spin)
@@ -77,4 +78,9 @@ mutant ina-ahead p8x32a.c '	if (p->lz_on && (m & p->lz_pins)) return ina_lazy(p,
 mutant restart-jvar p8x32a.c '		memset(p->jvar[n], 0, sizeof(p->jvar[n]));' '' 1
 mutant restart-drop p8x32a.c '		jit_drop(p, n);
 		memset(p->jvar[n]' '		memset(p->jvar[n]' 1
+# the scheduler's key of the cog that ran left as it was when its next event is a hub operation; a sleeper woken
+# without sched_gen counting it
+mutant keys-ran p8x32a.c '		key[best] = ev_key(b, best);' '		if (b->ev != EV_HUB) key[best] = ev_key(b, best);' 0
+mutant keys-gen p8x32a.c '(pins & p->loop[n].wake) && t < p->cog[n].ev_t) { p->cog[n].ev_t = t; p->sched_gen++; }' \
+	'(pins & p->loop[n].wake) && t < p->cog[n].ev_t) { p->cog[n].ev_t = t; }' 0
 exit $((fail != 0))
