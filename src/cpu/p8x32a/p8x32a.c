@@ -65,8 +65,11 @@ static uint32_t regval(const p8x32a_reg *r, uint64_t t) { return t >= r->at ? r-
 
 #ifdef P8X32A_CHECK
 /* test builds: the emulation's time order. A pin change must not come after the pins were sent past its time, a hub
-   write not before a read or write of its bytes that already ran (the lazy cog's reads, behind by design, excepted) */
-static uint64_t chk_rd[65536], chk_wr[65536];
+   access not before a write of its bytes that already ran, a write not before a read that already ran (the lazy cog's
+   reads, behind by design, excepted). The cog and lock states are cells after hub RAM, read and written by each
+   system operation on them. */
+enum { CHK_COGE = 0x10000, CHK_LOCKE, CHK_LOCK };
+static uint64_t chk_rd[CHK_LOCK + 8], chk_wr[CHK_LOCK + 8];
 static void chk_fail(const char *what, uint64_t t, uint64_t past)
 {
 	fprintf(stderr, "p8x32a: time order: %s at %llu after %llu\n", what, (unsigned long long)t, (unsigned long long)past);
@@ -75,24 +78,28 @@ static void chk_fail(const char *what, uint64_t t, uint64_t past)
 static void chk_read(uint32_t a, unsigned sz, uint64_t t)
 {
 	unsigned k;
-	for (k = 0; k < sz; k++)
-		if (t > chk_rd[(a + k) & 0xFFFF]) chk_rd[(a + k) & 0xFFFF] = t;
+	for (k = 0; k < sz; k++) {
+		if (t < chk_wr[a + k]) chk_fail(a < CHK_COGE ? "hub read after a later write" : "cog or lock state read after a later write", t, chk_wr[a + k]);
+		if (t > chk_rd[a + k]) chk_rd[a + k] = t;
+	}
 }
 static void chk_write(uint32_t a, unsigned sz, uint64_t t)
 {
 	unsigned k;
 	for (k = 0; k < sz; k++) {
-		uint32_t b = (a + k) & 0xFFFF;
-		if (t < chk_rd[b]) chk_fail("hub write after a later read", t, chk_rd[b]);
-		if (t < chk_wr[b]) chk_fail("hub write after a later write", t, chk_wr[b]);
+		uint32_t b = a + k;
+		if (t < chk_rd[b]) chk_fail(a < CHK_COGE ? "hub write after a later read" : "cog or lock state write after a later read", t, chk_rd[b]);
+		if (t < chk_wr[b]) chk_fail(a < CHK_COGE ? "hub write after a later write" : "cog or lock state write after a later write", t, chk_wr[b]);
 		chk_wr[b] = t;
 	}
 }
 #define CHK_READ(a, sz, t) chk_read(a, sz, t)
 #define CHK_WRITE(a, sz, t) chk_write(a, sz, t)
+#define CHK_SYS(cell, t) (chk_read(cell, 1, t), chk_write(cell, 1, t))
 #else
 #define CHK_READ(a, sz, t) ((void)0)
 #define CHK_WRITE(a, sz, t) ((void)0)
+#define CHK_SYS(cell, t) ((void)0)
 #endif
 
 static void loop_notify(p8x32a *p, uint64_t t, uint32_t pins);
@@ -997,6 +1004,7 @@ static void sys(p8x32a *p, int n, uint64_t h)
 	uint8_t enc = (op & 4) ? p->lock_e : p->cog_e, bit;
 	int all = enc == 0xFF, old = 0;
 
+	if (op >= 2) CHK_SYS(op >= 6 ? CHK_LOCK + (dc & 7) : op >= 4 ? CHK_LOCKE : CHK_COGE, h);
 	p->sched_gen++;
 	while (newx < 7 && (enc >> newx & 1)) newx++;
 	num = ((op == 2 && (dc & 8)) || op == 4) ? newx : (dc & 7);

@@ -27,7 +27,7 @@ if [ -f ../eeprom/eeprom_test.c ]; then
 	./$B/eeprom_test || fail=$((fail + 1))
 fi
 [ -f $CORE/p8x32a.c ] || { echo "p8x32a: core not present yet"; exit 2; }
-# P8X32A_CHECK: a pin change or hub access out of time order stops the run
+# P8X32A_CHECK: a pin change, hub access or cog or lock state access out of time order stops the run
 $CC -DP8X32A_CHECK -I$CORE -I$DEV -o $B/p8run run.c $CORE/p8x32a.c $DEV/eeprom.c $DEV/sd.c $DEV/vfat.c $DEV/zipsrc.c -lz || exit 2
 # P8X32A_JIT=1: every test runs with local instruction runs translated (x86-64 only)
 if [ "$P8X32A_JIT" = 1 ]; then

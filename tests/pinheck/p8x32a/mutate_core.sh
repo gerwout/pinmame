@@ -86,6 +86,10 @@ mutant none-translated p8x32a.c '' '' 1
 mutant ina-ahead p8x32a.c '	if (p->lz_on && (m & p->lz_pins)) return ina_lazy(p, t);
 	flush(p, t);' '	if (p->lz_on && (m & p->lz_pins)) return ina_lazy(p, t);
 	flush(p, t + 64);' 0
+# a hub long write that leaves its bytes as they were, run ahead of the other cogs' earlier events: only a read of
+# them that runs after it but is earlier in time shows it
+mutant ahead-samewrite p8x32a.c '(h << 4 | (uint64_t)n) >= lim ||' \
+	'((h << 4 | (uint64_t)n) >= lim && (FWR(ix) || op != 2 || (e->fl & (F_IMM | F_SPEC)) || rd32(p, ram[e->src] & 0xFFFC) != ram[e->dst])) ||' 0
 # a reloaded cog's changed words kept, its blocks kept (the load's writes mark its words as changing)
 mutant restart-jvar p8x32a.c '		memset(p->jvar[n], 0, sizeof(p->jvar[n]));' '' 1
 mutant restart-drop p8x32a.c '		jit_drop(p, n);
