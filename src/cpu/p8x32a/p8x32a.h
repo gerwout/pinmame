@@ -157,6 +157,7 @@ typedef struct p8x32a {
 	void *jit;
 	p8x32a_jblk *jblk[8][512];
 	uint32_t jvar[8][512];
+	uint64_t jit_refused; /* block lookups left to the interpreter: the slot's word changed beyond its S and D fields */
 	uint8_t jcode[8][64];
 	uint64_t jot[P8X32A_JOUT];
 	uint32_t jov[P8X32A_JOUT];

@@ -75,7 +75,8 @@ rtl_case() {
 	sleeps=$(sed -n "s/^' EXPECT-SLEEPS: //p" "$1")
 	lazies=$(sed -n "s/^' EXPECT-LAZY: //p" "$1")
 	journal=$(sed -n "s/^' EXPECT-JOURNAL: //p" "$1")
-	./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args $3 ${sleeps:+-sleeps} ${lazies:+-lazies} -dump "$o.ourhub" > "$o.our" 2> "$o.log"
+	jitvar=$(sed -n "s/^' EXPECT-JITVAR: //p" "$1")
+	./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args $3 ${sleeps:+-sleeps} ${lazies:+-lazies} ${jitvar:+-jitvar} -dump "$o.ourhub" > "$o.our" 2> "$o.log"
 	if cmp -s "$o.rtl" "$o.our" && cmp -s "$o.rtlhub" "$o.ourhub"; then pass=$((pass + 1))
 	else echo "RTL MISMATCH $1"; diff "$o.rtl" "$o.our" | head -6; fail=$((fail + 1)); fi
 	exp=$(sed -n "s/^' EXPECT-LOG: //p" "$1")
@@ -86,6 +87,9 @@ rtl_case() {
 	if [ -n "$journal" ] && ! grep -qxF "p8run: $(echo $journal | cut -d' ' -f1) journal entries, $(echo $journal | cut -d' ' -f2) catch-ups with it full" "$o.log"; then
 		echo "JOURNAL $1: $(grep -F 'journal entries' "$o.log"), expected $journal"; fail=$((fail + 1)); fi
 	if grep -q "p8x32a: lazy\|p8run: lazy" "$o.log"; then echo "LAZY $1: $(grep "p8x32a: lazy\|p8run: lazy" "$o.log" | head -3)"; fail=$((fail + 1)); fi
+	# EXPECT-JITVAR: n = the translator left n block lookups to the interpreter for changed words
+	if [ -n "$jitvar" ] && ! grep -qxF "p8run: $jitvar block lookups left to the interpreter" "$o.log"; then
+		echo "JITVAR $1: $(grep -F 'left to the interpreter' "$o.log"), expected $jitvar"; fail=$((fail + 1)); fi
 	if grep -q "p8x32a: time order" "$o.log"; then echo "TIME ORDER $1: $(grep "p8x32a: time order" "$o.log")"; fail=$((fail + 1)); fi
 	# EXPECT-CLKSHIFT: d v = with CLKSET moving queued edges d cycles earlier, the long at $6000 is v
 	set -- "$1" $(sed -n "s/^' EXPECT-CLKSHIFT: //p" "$1")

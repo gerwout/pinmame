@@ -1153,6 +1153,12 @@ static void restart(p8x32a *p, int n)
 {
 	p8x32a_cog *c = &p->cog[n];
 	loop_reset(&p->loop[n]);
+	/* new code: the translator forgets the old code's blocks (the load's writes would mark their words as changing)
+	   and which of its words changed */
+	if (p->jit_build) {
+		jit_drop(p, n);
+		memset(p->jvar[n], 0, sizeof(p->jvar[n]));
+	}
 	c->p = 0;
 	c->c = c->z = c->cancel = c->run = 0;
 	c->disable_at = P8X32A_NEVER;
@@ -1310,7 +1316,7 @@ P8_INLINE p8x32a_jblk *jit_get(p8x32a *p, int n, unsigned a, uint32_t ix)
 	p8x32a_jblk *b = p->jblk[n][a];
 	uint32_t *var = p->jvar[n];
 	unsigned k;
-	if (var[a] & ~P8X32A_JDYN) return NULL;
+	if (var[a] & ~P8X32A_JDYN) { p->jit_refused++; return NULL; }
 	if (b && b->valid) {
 		uint32_t x = (b->dyn & 1) ? (ix ^ b->words[0]) & ~P8X32A_JDYN : ix ^ b->words[0];
 		if (!x) return b;

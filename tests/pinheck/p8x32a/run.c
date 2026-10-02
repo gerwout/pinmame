@@ -14,7 +14,7 @@
 static p8x32a chip;
 static cat24m01 ee;
 static uint8_t eemem[0x20000];
-static int have_ee, have_sd, notrace, sleeps, nolazy, lazies;
+static int have_ee, have_sd, notrace, sleeps, nolazy, lazies, jitvar;
 static sd_card sd;
 static vfat vf;
 static zipsrc zs;
@@ -250,6 +250,7 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "-nolazy")) nolazy = 1;
 		else if (!strcmp(argv[i], "-sleeps")) sleeps = 1;
 		else if (!strcmp(argv[i], "-lazies")) lazies = 1;
+		else if (!strcmp(argv[i], "-jitvar")) jitvar = 1;
 		else if (!strcmp(argv[i], "-ctrlog") && i + 1 < argc) { if (!(ctrlog = fopen(argv[++i], "w"))) { perror(argv[i]); return 2; } }
 		else if (!strcmp(argv[i], "-uart") && i + 2 < argc) {
 			uint64_t t0 = strtoull(argv[i + 1], NULL, 0);
@@ -340,6 +341,7 @@ int main(int argc, char **argv)
 	printf("E %llu\n", end);
 	if (sleeps) fprintf(stderr, "p8run: %llu idle-loop sleeps\n", (unsigned long long)chip.sleeps);
 	if (lazies) fprintf(stderr, "p8run: %llu lazy cogs\n", (unsigned long long)chip.lazies);
+	if (jitvar) fprintf(stderr, "p8run: %llu block lookups left to the interpreter\n", (unsigned long long)chip.jit_refused);
 	if (lazies) fprintf(stderr, "p8run: %llu journal entries, %llu catch-ups with it full\n", (unsigned long long)chip.jn_writes, (unsigned long long)chip.jn_full);
 	if (dump) {
 		FILE *f = fopen(dump, "wb");
