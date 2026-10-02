@@ -83,4 +83,9 @@ mutant restart-drop p8x32a.c '		jit_drop(p, n);
 mutant keys-ran p8x32a.c '		key[best] = ev_key(b, best);' '		if (b->ev != EV_HUB) key[best] = ev_key(b, best);' 0
 mutant keys-gen p8x32a.c '(pins & p->loop[n].wake) && t < p->cog[n].ev_t) { p->cog[n].ev_t = t; p->sched_gen++; }' \
 	'(pins & p->loop[n].wake) && t < p->cog[n].ev_t) { p->cog[n].ev_t = t; }' 0
+# a translated CNT four cycles late; PAR not shifted
+mutant jit-cnt p8x32ajit.cpp '(int)(4 * k)));
+				a.sub(x86::rax' '(int)(4 * k + 4)));
+				a.sub(x86::rax' 1
+mutant jit-par p8x32a.c 'st.par = (c->ptr >> 14) << 2;' 'st.par = c->ptr << 2;' 1
 exit $((fail != 0))

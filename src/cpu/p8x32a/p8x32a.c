@@ -1354,6 +1354,8 @@ static int run_local(p8x32a *p, int n, uint64_t t, uint64_t lim, unsigned gen)
 	st.code = p->jcode[n];
 	st.tab = p->jblk[n];
 	st.loop = l;
+	st.par = (c->ptr >> 14) << 2;
+	st.cnt_base = p->cnt_base;
 
 	if (c->ev == EV_HUB) {
 		uint64_t m3 = c->latch + 4;

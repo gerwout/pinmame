@@ -40,20 +40,20 @@ bool op_ok(unsigned op)
 	       (op >= OP_DJNZ && op <= OP_TJZ);
 }
 
-// a fixed word run_local() would run as a local instruction; with outa, also a write to OUTA or a hub read without
-// WC (a lazy cog's)
+inline bool is_jump(unsigned op) { return op == OP_JMP || op >= OP_DJNZ; }
+
+// a fixed word run_local() would run as a local instruction (PAR and CNT the only special sources); with outa, also
+// a write to OUTA or a hub read without WC (a lazy cog's)
 bool supported(uint32_t i, int outa)
 {
 	unsigned op = op_of(i);
 	if (outa && op <= 2) return fwr(i) && !fwc(i) && dst_of(i) < 0x1F0 && (fim(i) || src_of(i) < 0x1F0);
 	if (!op_ok(op)) return false;
-	if (!fim(i) && src_of(i) >= 0x1F0) return false;
+	if (!fim(i) && src_of(i) >= 0x1F0 && (src_of(i) > 0x1F1 || is_jump(op))) return false;
 	if (fwr(i) && dst_of(i) >= 0x1F0)
 		return outa && dst_of(i) == 0x1F4 && ((op >= OP_ROR && op <= OP_SAR) || (op >= OP_MOVS && op <= OP_MOVI) || (op >= OP_AND && op <= OP_SUB) || op == OP_MOV);
 	return true;
 }
-
-inline bool is_jump(unsigned op) { return op == OP_JMP || op >= OP_DJNZ; }
 
 // registers: r10 st, r9 ram, r8d fl, ecx s, edx d, eax result, r11d carry out, esi/edi scratch,
 // ebx the word fetched for the next slot, r12d the word of this slot, r13d its D address (run-time slots),
@@ -142,6 +142,11 @@ struct Emit {
 			}
 		}
 		if (prefetch_next) a.mov(NEXTW, cog(pc));
+		if (!dyn && !imm && src_of(i) == 0x1F1) {
+			// a CNT source: the cog's loop is not idle, whether the instruction runs or not
+			a.mov(x86::rdi, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, loop)));
+			a.mov(x86::byte_ptr(x86::rdi, (int)offsetof(p8x32a_loop, dirty)), 1);
+		}
 		if (cond == 0) goto end;
 		if (cond != 15) {
 			a.mov(x86::eax, cond);
@@ -154,7 +159,13 @@ struct Emit {
 			a.mov(x86::edx, cogr(DADR));
 		} else {
 			if (imm) a.mov(x86::ecx, src_of(i));
-			else a.mov(x86::ecx, cog(src_of(i)));
+			else if (src_of(i) == 0x1F0) a.mov(x86::ecx, stf(offsetof(p8x32a_jst, par)));
+			else if (src_of(i) == 0x1F1) {
+				// CNT at this instruction's time
+				a.lea(x86::rax, x86::ptr(T2, (int)(4 * k)));
+				a.sub(x86::rax, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, cnt_base)));
+				a.mov(x86::ecx, x86::eax);
+			} else a.mov(x86::ecx, cog(src_of(i)));
 			a.mov(x86::edx, cog(dst_of(i)));
 		}
 		switch (op) {
