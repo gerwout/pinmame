@@ -7,7 +7,7 @@ P8X32A_ROM=$(realpath "$P8X32A_ROM") || exit 2
 PINHECK_ZIP=$(realpath "$PINHECK_ZIP") || exit 2
 cd "$(dirname "$0")" || exit 2
 . ../games.sh
-[ $LOOK = none ] && { echo "pinmame look: $GAME has no look (its module is drawn as sent: pinmame_display.sh)"; exit 0; }
+[ $LOOK = menu ] || { echo "pinmame look: $GAME has no menu look (LOOK=$LOOK; its display is checked by pinmame_display.sh)"; exit 0; }
 B=build/look
 rm -rf $B && mkdir -p $B/roms $B/nvram $B/cfg $B/snap $B/snap3 || exit 2
 cp "$P8X32A_ROM" $B/p8x32a.rom && (cd $B && zip -q -j roms/pinheck.zip p8x32a.rom && rm p8x32a.rom) || exit 2
