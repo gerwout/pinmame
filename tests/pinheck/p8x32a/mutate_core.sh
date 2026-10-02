@@ -4,7 +4,7 @@
 # EXPECT-JITVAR, on one of chip/*.spin and gen.py's programs (SEEDS of each kind, default 100). Each case runs with
 # p8run's quantum of 4,096 cycles and with one of 400,000 (one run_until for the whole run, as long as PinMAME's).
 # P8X32A_JIT=1 runs the mutants in the translator's path (x86-64 only), else the others; MUTANTS names some of them.
-# The multi-cog programs also run from cycle 2^36 (p8run -t0), where a time or key cut to 32 bits shows.
+# Each also runs from cycle 2^36 (p8run -t0) with both quanta, where a time or key cut to 32 bits shows.
 set -u
 cd "$(dirname "$0")" || exit 2
 TOOLS=${TOOLS:-$PWD/build/tools}
@@ -66,13 +66,13 @@ PY
 		cc -O2 -std=c99 -DP8X32A_CHECK -I$CORE -I$DEV -o $B/p8run run.c $B/p8x32a.c $DEV/eeprom.c $DEV/sd.c $DEV/vfat.c $DEV/zipsrc.c -lz || exit 2
 	fi
 	bad=0 first=
-	for q in 4096 400000 t0; do
+	for q in 4096 400000 t0 t0q; do
 		for f in $cases; do
 			o=$B/case/$(basename "$f" .spin)
 			jv=$(sed -n "s/^' EXPECT-JITVAR: //p" "$f")
-			# from cycle 2^36: the multi-cog programs
 			qa="-quantum $q"
-			if [ $q = t0 ]; then case $(basename "$f") in m*) qa="-t0 68719476736" ;; *) continue ;; esac; fi
+			[ $q = t0 ] && qa="-t0 68719476736"
+			[ $q = t0q ] && qa="-t0 68719476736 -quantum 400000"
 			# a mutant that loops for ever is caught too
 			timeout -k 5 20 ./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $qa ${jv:+-jitvar} -dump "$o.mhub" > "$o.m" 2> "$o.mlog"
 			if ! cmp -s "$o.rtl" "$o.m" || ! cmp -s "$o.rtlhub" "$o.mhub" || grep -q "time order" "$o.mlog" ||
@@ -119,11 +119,20 @@ mutant hub-key32 p8x32ajit.cpp '			a.mov(x86::edi, stf(offsetof(p8x32a_jst, n)))
 			a.or_(x86::rsi, x86::rdi);' '			a.or_(x86::esi, stf(offsetof(p8x32a_jst, n)));' 1
 mutant hub-gen p8x32ajit.cpp '			a.cmp(x86::esi, stf(offsetof(p8x32a_jst, gen)));
 			a.jne(wait);' '' 1
+# the hub decision's test of the hub cycle against the run's end, of the slot against the cog's stop
+mutant hub-end p8x32ajit.cpp '			a.cmp(x86::rsi, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, t)));
+			a.ja(wait);' '' 1
+mutant hub-stop p8x32ajit.cpp '			a.lea(x86::rsi, x86::ptr(x86::rax, 5));
+			a.cmp(x86::rsi, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, dis)));
+			a.jae(wait);' '' 1
 mutant hub-report p8x32ajit.cpp '			a.bt(x86::dword_ptr(x86::rdi, (int)((dst >> 5) * 4)), dst & 31);
 			a.jnc(same);' '			a.jmp(same);' 1
 # a block whose link outlives it; a block reached from another's exit that stops before its first slot without its
 # exit state
 mutant link-void p8x32a.c '	p->jlink[n][a].len = ~0u;' '' 1
+# a run that changed more than one fixed code slot leaves the blocks in place
+mutant inv-many p8x32a.c '					for (j = 0; j < 512; j++)
+						if (p->jblk[n][j]) jit_void(p, n, j);' '' 1
 mutant exit-k0 p8x32ajit.cpp '				a.mov(stf(offsetof(p8x32a_jst, px)), base);
 				a.mov(stf(offsetof(p8x32a_jst, nix)), CURW);' '				a.mov(stf(offsetof(p8x32a_jst, nix)), CURW);' 1
 exit $((fail != 0))
