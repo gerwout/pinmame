@@ -91,6 +91,10 @@ rtl_case() {
 	if [ -n "$jitvar" ] && ! grep -qxF "p8run: $jitvar block lookups left to the interpreter" "$o.log"; then
 		echo "JITVAR $1: $(grep -F 'left to the interpreter' "$o.log"), expected $jitvar"; fail=$((fail + 1)); fi
 	if grep -q "p8x32a: time order" "$o.log"; then echo "TIME ORDER $1: $(grep "p8x32a: time order" "$o.log")"; fail=$((fail + 1)); fi
+	# the same run in one run_until call, as long as PinMAME's: a stale scheduling key then lasts the run
+	./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args -quantum 400000 -dump "$o.qhub" > "$o.q" 2> "$o.qlog"
+	if cmp -s "$o.rtl" "$o.q" && cmp -s "$o.rtlhub" "$o.qhub" && ! grep -q "p8x32a: time order" "$o.qlog"; then pass=$((pass + 1))
+	else echo "RTL MISMATCH $1 (-quantum 400000)"; diff "$o.rtl" "$o.q" | head -6; grep "p8x32a: time order" "$o.qlog"; fail=$((fail + 1)); fi
 	# EXPECT-CLKSHIFT: d v = with CLKSET moving queued edges d cycles earlier, the long at $6000 is v
 	set -- "$1" $(sed -n "s/^' EXPECT-CLKSHIFT: //p" "$1")
 	[ $# -eq 3 ] || return
