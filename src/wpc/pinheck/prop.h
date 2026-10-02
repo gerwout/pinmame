@@ -89,7 +89,7 @@ uint64_t prop_time(pinheck_prop *p, uint64_t pic_cycle);
    seconds (at each vblank), switches it off while the calls run faster inline. */
 #define PROP_GOV_RING 5
 typedef struct prop_gov {
-	int state, flip, slow, n;
+	int state, flip, slow, n, k, warm;
 	double w0, e0, wl, el, rate, next, pause, inl, thr[PROP_GOV_RING];
 } prop_gov;
 int prop_gov_start(pinheck_prop *p, prop_gov *g, double host_s, int flip);

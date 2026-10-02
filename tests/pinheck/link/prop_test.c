@@ -597,6 +597,43 @@ static void gov_back_on(void)
 	prop_stop_thread(&p);
 }
 
+/* a trial that meets a lighter phase: the worker is measured again before it goes off */
+static void gov_phase(void)
+{
+	int k;
+	gov_begin();
+	for (k = 0; k < 20 && p.worker; k++) gov_windows(1, 0.71, 0.6);
+	CHECK(p.worker == NULL);
+	gov_windows(30, 1.15, 0.86);
+	CHECK(gov_off == 0 && p.worker != NULL);
+	prop_stop_thread(&p);
+}
+
+/* inline 10% faster is within the margin: the worker stays on */
+static void gov_margin(void)
+{
+	gov_begin();
+	gov_windows(40, 0.90, 0.99);
+	gov_windows(2, 0.90, 0.99); /* ends a trial that has just begun */
+	CHECK(gov_off == 0 && p.worker != NULL);
+	prop_stop_thread(&p);
+}
+
+/* the first window after the worker starts again is a warm-up, not judged */
+static void gov_warmup(void)
+{
+	int k;
+	gov_begin();
+	gov_run(40.0, 0.4, 0.9, 0.0);
+	CHECK(gov_off == 1 && p.worker == NULL);
+	for (k = 0; k < 400 && !p.worker; k++) gov_windows(1, 1.1, 0.8);
+	CHECK(p.worker != NULL);
+	gov_windows(1, 0.5, 0.8);
+	gov_windows(3, 1.1, 0.8);
+	CHECK(gov_on == 1 && p.worker != NULL);
+	prop_stop_thread(&p);
+}
+
 /* where the worker cannot start again (one CPU allowed), the retries back off */
 static void gov_one_cpu(void)
 {
@@ -606,8 +643,9 @@ static void gov_one_cpu(void)
 #elif defined(_WIN32)
 	DWORD_PTR all, sys;
 #endif
+	int k;
 	gov_begin();
-	gov_run(20.0, 0.4, 0.9, 0.0);
+	for (k = 0; k < 60 && !gov_off; k++) gov_run(1.0, 0.4, 0.9, 0.0);
 	CHECK(gov_off == 1 && p.worker == NULL);
 #ifdef __linux__
 	CHECK(sched_getaffinity(0, sizeof(all), &all) == 0);
@@ -692,6 +730,9 @@ int main(int argc, char **argv)
 	gov_stall();
 	gov_median();
 	gov_back_on();
+	gov_phase();
+	gov_margin();
+	gov_warmup();
 	gov_one_cpu();
 #ifdef _WIN32
 	priority();
