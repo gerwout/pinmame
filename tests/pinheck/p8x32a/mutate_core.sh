@@ -113,4 +113,12 @@ mutant jit-cnt p8x32ajit.cpp '(int)(4 * k)));
 				a.mov(x86::ecx, x86::eax);' '(int)(4 * k + 4)));
 				a.mov(x86::ecx, x86::eax);' 1
 mutant jit-par p8x32a.c 'st.par = (c->ptr >> 14) << 2;' 'st.par = c->ptr << 2;' 1
+# a translated hub read or write: its key cut to 32 bits (only times past 2^28 show it), the sched_gen test dropped,
+# a read into a fixed slot of a block not reported
+mutant hub-key32 p8x32ajit.cpp '			a.mov(x86::edi, stf(offsetof(p8x32a_jst, n)));
+			a.or_(x86::rsi, x86::rdi);' '			a.or_(x86::esi, stf(offsetof(p8x32a_jst, n)));' 1
+mutant hub-gen p8x32ajit.cpp '			a.cmp(x86::esi, stf(offsetof(p8x32a_jst, gen)));
+			a.jne(wait);' '' 1
+mutant hub-report p8x32ajit.cpp '			a.bt(x86::dword_ptr(x86::rdi, (int)((dst >> 5) * 4)), dst & 31);
+			a.jnc(same);' '			a.jmp(same);' 1
 exit $((fail != 0))
