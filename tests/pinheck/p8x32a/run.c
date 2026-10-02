@@ -29,6 +29,9 @@ static uint32_t stop_ptr;
 static uint64_t stop_at = P8X32A_NEVER;
 static uint64_t known_to = P8X32A_NEVER;
 static uint64_t clkshift, clk_at;
+/* -t0 n: the chip starts at cycle n (every time above 2^32 for n = 2^36); the trace and the inputs keep cycle 0 */
+static uint64_t t0off;
+#define TT(t) ((t) - t0off)
 static struct ev { uint64_t t; size_t seq; char line[96]; } *evs;
 static size_t nev, cap;
 
@@ -50,7 +53,7 @@ static uint32_t pins_in(void *ctx, uint64_t t)
 	uint32_t v = ext;
 	int k;
 	(void)ctx;
-	for (k = 0; k < nat && at_t[k] <= t; k++) v = at_v[k];
+	for (k = 0; k < nat && at_t[k] <= TT(t); k++) v = at_v[k];
 	if (have_sd) v = (v & ~1u) | sdbit;
 	return have_ee ? (v & ~0x30000000u) | eebits : v;
 }
@@ -60,7 +63,7 @@ static uint64_t pins_next(void *ctx, uint64_t t)
 	int k;
 	(void)ctx;
 	for (k = 0; k < nat; k++)
-		if (at_t[k] > t) return at_t[k] <= known_to ? at_t[k] : P8X32A_NEVER;
+		if (at_t[k] > TT(t)) return at_t[k] <= known_to ? at_t[k] + t0off : P8X32A_NEVER;
 	return P8X32A_NEVER;
 }
 
@@ -84,7 +87,7 @@ static void pins_out(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 		int drv = cat24m01_update(&ee, scl, sda);
 		eebits = 0x10000000u | (uint32_t)drv << 29;
 	}
-	cur_t = t;
+	cur_t = TT(t);
 	if (have_sd) {
 		int cs = (dir >> 3 & 1) ? (int)(out >> 3 & 1) : 1;
 		int sclk = (dir >> 1 & 1) ? (int)(out >> 1 & 1) : 0;
@@ -94,8 +97,8 @@ static void pins_out(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 	if (notrace) return;
 	{
 		char b[48];
-		sprintf(b, "N %llu %08x %08x", (unsigned long long)t, (unsigned)out, (unsigned)dir);
-		emit(t, b);
+		sprintf(b, "N %llu %08x %08x", (unsigned long long)TT(t), (unsigned)out, (unsigned)dir);
+		emit(TT(t), b);
 	}
 }
 
@@ -104,8 +107,8 @@ static void lazy(void *ctx, uint64_t t, uint32_t mask, uint32_t out, uint32_t di
 	char b[64];
 	(void)ctx;
 	if (notrace) return;
-	sprintf(b, "M %llu %08x %08x %08x", (unsigned long long)t, (unsigned)mask, (unsigned)out, (unsigned)dir);
-	emit(t, b);
+	sprintf(b, "M %llu %08x %08x %08x", (unsigned long long)TT(t), (unsigned)mask, (unsigned)out, (unsigned)dir);
+	emit(TT(t), b);
 }
 
 static void lazy_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
@@ -115,8 +118,8 @@ static void lazy_pins(void *ctx, uint64_t t, uint32_t out, uint32_t dir)
 	/* a host retimes at a CLKSET: the pin changes before it come first */
 	if (t < clk_at) fprintf(stderr, "p8run: lazy pin change at %llu after a CLKSET at %llu\n", (unsigned long long)t, (unsigned long long)clk_at);
 	if (notrace) return;
-	sprintf(b, "L %llu %08x %08x", (unsigned long long)t, (unsigned)out, (unsigned)dir);
-	emit(t, b);
+	sprintf(b, "L %llu %08x %08x", (unsigned long long)TT(t), (unsigned)out, (unsigned)dir);
+	emit(TT(t), b);
 }
 
 static void node_path(int n, char *out)
@@ -176,9 +179,9 @@ static void cog_start(void *ctx, uint64_t t, int cog, uint32_t ptr)
 {
 	(void)ctx;
 	char b[48];
-	sprintf(b, "S %llu %d %07x", (unsigned long long)t, cog, (unsigned)ptr);
-	emit(t, b);
-	if (cog == stop_cog && ptr == stop_ptr) { stop_at = t; chip.stop = 1; }
+	sprintf(b, "S %llu %d %07x", (unsigned long long)TT(t), cog, (unsigned)ptr);
+	emit(TT(t), b);
+	if (cog == stop_cog && ptr == stop_ptr) { stop_at = TT(t); chip.stop = 1; }
 }
 
 static FILE *ctrlog;
@@ -186,7 +189,7 @@ static FILE *ctrlog;
 static void ctr_state(void *ctx, uint64_t t, int cog, int ctr, uint32_t ctr_reg, uint32_t frq)
 {
 	(void)ctx;
-	if (ctrlog) fprintf(ctrlog, "C %llu %d %d %08x %08x\n", (unsigned long long)t, cog, ctr, (unsigned)ctr_reg, (unsigned)frq);
+	if (ctrlog) fprintf(ctrlog, "C %llu %d %d %08x %08x\n", (unsigned long long)TT(t), cog, ctr, (unsigned)ctr_reg, (unsigned)frq);
 }
 
 /* -clkshift d: like prop.c's retime, a CLKSET moves queued -extat edges d cycles earlier (not before t + 1) */
@@ -196,6 +199,7 @@ static void clkset(void *ctx, uint64_t t, uint8_t cfg)
 	int k;
 	(void)ctx;
 	clk_at = t;
+	t = TT(t);
 	for (k = 0; k < nat; k++)
 		if (at_t[k] > t + 1) at_t[k] = at_t[k] - clkshift > t + 1 ? at_t[k] - clkshift : t + 1;
 	sprintf(b, "K %llu %02x", (unsigned long long)t, cfg);
@@ -224,7 +228,7 @@ static uint64_t halted(void)
 	for (n = 0; n < 8; n++) {
 		const p8x32a_cog *c = &chip.cog[n];
 		if (c->ev != 0) return P8X32A_NEVER;
-		if (c->disable_at != P8X32A_NEVER && c->disable_at > last) last = c->disable_at;
+		if (c->disable_at != P8X32A_NEVER && TT(c->disable_at) > last) last = TT(c->disable_at);
 	}
 	return last;
 }
@@ -278,11 +282,15 @@ int main(int argc, char **argv)
 		}
 		else if (!strcmp(argv[i], "-quantum") && i + 1 < argc) quantum = strtoull(argv[++i], NULL, 0);
 		else if (!strcmp(argv[i], "-clkshift") && i + 1 < argc) clkshift = strtoull(argv[++i], NULL, 0);
+		else if (!strcmp(argv[i], "-t0") && i + 1 < argc) t0off = strtoull(argv[++i], NULL, 0);
 		else if (!strcmp(argv[i], "-extat") && i + 2 < argc && nat < 8192) { at_t[nat] = strtoull(argv[i + 1], NULL, 0); at_v[nat++] = (uint32_t)strtoul(argv[i + 2], NULL, 16); i += 2; }
-		else { fprintf(stderr, "usage: p8run -rom f [-ram f] [-eeprom f] [-ext hex] [-cycles n] [-stop cog ptrhex] [-halt] [-quantum n] [-sd romset.zip] [-notrace] [-sleeps] [-ctrlog f] [-uart cycle hexbytes] [-extat cycle hex]... [-clkshift n] [-dump f]\n"); return 2; }
+		else { fprintf(stderr, "usage: p8run -rom f [-ram f] [-eeprom f] [-ext hex] [-cycles n] [-stop cog ptrhex] [-halt] [-quantum n] [-sd romset.zip] [-notrace] [-sleeps] [-ctrlog f] [-uart cycle hexbytes] [-extat cycle hex]... [-clkshift n] [-t0 n] [-dump f]\n"); return 2; }
 	}
 	if (!rom) { fprintf(stderr, "p8run: -rom is required\n"); return 2; }
 	p8x32a_init(&chip, &bus);
+	if (t0off) {
+		p8x32a_reset(&chip, t0off);
+	}
 #ifdef P8X32A_JIT
 	if ((chip.jit = p8x32a_jit_new()) != NULL) chip.jit_build = p8x32a_jit_build;
 #endif
@@ -303,7 +311,7 @@ int main(int argc, char **argv)
 		unsigned long long to = t + quantum - 1 < limit - 1 ? t + quantum - 1 : limit - 1;
 		uint64_t h;
 		if (quantum != 4096) known_to = to;
-		p8x32a_run_until(&chip, to);
+		p8x32a_run_until(&chip, t0off + to);
 		if (chip.stop) { end = stop_at + 1; break; }
 		if (halt && (h = halted()) != P8X32A_NEVER && h >= 2) { end = h; break; }
 	}

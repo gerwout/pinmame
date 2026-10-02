@@ -3,7 +3,8 @@
 # mutation is in the translator's path) must differ from the RTL, stop on a time-order fault, or miss a chip test's
 # EXPECT-JITVAR, on one of chip/*.spin and gen.py's programs (SEEDS of each kind, default 100). Each case runs with
 # p8run's quantum of 4,096 cycles and with one of 400,000 (one run_until for the whole run, as long as PinMAME's).
-# P8X32A_JIT=1 runs the mutants in the translator's path (x86-64 only), else the others.
+# P8X32A_JIT=1 runs the mutants in the translator's path (x86-64 only), else the others; MUTANTS names some of them.
+# The multi-cog programs also run from cycle 2^36 (p8run -t0), where a time or key cut to 32 bits shows.
 set -u
 cd "$(dirname "$0")" || exit 2
 TOOLS=${TOOLS:-$PWD/build/tools}
@@ -45,6 +46,8 @@ fail=0
 mutant() {
 	name=$1 file=$2 jit=$5
 	[ "$jit" = $MODE ] || return 0
+	# MUTANTS: only these (and the unmutated core)
+	[ -z "${MUTANTS:-}" ] || case " $MUTANTS none-interpreted none-translated " in *" $name "*) ;; *) return 0 ;; esac
 	cp $CORE/p8x32a.c $CORE/p8x32ajit.cpp $B/
 	python3 - "$3" "$4" $CORE/$file $B/$file <<'PY' || { echo "MUTANT $name: no match"; fail=$((fail + 1)); return; }
 import sys
@@ -63,12 +66,15 @@ PY
 		cc -O2 -std=c99 -DP8X32A_CHECK -I$CORE -I$DEV -o $B/p8run run.c $B/p8x32a.c $DEV/eeprom.c $DEV/sd.c $DEV/vfat.c $DEV/zipsrc.c -lz || exit 2
 	fi
 	bad=0 first=
-	for q in 4096 400000; do
+	for q in 4096 400000 t0; do
 		for f in $cases; do
 			o=$B/case/$(basename "$f" .spin)
 			jv=$(sed -n "s/^' EXPECT-JITVAR: //p" "$f")
+			# from cycle 2^36: the multi-cog programs
+			qa="-quantum $q"
+			if [ $q = t0 ]; then case $(basename "$f") in m*) qa="-t0 68719476736" ;; *) continue ;; esac; fi
 			# a mutant that loops for ever is caught too
-			timeout -k 5 20 ./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 -quantum $q ${jv:+-jitvar} -dump "$o.mhub" > "$o.m" 2> "$o.mlog"
+			timeout -k 5 20 ./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $qa ${jv:+-jitvar} -dump "$o.mhub" > "$o.m" 2> "$o.mlog"
 			if ! cmp -s "$o.rtl" "$o.m" || ! cmp -s "$o.rtlhub" "$o.mhub" || grep -q "time order" "$o.mlog" ||
 			   { [ -n "$jv" ] && [ "$jit" = 1 ] && ! grep -qxF "p8run: $jv block lookups left to the interpreter" "$o.mlog"; }; then
 				bad=$((bad + 1)); [ -n "$first" ] || first="$(basename "$f") at $q"

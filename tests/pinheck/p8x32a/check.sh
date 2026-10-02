@@ -95,6 +95,10 @@ rtl_case() {
 	./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args -quantum 400000 -dump "$o.qhub" > "$o.q" 2> "$o.qlog"
 	if cmp -s "$o.rtl" "$o.q" && cmp -s "$o.rtlhub" "$o.qhub" && ! grep -q "p8x32a: time order" "$o.qlog"; then pass=$((pass + 1))
 	else echo "RTL MISMATCH $1 (-quantum 400000)"; diff "$o.rtl" "$o.q" | head -6; grep "p8x32a: time order" "$o.qlog"; fail=$((fail + 1)); fi
+	# the same run from cycle 2^36: a time or a scheduling key cut to 32 bits shows
+	./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args -t0 68719476736 -dump "$o.thub" > "$o.t" 2> "$o.tlog"
+	if cmp -s "$o.rtl" "$o.t" && cmp -s "$o.rtlhub" "$o.thub" && ! grep -q "p8x32a: time order" "$o.tlog"; then pass=$((pass + 1))
+	else echo "RTL MISMATCH $1 (-t0 68719476736)"; diff "$o.rtl" "$o.t" | head -6; grep "p8x32a: time order" "$o.tlog"; fail=$((fail + 1)); fi
 	# EXPECT-CLKSHIFT: d v = with CLKSET moving queued edges d cycles earlier, the long at $6000 is v
 	set -- "$1" $(sed -n "s/^' EXPECT-CLKSHIFT: //p" "$1")
 	[ $# -eq 3 ] || return

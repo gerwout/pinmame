@@ -6,6 +6,8 @@
 #                                  also gives the slowest 100 ms of host time (PINHECK_TIME_LOG)
 #   bench.sh profile WORKLOAD      perf record one workload with $SDL3PINMAME, then components.py (BENCH_PERF_EV: perf
 #                                  record's event options, default -F 999)
+#   bench.sh worker WORKLOAD       one workload with $SDL3PINMAME recorded per thread (perf, cycles and instructions):
+#                                  the Propeller worker's and the PIC32 thread's cycles per emulated second
 #   bench.sh contention [CASE...]  10 s of attract mode where CPUs are scarce (Linux, taskset; BENCH_CPU_A and BENCH_CPU_B,
 #                                  default 2 and 4, name two allowed CPUs): on one CPU (one), on two CPUs while a busy
 #                                  loop shares the first (busy), with the worker switched every second (flip); each
@@ -115,6 +117,7 @@ run() {
 	wrap=
 	[ -n "$PERF" ] && wrap="$PERF stat -e task-clock,instructions:u,cycles:u -o $D/perf.txt"
 	[ -n "$PERF" ] && [ "$4" = record ] && wrap="$PERF record ${BENCH_PERF_EV:--F 999} -o $D/perf.data --"
+	[ -n "$PERF" ] && [ "$4" = threads ] && wrap="$PERF record -q -s -e cycles:u,instructions:u -c 100000 -o $D/perf.data --"
 	{ echo "$MARK mark window"; [ -z "$KEYS" ] || echo "$KEYS"; } > $D/keys.txt
 	t0=$(date +%s.%N)
 	[ -n "$BENCH_CPUS" ] && wrap="taskset -c $BENCH_CPUS $wrap"
@@ -166,6 +169,15 @@ if [ "$1" = profile ]; then
 	run prof "$SDL3PINMAME" "${2:-attract}" record || exit 1
 	$PERF report -i $B/prof/${2:-attract}/perf.data --stdio --sort srcfile 2> /dev/null | python3 components.py
 	$PERF report -i $B/prof/${2:-attract}/perf.data --stdio --sort dso 2> /dev/null | awk '/\[JIT\]/ { s += $1 } END { printf "%6.1f%%  of it translated Propeller code\n", s }'
+	exit 0
+fi
+if [ "$1" = worker ]; then
+	[ -n "$PERF" ] || { echo "bench: perf not found"; exit 2; }
+	run work "$SDL3PINMAME" "${2:-video}" threads || exit 1
+	spec "${2:-video}"
+	$PERF report -i $B/work/${2:-video}/perf.data --stdio -n --sort pid,sym 2> /dev/null |
+		python3 threads.py "${2:-video}" "$(awk "BEGIN { print ($FRAMES - 1) / 60 }")" 100000 || exit 1
+	rm -f $B/work/${2:-video}/perf.data
 	exit 0
 fi
 # stop the emulator running in directory $1 for $3 s once its emulated time reaches $2 s (SIGSTOP, SIGCONT)
