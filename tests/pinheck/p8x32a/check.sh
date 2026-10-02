@@ -27,7 +27,8 @@ if [ -f ../eeprom/eeprom_test.c ]; then
 	./$B/eeprom_test || fail=$((fail + 1))
 fi
 [ -f $CORE/p8x32a.c ] || { echo "p8x32a: core not present yet"; exit 2; }
-$CC -I$CORE -I$DEV -o $B/p8run run.c $CORE/p8x32a.c $DEV/eeprom.c $DEV/sd.c $DEV/vfat.c $DEV/zipsrc.c -lz || exit 2
+# P8X32A_CHECK: a pin change or hub access out of time order stops the run
+$CC -DP8X32A_CHECK -I$CORE -I$DEV -o $B/p8run run.c $CORE/p8x32a.c $DEV/eeprom.c $DEV/sd.c $DEV/vfat.c $DEV/zipsrc.c -lz || exit 2
 # P8X32A_JIT=1: every test runs with local instruction runs translated (x86-64 only)
 if [ "$P8X32A_JIT" = 1 ]; then
 	ASMJIT=../../../ext/asmjit
@@ -41,7 +42,7 @@ if [ "$P8X32A_JIT" = 1 ]; then
 	fi
 	c++ $JF -Wall -Wextra -Werror -I$CORE -c $CORE/p8x32ajit.cpp -o $B/p8x32ajit.o || exit 2
 	for f in run.c $CORE/p8x32a.c $DEV/eeprom.c $DEV/sd.c $DEV/vfat.c $DEV/zipsrc.c; do
-		$CC -DP8X32A_JIT -I$CORE -I$DEV -c "$f" -o $B/jit-$(basename "$f" .c).o || exit 2
+		$CC -DP8X32A_JIT -DP8X32A_CHECK -I$CORE -I$DEV -c "$f" -o $B/jit-$(basename "$f" .c).o || exit 2
 	done
 	c++ -o $B/p8run $B/jit-*.o $B/p8x32ajit.o $B/asmjit/libasmjit.a -lz -lpthread || exit 2
 	c++ $JF -Wall -Wextra -Werror -I$CORE -o $B/jit_oom_test jit_oom_test.cpp $B/p8x32ajit.o $B/asmjit/libasmjit.a -lpthread || exit 2
@@ -85,6 +86,7 @@ rtl_case() {
 	if [ -n "$journal" ] && ! grep -qxF "p8run: $(echo $journal | cut -d' ' -f1) journal entries, $(echo $journal | cut -d' ' -f2) catch-ups with it full" "$o.log"; then
 		echo "JOURNAL $1: $(grep -F 'journal entries' "$o.log"), expected $journal"; fail=$((fail + 1)); fi
 	if grep -q "p8x32a: lazy\|p8run: lazy" "$o.log"; then echo "LAZY $1: $(grep "p8x32a: lazy\|p8run: lazy" "$o.log" | head -3)"; fail=$((fail + 1)); fi
+	if grep -q "p8x32a: time order" "$o.log"; then echo "TIME ORDER $1: $(grep "p8x32a: time order" "$o.log")"; fail=$((fail + 1)); fi
 	# EXPECT-CLKSHIFT: d v = with CLKSET moving queued edges d cycles earlier, the long at $6000 is v
 	set -- "$1" $(sed -n "s/^' EXPECT-CLKSHIFT: //p" "$1")
 	[ $# -eq 3 ] || return
@@ -125,6 +127,8 @@ if ./$B/lzh/p8run -rom $B/rtl/lazy.rom -ram $B/rtl/lazy.ram -halt -cycles 400000
 else pass=$((pass + 1)); fi
 # mutations of the lazy-cog core that the cases above must catch
 TOOLS=$TOOLS ./mutate_lazy.sh || fail=$((fail + 1))
+# mutations of the time order, the scheduler's keys, the translator's restart and special sources
+TOOLS=$TOOLS ./mutate_core.sh || fail=$((fail + 1))
 
 boot_case() {
 	ext=$1

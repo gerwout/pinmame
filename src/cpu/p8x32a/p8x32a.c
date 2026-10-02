@@ -63,6 +63,38 @@ static uint32_t rd32(const p8x32a *p, uint32_t a)
 
 static uint32_t regval(const p8x32a_reg *r, uint64_t t) { return t >= r->at ? r->cur : r->prev; }
 
+#ifdef P8X32A_CHECK
+/* test builds: the emulation's time order. A pin change must not come after the pins were sent past its time, a hub
+   write not before a read or write of its bytes that already ran (the lazy cog's reads, behind by design, excepted) */
+static uint64_t chk_rd[65536], chk_wr[65536];
+static void chk_fail(const char *what, uint64_t t, uint64_t past)
+{
+	fprintf(stderr, "p8x32a: time order: %s at %llu after %llu\n", what, (unsigned long long)t, (unsigned long long)past);
+	abort();
+}
+static void chk_read(uint32_t a, unsigned sz, uint64_t t)
+{
+	unsigned k;
+	for (k = 0; k < sz; k++)
+		if (t > chk_rd[(a + k) & 0xFFFF]) chk_rd[(a + k) & 0xFFFF] = t;
+}
+static void chk_write(uint32_t a, unsigned sz, uint64_t t)
+{
+	unsigned k;
+	for (k = 0; k < sz; k++) {
+		uint32_t b = (a + k) & 0xFFFF;
+		if (t < chk_rd[b]) chk_fail("hub write after a later read", t, chk_rd[b]);
+		if (t < chk_wr[b]) chk_fail("hub write after a later write", t, chk_wr[b]);
+		chk_wr[b] = t;
+	}
+}
+#define CHK_READ(a, sz, t) chk_read(a, sz, t)
+#define CHK_WRITE(a, sz, t) chk_write(a, sz, t)
+#else
+#define CHK_READ(a, sz, t) ((void)0)
+#define CHK_WRITE(a, sz, t) ((void)0)
+#endif
+
 static void loop_notify(p8x32a *p, uint64_t t, uint32_t pins);
 static void jit_written(p8x32a *p, int n, unsigned s, uint32_t old);
 P8_INLINE void jit_write(p8x32a *p, int n, unsigned s, uint32_t old)
@@ -140,6 +172,9 @@ static void jit_drop(p8x32a *p, int n);
 static void add_pending(p8x32a *p, uint64_t t, uint32_t pins, uint32_t what)
 {
 	int k;
+#ifdef P8X32A_CHECK
+	if (t < p->flushed) chk_fail("pin change sent", t, p->flushed);
+#endif
 	if (p->sleepers) loop_notify(p, t, pins);
 	for (k = 0; k < p->npend; k++)
 		if (p->pend[k] == t) { p->pend_pins[k] |= pins; p->pend_what[k] |= what; return; }
@@ -752,8 +787,10 @@ static int loop_same(p8x32a *p, int n, uint64_t t)
 		for (k = 0; k < l->nin; k++)
 			if ((v & l->in_mask[k]) != l->in_val[k]) return 0;
 	}
-	for (k = 0; k < l->nhub; k++)
+	for (k = 0; k < l->nhub; k++) {
+		CHK_READ(l->hub_a[k], l->hub_n[k], t);
 		if (loop_hub_now(p, l, k) != l->hub_v[k]) return 0;
+	}
 	return 1;
 }
 
@@ -1025,10 +1062,12 @@ static void do_hub(p8x32a *p, int n)
 		a = c->run ? (c->s & 0xFFFF) : (((((c->ptr & 0x3FFF) + c->p) & 0x3FFF) << 2) | (c->s & 3));
 		w = rd32(p, a);
 		if (!c->run && (a & 0x8000)) w = unscramble(w);
+		if (FWR(c->i) || !c->run) CHK_READ(c->run ? a & ~((op == 2 ? 4u : op == 1 ? 2u : 1u) - 1) : a & 0xFFFC, c->run ? (op == 2 ? 4 : op == 1 ? 2 : 1) : 4, h);
 		if (!FWR(c->i) && a < 0x8000) {
 			uint32_t v = c->d;
 			unsigned sz = op == 2 ? 4 : op == 1 ? 2 : 1, ha = a & ~(sz - 1), k;
 			int changed = 0;
+			CHK_WRITE(ha, sz, h);
 			if (p->lz_on) lazy_write(p, ha, sz, v, h);
 			for (k = 0; k < sz; k++) {
 				changed |= p->hub[ha + k] != (uint8_t)(v >> (8 * k));
@@ -1172,9 +1211,11 @@ static unsigned hub_rw(p8x32a *p, int n, uint32_t i, uint32_t s, uint32_t d, uin
 	p8x32a_loop *l = &p->loop[n];
 	uint32_t *ram = p->cog[n].ram, a = s & 0xFFFF, w = p->jn && p->lz_on && n == p->lz ? jn_rd32(p, a & 0xFFFC, h) : rd32(p, a), r;
 	unsigned op = OP(i), dst = DST(i);
+	if (FWR(i) && !(p->lz_on && n == p->lz)) CHK_READ(a & ~((op == 2 ? 4u : op == 1 ? 2u : 1u) - 1), op == 2 ? 4 : op == 1 ? 2 : 1, h);
 	if (!FWR(i) && a < 0x8000) {
 		unsigned sz = op == 2 ? 4 : op == 1 ? 2 : 1, ha = a & ~(sz - 1), k;
 		int changed = 0;
+		CHK_WRITE(ha, sz, h);
 		if (p->lz_on) lazy_write(p, ha, sz, d, h);
 		for (k = 0; k < sz; k++) {
 			changed |= p->hub[ha + k] != (uint8_t)(d >> (8 * k));
