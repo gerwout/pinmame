@@ -352,9 +352,9 @@ int prop_p24(pinheck_prop *p, uint64_t pic_cycle)
    it reads Propeller state (prop_sync). */
 #define PROP_Q 4096
 /* a wait spins this long, then blocks; PINHECK_SPIN_US (1-100000) sets it at thread start. Windows' wake from a
-   blocked wait costs more: 1 ms there gives +5-6% speed for +16% CPU over 50 us (Threadripper 3970X) */
+   blocked wait costs more: 200 us there is as fast as 1 ms for 6-11% less CPU (Threadripper 3970X) */
 #ifdef _WIN32
-#define PROP_SPIN_NS 1000000
+#define PROP_SPIN_NS 200000
 #else
 #define PROP_SPIN_NS 50000
 #endif
