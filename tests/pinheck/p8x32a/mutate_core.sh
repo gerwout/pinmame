@@ -104,7 +104,7 @@ mutant gen-notify p8x32a.c '(pins & p->loop[n].wake) && t < p->cog[n].ev_t) { p-
 mutant gen-hubwrite p8x32a.c 'h < p->cog[n].ev_t) { p->cog[n].ev_t = h; p->sched_gen++; }' 'h < p->cog[n].ev_t) { p->cog[n].ev_t = h; }' 0
 # a translated CNT four cycles late; PAR not shifted
 mutant jit-cnt p8x32ajit.cpp '(int)(4 * k)));
-				a.sub(x86::rax' '(int)(4 * k + 4)));
-				a.sub(x86::rax' 1
+				a.mov(x86::ecx, x86::eax);' '(int)(4 * k + 4)));
+				a.mov(x86::ecx, x86::eax);' 1
 mutant jit-par p8x32a.c 'st.par = (c->ptr >> 14) << 2;' 'st.par = c->ptr << 2;' 1
 exit $((fail != 0))

@@ -161,9 +161,8 @@ struct Emit {
 			if (imm) a.mov(x86::ecx, src_of(i));
 			else if (src_of(i) == 0x1F0) a.mov(x86::ecx, stf(offsetof(p8x32a_jst, par)));
 			else if (src_of(i) == 0x1F1) {
-				// CNT at this instruction's time
+				// CNT: this instruction's time
 				a.lea(x86::rax, x86::ptr(T2, (int)(4 * k)));
-				a.sub(x86::rax, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, cnt_base)));
 				a.mov(x86::ecx, x86::eax);
 			} else a.mov(x86::ecx, cog(src_of(i)));
 			a.mov(x86::edx, cog(dst_of(i)));

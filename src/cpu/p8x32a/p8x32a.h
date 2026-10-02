@@ -89,8 +89,7 @@ typedef struct p8x32a_jst {
 	uint64_t latch;        /* and the slot of the last hub read they ran, 0 if none */
 	const uint8_t *hub;
 	const uint8_t *jmap;   /* hub longs with a journal entry (p8x32a.jmap): a block stops before reading one */
-	uint32_t par;          /* the cog's PAR */
-	uint64_t cnt_base;     /* CNT is the time less this */
+	uint32_t par;          /* the cog's PAR (CNT is the time) */
 } p8x32a_jst;
 #define P8X32A_JOUT 256 /* the OUTA writes a run of blocks may leave */
 #define P8X32A_JN 64    /* journal entries */
@@ -122,7 +121,7 @@ typedef struct p8x32a {
 	uint8_t hub[65536];
 	p8x32a_cog cog[8];
 	uint8_t cog_e, lock_e, lock_state, cfg, sys_q, sys_c;
-	uint64_t now, horizon, flushed, slot_base, cnt_base;
+	uint64_t now, horizon, flushed, slot_base;
 	uint64_t pend[40];
 	uint32_t pend_pins[40], pend_what[40]; /* the pins a pending point may change, and the registers that change there */
 	int npend;

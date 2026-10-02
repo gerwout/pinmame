@@ -444,7 +444,8 @@ static uint32_t ina(p8x32a *p, uint64_t t, uint32_t m)
 	return (p->last_dir & p->last_out) | (~p->last_dir & ext);
 }
 
-static uint32_t cnt(const p8x32a *p, uint64_t t) { return (uint32_t)(t - p->cnt_base); }
+/* CNT is the time's low 32 bits */
+static uint32_t cnt(uint64_t t) { return (uint32_t)t; }
 
 static int ctr_free(uint32_t ctr)
 {
@@ -584,7 +585,7 @@ static uint32_t sread(p8x32a *p, int n, unsigned a, uint64_t t)
 	p8x32a_cog *c = &p->cog[n];
 	switch (a) {
 	case 0x1F0: return (c->ptr >> 14) << 2;
-	case 0x1F1: return cnt(p, t);
+	case 0x1F1: return cnt(t);
 	case 0x1F2: return ina(p, t, 0xFFFFFFFFu);
 	case 0x1FC: return phs_at(c, 0, t);
 	case 0x1FD: return phs_at(c, 1, t);
@@ -1144,7 +1145,7 @@ static void exec(p8x32a *p, int n)
 	if (c->cond && op == 0x3E) {
 		uint64_t m = t0 + 3;
 		c->ev = EV_DONE;
-		c->ev_t = m + (uint32_t)(c->d - cnt(p, m)) + 2;
+		c->ev_t = m + (uint32_t)(c->d - cnt(m)) + 2;
 		return;
 	}
 	if (c->cond && (op == 0x3C || op == 0x3D)) {
@@ -1329,7 +1330,7 @@ P8_INLINE p8x32a_jblk *jit_get(p8x32a *p, int n, unsigned a, uint32_t ix)
 		uint32_t x = (b->dyn & 1) ? (ix ^ b->words[0]) & ~P8X32A_JDYN : ix ^ b->words[0];
 		if (!x) return b;
 		var[a] |= x;
-		if (var[a] & ~P8X32A_JDYN) return NULL;
+		if (var[a] & ~P8X32A_JDYN) { p->jit_refused++; return NULL; }
 	}
 	b = p->jit_build(p->jit, b, a, ix, p->cog[n].ram, var, p->lz_on && n == p->lz);
 	p->jblk[n][a] = b;
@@ -1363,7 +1364,6 @@ static int run_local(p8x32a *p, int n, uint64_t t, uint64_t lim, unsigned gen)
 	st.tab = p->jblk[n];
 	st.loop = l;
 	st.par = (c->ptr >> 14) << 2;
-	st.cnt_base = p->cnt_base;
 
 	if (c->ev == EV_HUB) {
 		uint64_t m3 = c->latch + 4;
@@ -1788,10 +1788,7 @@ void p8x32a_run_until(p8x32a *p, uint64_t t)
 			if (p->loop[best].state == LOOP_RECORD) loop_post(p, best);
 		}
 		/* while no other cog's next event has changed, this cog goes again if it is still the earliest */
-		if (gen == p->sched_gen && b->ev != EV_NONE && b->ev_t <= t && !p->stop) {
-			uint64_t e = b->ev_t < ((uint64_t)1 << 59) ? b->ev_t : (uint64_t)1 << 59;
-			if ((e << 4 | (uint64_t)(b->ev != EV_HUB) << 3 | (uint64_t)best) < bk2) goto again;
-		}
+		if (gen == p->sched_gen && b->ev != EV_NONE && b->ev_t <= t && !p->stop && ev_key(b, best) < bk2) goto again;
 		key[best] = ev_key(b, best);
 	}
 	lazy_catch(p, t);
