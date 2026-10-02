@@ -19,6 +19,7 @@ struct P8Jit {
 	std::vector<p8x32a_jblk *> blocks;
 	uint64_t tail, tail_ret; // the code a block leaves through, and its return to run_local
 	uint64_t ltail, ltail_ret; // the same for a lazy cog's blocks
+	uint64_t edge; // run_local's loop_edge search step for a backward jump (called)
 };
 
 enum { OP_ROR = 0x08, OP_ROL, OP_SHR, OP_SHL, OP_RCR, OP_RCL, OP_SAR, OP_MOVS = 0x14, OP_MOVD, OP_MOVI, OP_JMP,
@@ -96,6 +97,72 @@ struct Emit {
 	uint64_t tail, tail_ret;
 	bool outa;
 	Label res; // the block's resume entry
+	uint64_t edge;
+	bool writes; // the block writes cog RAM (st.inv may be set)
+
+	// the tail's work for a run of cnt instructions ending here, on into the block at the next address (pxc, or ecx
+	// when -1) if it fits: the count, a backward jump's loop search step, the link; else to slow (accounted).
+	// word: the next instruction's word (a register other than rax, rcx, rdx, rdi, rsi, or st.nix when none)
+	void chain(unsigned cnt, int pxc, bool backward, const x86::Gp *word, Label slow)
+	{
+		a.add(TOTAL, cnt);
+		a.lea(T2, x86::ptr(T2, (int)(4 * cnt)));
+		a.sub(BUDGET, cnt);
+		a.mov(x86::rdi, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, loop)));
+		a.add(x86::word_ptr(x86::rdi, (int)offsetof(p8x32a_loop, nins)), cnt);
+		if (pxc >= 0) a.mov(x86::ecx, pxc);
+		if (backward) {
+			Label fwd = a.new_label();
+			if (pxc < 0) {
+				a.cmp(x86::ecx, (base + cnt) & 511);
+				a.jae(fwd);
+			}
+			a.mov(x86::rsi, edge);
+			a.call(x86::rsi);
+			a.test(x86::eax, x86::eax);
+			a.jnz(slow);
+			a.bind(fwd);
+		}
+		if (writes) {
+			a.cmp(stf(offsetof(p8x32a_jst, inv)), 0);
+			a.jne(slow);
+		}
+		if (pxc < 0) {
+			a.cmp(x86::ecx, 511);
+			a.je(slow);
+		} else if (pxc == 511) {
+			a.jmp(slow);
+			return;
+		}
+		a.shl(x86::ecx, 5);
+		a.add(x86::rcx, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, link)));
+		a.mov(x86::eax, x86::dword_ptr(x86::rcx, (int)offsetof(p8x32a_jlink, len)));
+		a.cmp(x86::eax, BUDGET);
+		a.ja(slow);
+		if (word) a.mov(x86::eax, *word);
+		else a.mov(x86::eax, stf(offsetof(p8x32a_jst, nix)));
+		a.mov(x86::edx, x86::eax);
+		a.xor_(x86::edx, x86::dword_ptr(x86::rcx, (int)offsetof(p8x32a_jlink, word)));
+		a.and_(x86::edx, x86::dword_ptr(x86::rcx, (int)offsetof(p8x32a_jlink, mask)));
+		a.jnz(slow);
+		a.mov(stf(offsetof(p8x32a_jst, ix)), x86::eax);
+		a.jmp(x86::qword_ptr(x86::rcx, (int)offsetof(p8x32a_jlink, body)));
+	}
+	// the run of cnt instructions ends with a sequential fetch of the slot at address next (word in wreg): on into the
+	// next block, else back to run_local with the exit state
+	void seq_exit(unsigned cnt, unsigned next, const x86::Gp &wreg)
+	{
+		Label slow = a.new_label();
+		chain(cnt, (int)next, false, &wreg, slow);
+		a.bind(slow);
+		a.mov(stf(offsetof(p8x32a_jst, pc)), next);
+		a.mov(stf(offsetof(p8x32a_jst, px)), next);
+		a.mov(stf(offsetof(p8x32a_jst, nix)), wreg);
+		a.mov(stf(offsetof(p8x32a_jst, jmp)), 0);
+		a.mov(stf(offsetof(p8x32a_jst, jc)), 0);
+		a.mov(x86::rsi, tail_ret);
+		a.jmp(x86::rsi);
+	}
 
 	// the next instruction at st.latch + 7 after a hub read or write counted as instruction k of the run (the tail
 	// adds k + 1): T2 and the budget from there
@@ -202,6 +269,10 @@ struct Emit {
 	// through the tail
 	void stop_before(unsigned k, const x86::Gp &word, bool ret = false)
 	{
+		if (!outa && !ret && k && (word == NEXTW || word == CURW)) {
+			seq_exit(k, (base + k) & 511, word);
+			return;
+		}
 		a.mov(stf(offsetof(p8x32a_jst, pc)), (base + k) & 511);
 		a.mov(stf(offsetof(p8x32a_jst, px)), (base + k) & 511);
 		a.mov(stf(offsetof(p8x32a_jst, nix)), word);
@@ -415,7 +486,13 @@ struct Emit {
 		case OP_TJNZ: case OP_TJZ: a.xor_(x86::r11d, x86::r11d); a.mov(x86::eax, x86::edx); break;
 		}
 		if (op >= OP_AND && op <= OP_MUXNZ && fwc(i)) parity_to_r11(a);
-		if (jump) {
+		if (jump && !outa) {
+			// the word at the target is fetched before the write; the rest of the exit state after it
+			a.mov(x86::esi, x86::ecx);
+			a.and_(x86::esi, 511);
+			a.mov(x86::esi, cogr(x86::esi));
+			a.mov(stf(offsetof(p8x32a_jst, nix)), x86::esi);
+		} else if (jump) {
 			// the word at the target is fetched before the write
 			a.mov(stf(offsetof(p8x32a_jst, s)), x86::ecx);
 			a.mov(stf(offsetof(p8x32a_jst, d)), x86::edx);
@@ -481,7 +558,46 @@ struct Emit {
 			a.mov(x86::dword_ptr(x86::rsi, x86::rdi, 2), x86::eax);
 			a.inc(stf(offsetof(p8x32a_jst, on)));
 		}
-		if (jump) leave(k + 1);
+		if (jump && !outa) {
+			Label slow = a.new_label(), go = a.new_label();
+			unsigned pc = (base + k + 1) & 511;
+			bool fixed = imm && !dyn;
+			// a jump that did not jump: its exit state, through the tail (it returns: the next instruction is cancelled)
+			if (op != OP_JMP) {
+				if (op == OP_DJNZ) a.cmp(x86::edx, 1);
+				else a.test(x86::edx, x86::edx);
+				if (op == OP_TJZ) a.je(go);
+				else a.jne(go);
+				a.mov(stf(offsetof(p8x32a_jst, s)), x86::ecx);
+				a.mov(stf(offsetof(p8x32a_jst, d)), x86::edx);
+				a.mov(x86::esi, x86::ecx);
+				a.and_(x86::esi, 511);
+				a.mov(stf(offsetof(p8x32a_jst, px)), x86::esi);
+				a.mov(stf(offsetof(p8x32a_jst, jc)), 1);
+				a.mov(stf(offsetof(p8x32a_jst, jmp)), 1);
+				a.mov(stf(offsetof(p8x32a_jst, pc)), pc);
+				if (dyn) a.mov(stf(offsetof(p8x32a_jst, w)), CURW);
+				else a.mov(stf(offsetof(p8x32a_jst, w)), i);
+				leave(k + 1);
+				a.bind(go);
+			}
+			// s and d kept for the slow path (the chain uses eax, ecx, edx, rsi, rdi)
+			a.mov(stf(offsetof(p8x32a_jst, s)), x86::ecx);
+			a.mov(stf(offsetof(p8x32a_jst, d)), x86::edx);
+			if (!fixed) a.and_(x86::ecx, 511);
+			chain(k + 1, fixed ? (int)(src_of(i) & 511) : -1, !fixed || (src_of(i) & 511) < pc, NULL, slow);
+			a.bind(slow);
+			a.mov(x86::esi, stf(offsetof(p8x32a_jst, s)));
+			a.and_(x86::esi, 511);
+			a.mov(stf(offsetof(p8x32a_jst, px)), x86::esi);
+			a.mov(stf(offsetof(p8x32a_jst, pc)), pc);
+			if (dyn) a.mov(stf(offsetof(p8x32a_jst, w)), CURW);
+			else a.mov(stf(offsetof(p8x32a_jst, w)), i);
+			a.mov(stf(offsetof(p8x32a_jst, jmp)), 1);
+			a.mov(stf(offsetof(p8x32a_jst, jc)), 0);
+			a.mov(x86::rsi, tail_ret);
+			a.jmp(x86::rsi);
+		} else if (jump) leave(k + 1);
 		a.bind(skip);
 	end:
 		if (last) stop_before(k + 1, NEXTW);
@@ -490,6 +606,12 @@ struct Emit {
 			a.jmp(over);
 			a.bind(before);
 			if (k == 0) {
+				// a block reached from another's exit: the run so far ends with a sequential fetch of this slot
+				a.mov(stf(offsetof(p8x32a_jst, pc)), base);
+				a.mov(stf(offsetof(p8x32a_jst, px)), base);
+				a.mov(stf(offsetof(p8x32a_jst, nix)), CURW);
+				a.mov(stf(offsetof(p8x32a_jst, jmp)), 0);
+				a.mov(stf(offsetof(p8x32a_jst, jc)), 0);
 				a.mov(x86::rsi, tail_ret);
 				a.jmp(x86::rsi);
 			} else
@@ -510,7 +632,7 @@ bool build_tail(P8Jit *j, bool lazy)
 	FuncFrame frame;
 	make_frame(func, frame, code.environment());
 	frame.finalize();
-	Label ret = a.new_label(), no_edge = a.new_label(), diff = a.new_label(), reset = a.new_label(), full = a.new_label();
+	Label ret = a.new_label(), no_edge = a.new_label(), diff = a.new_label(), reset = a.new_label();
 	const x86::Gp L = x86::rdi;
 
 	a.add(TOTAL, x86::eax);
@@ -569,28 +691,18 @@ bool build_tail(P8Jit *j, bool lazy)
 	a.mov(x86::ecx, stf(offsetof(p8x32a_jst, px)));
 	a.cmp(x86::ecx, 511);
 	a.je(ret);
-	a.mov(x86::rsi, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, tab)));
-	a.mov(x86::rsi, x86::qword_ptr(x86::rsi, x86::rcx, 3));
-	a.test(x86::rsi, x86::rsi);
-	a.jz(ret);
-	a.cmp(x86::dword_ptr(x86::rsi, (int)offsetof(p8x32a_jblk, valid)), 0);
-	a.je(ret);
-	a.mov(x86::eax, x86::dword_ptr(x86::rsi, (int)offsetof(p8x32a_jblk, len)));
-	a.test(x86::eax, x86::eax);
-	a.jz(ret);
+	a.shl(x86::ecx, 5);
+	a.add(x86::rcx, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, link)));
+	a.mov(x86::eax, x86::dword_ptr(x86::rcx, (int)offsetof(p8x32a_jlink, len)));
 	a.cmp(x86::eax, BUDGET);
 	a.ja(ret);
 	a.mov(x86::edx, stf(offsetof(p8x32a_jst, nix)));
-	a.xor_(x86::edx, x86::dword_ptr(x86::rsi, (int)offsetof(p8x32a_jblk, words)));
-	a.test(x86::byte_ptr(x86::rsi, (int)offsetof(p8x32a_jblk, dyn)), 1);
-	a.jz(full);
-	a.and_(x86::edx, ~P8X32A_JDYN);
-	a.bind(full);
-	a.test(x86::edx, x86::edx);
+	a.mov(x86::eax, x86::edx);
+	a.xor_(x86::edx, x86::dword_ptr(x86::rcx, (int)offsetof(p8x32a_jlink, word)));
+	a.and_(x86::edx, x86::dword_ptr(x86::rcx, (int)offsetof(p8x32a_jlink, mask)));
 	a.jnz(ret);
-	a.mov(x86::eax, stf(offsetof(p8x32a_jst, nix)));
 	a.mov(stf(offsetof(p8x32a_jst, ix)), x86::eax);
-	a.jmp(x86::qword_ptr(x86::rsi, (int)offsetof(p8x32a_jblk, body)));
+	a.jmp(x86::qword_ptr(x86::rcx, (int)offsetof(p8x32a_jlink, body)));
 	a.bind(ret);
 	a.mov(stf(offsetof(p8x32a_jst, fl)), FL);
 	a.mov(x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, t2)), T2);
@@ -609,12 +721,59 @@ bool build_tail(P8Jit *j, bool lazy)
 	return true;
 }
 
+// run_local's loop_edge search step for a backward jump to ecx with the next instruction at T2 (called from a block's
+// exit): returns eax = 1 with st.edge = 1 when run_local must pass it to loop_edge; uses rax, rdx, rdi
+bool build_edge(P8Jit *j)
+{
+	CodeHolder code;
+	code.init(j->rt.environment());
+	x86::Assembler a(&code);
+	Label ret = a.new_label(), diff = a.new_label(), reset = a.new_label(), edge = a.new_label();
+	const x86::Gp L = x86::rdi;
+	a.mov(L, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, loop)));
+	a.movzx(x86::edx, x86::word_ptr(L, (int)offsetof(p8x32a_loop, head)));
+	a.lea(x86::rax, x86::ptr(T2, -3));
+	a.cmp(x86::ecx, x86::edx);
+	a.jne(diff);
+	a.cmp(x86::byte_ptr(L, (int)offsetof(p8x32a_loop, dirty)), 0);
+	a.jne(reset);
+	a.cmp(x86::word_ptr(L, (int)offsetof(p8x32a_loop, nins)), P8X32A_PAT / 2);
+	a.ja(reset);
+	a.cmp(x86::rax, x86::qword_ptr(L, (int)offsetof(p8x32a_loop, head_t)));
+	a.jbe(reset);
+	a.jmp(edge);
+	a.bind(diff);
+	a.cmp(x86::byte_ptr(L, (int)offsetof(p8x32a_loop, dirty)), 0);
+	a.jne(reset);
+	a.cmp(x86::word_ptr(L, (int)offsetof(p8x32a_loop, nins)), P8X32A_PAT / 2);
+	a.ja(reset);
+	a.cmp(x86::edx, 0xFFFF);
+	a.jne(ret);
+	a.bind(reset);
+	a.mov(x86::word_ptr(L, (int)offsetof(p8x32a_loop, head)), x86::cx);
+	a.mov(x86::qword_ptr(L, (int)offsetof(p8x32a_loop, head_t)), x86::rax);
+	a.mov(x86::byte_ptr(L, (int)offsetof(p8x32a_loop, dirty)), 0);
+	a.mov(x86::byte_ptr(L, (int)offsetof(p8x32a_loop, hub)), 0);
+	a.mov(x86::word_ptr(L, (int)offsetof(p8x32a_loop, nins)), 0);
+	a.bind(ret);
+	a.xor_(x86::eax, x86::eax);
+	a.ret();
+	a.bind(edge);
+	a.mov(stf(offsetof(p8x32a_jst, edge)), 1);
+	a.mov(x86::eax, 1);
+	a.ret();
+	void *fn = NULL;
+	if (j->rt.add(&fn, &code) != kErrorOk) return false;
+	j->edge = (uint64_t)(uintptr_t)fn;
+	return true;
+}
+
 } // namespace
 
 extern "C" void *p8x32a_jit_new(void)
 {
 	P8Jit *j = new (std::nothrow) P8Jit();
-	if (j && (!build_tail(j, false) || !build_tail(j, true))) { delete j; j = NULL; }
+	if (j && (!build_tail(j, false) || !build_tail(j, true) || !build_edge(j))) { delete j; j = NULL; }
 	return j;
 }
 
@@ -699,7 +858,9 @@ extern "C" p8x32a_jblk *p8x32a_jit_build(void *jit, p8x32a_jblk *old, unsigned a
 	as.xor_(TOTAL, TOTAL);
 	as.bind(body);
 	Label res = as.new_label();
-	Emit e = { as, frame, a, outa ? j->ltail : j->tail, outa ? j->ltail_ret : j->tail_ret, outa != 0, res };
+	bool writes = false;
+	for (k = 0; k < len; k++) writes = writes || fwr(b->words[k]) || (b->dyn >> k & 1);
+	Emit e = { as, frame, a, outa ? j->ltail : j->tail, outa ? j->ltail_ret : j->tail_ret, outa != 0, res, j->edge, writes };
 	for (k = 0; k < len; k++) {
 		bool last = k + 1 == len, next_dyn = !last && (b->dyn >> (k + 1) & 1);
 		if (outa) {
@@ -734,12 +895,7 @@ extern "C" p8x32a_jblk *p8x32a_jit_build(void *jit, p8x32a_jblk *old, unsigned a
 		e.hub_access(b->words[k]);
 		// counted as one instruction of a run that goes on at the next address
 		e.after_hub(0);
-		as.mov(stf(offsetof(p8x32a_jst, pc)), (a + len) & 511);
-		as.mov(stf(offsetof(p8x32a_jst, px)), (a + len) & 511);
-		as.mov(stf(offsetof(p8x32a_jst, nix)), NEXTW);
-		as.mov(stf(offsetof(p8x32a_jst, jmp)), 0);
-		as.mov(stf(offsetof(p8x32a_jst, jc)), 0);
-		e.leave(1);
+		e.seq_exit(1, (a + len) & 511, NEXTW);
 	}
 	uint32_t (*fn)(p8x32a_jst *) = NULL;
 	if (j->rt.add(&fn, &code) != kErrorOk) return b;

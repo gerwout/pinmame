@@ -173,6 +173,13 @@ static void jn_drop(p8x32a *p, uint64_t t)
 }
 static void jit_drop(p8x32a *p, int n);
 
+/* a block no longer runs: its link says so */
+P8_INLINE void jit_void(p8x32a *p, int n, unsigned a)
+{
+	p->jblk[n][a]->valid = 0;
+	p->jlink[n][a].len = ~0u;
+}
+
 
 /* a pin change at t; pins = the pins it may change, what = the registers that change (P8X32A_PEND_COG(n): cog n's
    OUTA or DIRA, P8X32A_PEND_CTR(j): counter j = 2 * cog + A/B) */
@@ -1315,7 +1322,7 @@ static void jit_written(p8x32a *p, int n, unsigned s, uint32_t old)
 	p->jvar[n][s] |= old ^ p->cog[n].ram[s];
 	for (k = (int)s; k >= 0 && k > (int)s - P8X32A_JMAX; k--) {
 		p8x32a_jblk *b = p->jblk[n][k];
-		if (b && b->valid && (unsigned)k + b->len > s && !(b->dyn >> (s - (unsigned)k) & 1)) b->valid = 0;
+		if (b && b->valid && (unsigned)k + b->len > s && !(b->dyn >> (s - (unsigned)k) & 1)) jit_void(p, n, (unsigned)k);
 	}
 	p->jcode[n][s >> 3] &= (uint8_t)~(1u << (s & 7));
 }
@@ -1355,6 +1362,13 @@ P8_INLINE p8x32a_jblk *jit_get(p8x32a *p, int n, unsigned a, uint32_t ix)
 	if (b) p->jep[n]++;
 	b = p->jit_build(p->jit, b, a, ix, p->cog[n].ram, var, p->lz_on && n == p->lz);
 	p->jblk[n][a] = b;
+	if (b) {
+		p8x32a_jlink *ln = &p->jlink[n][a];
+		ln->body = b->body;
+		ln->word = b->words[0];
+		ln->mask = (b->dyn & 1) ? ~P8X32A_JDYN : ~0u;
+		ln->len = b->valid && b->len && b->fn ? b->len : ~0u;
+	}
 
 	if (b && b->valid)
 		for (k = 0; k < b->len; k++)
@@ -1385,6 +1399,7 @@ static int run_local(p8x32a *p, int n, uint64_t t, uint64_t lim, unsigned gen)
 	st.ram = ram;
 	st.code = p->jcode[n];
 	st.tab = p->jblk[n];
+	st.link = p->jlink[n];
 	st.loop = l;
 	st.par = (c->ptr >> 14) << 2;
 	st.t = t;
@@ -1482,7 +1497,7 @@ static int run_local(p8x32a *p, int n, uint64_t t, uint64_t lim, unsigned gen)
 				if (st.inv == ~0u) {
 					unsigned j;
 					for (j = 0; j < 512; j++)
-						if (p->jblk[n][j]) p->jblk[n][j]->valid = 0;
+						if (p->jblk[n][j]) jit_void(p, n, j);
 					memset(p->jcode[n], 0, sizeof(p->jcode[n]));
 				} else if (st.inv)
 					jit_written(p, n, st.inv - 1, st.inv_old);
@@ -1734,7 +1749,7 @@ static void jit_drop(p8x32a *p, int n)
 {
 	unsigned j;
 	for (j = 0; j < 512; j++)
-		if (p->jblk[n][j]) p->jblk[n][j]->valid = 0;
+		if (p->jblk[n][j]) jit_void(p, n, j);
 	memset(p->jcode[n], 0, sizeof(p->jcode[n]));
 }
 
@@ -1933,6 +1948,9 @@ void p8x32a_init(p8x32a *p, const p8x32a_bus *bus)
 	int n;
 	memset(p, 0, sizeof(*p));
 	p->bus = *bus;
-	for (n = 0; n < 8 * 512; n++) dec_fill(&p->dec[0][0] + n, 0);
+	for (n = 0; n < 8 * 512; n++) {
+		dec_fill(&p->dec[0][0] + n, 0);
+		(&p->jlink[0][0] + n)->len = ~0u;
+	}
 	p8x32a_reset(p, 0);
 }

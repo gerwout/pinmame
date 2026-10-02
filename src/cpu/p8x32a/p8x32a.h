@@ -74,10 +74,19 @@ typedef struct p8x32a_loop {
 
 typedef struct p8x32a_jblk p8x32a_jblk;
 
+/* what a block's exit needs of the block at a cog address: its entry for another block, the word it starts with
+   under mask (~P8X32A_JDYN when slot 0 is read at run time), and its length (~0: none to run) */
+typedef struct p8x32a_jlink {
+	const void *body;
+	uint32_t word, mask, len, pad;
+	uint64_t pad2;
+} p8x32a_jlink;
+
 typedef struct p8x32a_jst {
 	uint32_t *ram;
 	const uint8_t *code; /* bit s: slot s is a fixed word of a block; a write that changes it is reported in inv */
 	p8x32a_jblk **tab;   /* the cog's blocks by address */
+	const p8x32a_jlink *link; /* and their links */
 	p8x32a_loop *loop;
 	uint64_t t2;
 	uint32_t budget, ix, fl, pc, px, nix, jmp, jc, edge, w, s, d; /* pc: of the last instruction run */
@@ -168,6 +177,7 @@ typedef struct p8x32a {
 	p8x32a_jit_fn jit_build; /* NULL: no translation */
 	void *jit;
 	p8x32a_jblk *jblk[8][512];
+	p8x32a_jlink jlink[8][512];
 	/* the resume entry of the block that issued cog n's hub read or write jres_i at jres_px - 1, while jep[n] (counts the
 	   cog's blocks translated again, which frees their code) is jres_ep[n] */
 	uint32_t (*jres[8])(p8x32a_jst *st);

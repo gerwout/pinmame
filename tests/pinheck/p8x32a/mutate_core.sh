@@ -121,4 +121,9 @@ mutant hub-gen p8x32ajit.cpp '			a.cmp(x86::esi, stf(offsetof(p8x32a_jst, gen)))
 			a.jne(wait);' '' 1
 mutant hub-report p8x32ajit.cpp '			a.bt(x86::dword_ptr(x86::rdi, (int)((dst >> 5) * 4)), dst & 31);
 			a.jnc(same);' '			a.jmp(same);' 1
+# a block whose link outlives it; a block reached from another's exit that stops before its first slot without its
+# exit state
+mutant link-void p8x32a.c '	p->jlink[n][a].len = ~0u;' '' 1
+mutant exit-k0 p8x32ajit.cpp '				a.mov(stf(offsetof(p8x32a_jst, px)), base);
+				a.mov(stf(offsetof(p8x32a_jst, nix)), CURW);' '				a.mov(stf(offsetof(p8x32a_jst, nix)), CURW);' 1
 exit $((fail != 0))
