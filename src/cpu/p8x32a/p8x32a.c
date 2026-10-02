@@ -173,6 +173,13 @@ static void jn_drop(p8x32a *p, uint64_t t)
 }
 static void jit_drop(p8x32a *p, int n);
 
+/* a block no longer runs: its link says so */
+P8_INLINE void jit_void(p8x32a *p, int n, unsigned a)
+{
+	p->jblk[n][a]->valid = 0;
+	p->jlink[n][a].len = ~0u;
+}
+
 
 /* a pin change at t; pins = the pins it may change, what = the registers that change (P8X32A_PEND_COG(n): cog n's
    OUTA or DIRA, P8X32A_PEND_CTR(j): counter j = 2 * cog + A/B) */
@@ -1217,6 +1224,8 @@ static void dec_fill(p8x32a_dec *e, uint32_t i)
 	if (FWR(i) && DST(i) >= 0x1F0) e->kind = K_NL;
 	if (FWR(i) && DST(i) == 0x1F4) e->fl |= F_OUTA;
 	if (op <= 2 && FWR(i) && !FWC(i)) e->fl |= F_HUBRD;
+	/* as p8x32a_jit_build takes it */
+	e->jh = (uint8_t)(op <= 2 && !FWC(i) && (FIM(i) || SRC(i) <= 0x1F0) && (!FWR(i) || DST(i) < 0x1F0));
 }
 
 /* the hub access and completion of cog n's hub read or write i, with source s and destination d, due at h with
@@ -1313,11 +1322,28 @@ static void jit_written(p8x32a *p, int n, unsigned s, uint32_t old)
 	p->jvar[n][s] |= old ^ p->cog[n].ram[s];
 	for (k = (int)s; k >= 0 && k > (int)s - P8X32A_JMAX; k--) {
 		p8x32a_jblk *b = p->jblk[n][k];
-		if (b && b->valid && (unsigned)k + b->len > s && !(b->dyn >> (s - (unsigned)k) & 1)) b->valid = 0;
+		if (b && b->valid && (unsigned)k + b->len > s && !(b->dyn >> (s - (unsigned)k) & 1)) jit_void(p, n, (unsigned)k);
 	}
 	p->jcode[n][s >> 3] &= (uint8_t)~(1u << (s & 7));
 }
 
+
+/* a translated block's hub read or write that event_run would run: as event_run runs it */
+static uint32_t jit_hub(p8x32a_jst *st)
+{
+	p8x32a *p = (p8x32a *)st->chip;
+	int n = (int)st->n;
+	p->now = st->latch + 2;
+	p->cog[n].latch = st->latch;
+	return hub_rw(p, n, st->hi, st->hs, st->hd, st->latch + 2, st->latch + 4, st->fl);
+}
+
+#ifdef P8X32A_CHECK
+static void jit_chk(p8x32a_jst *st)
+{
+	CHK_READ(st->ca, st->csz, st->latch + 2);
+}
+#endif
 
 /* the translated block for ix at cog address a */
 P8_INLINE p8x32a_jblk *jit_get(p8x32a *p, int n, unsigned a, uint32_t ix)
@@ -1332,8 +1358,20 @@ P8_INLINE p8x32a_jblk *jit_get(p8x32a *p, int n, unsigned a, uint32_t ix)
 		var[a] |= x;
 		if (var[a] & ~P8X32A_JDYN) { p->jit_refused++; return NULL; }
 	}
+	/* translating again frees the old code: resume entries taken from it are void */
+	if (b) p->jep[n]++;
 	b = p->jit_build(p->jit, b, a, ix, p->cog[n].ram, var, p->lz_on && n == p->lz);
 	p->jblk[n][a] = b;
+	if (b) {
+		p8x32a_jlink *ln = &p->jlink[n][a];
+		ln->body = b->body;
+		ln->word = b->words[0];
+		ln->mask = (b->dyn & 1) ? ~P8X32A_JDYN : ~0u;
+		ln->len = b->valid && b->len && b->fn ? b->len : ~0u;
+		ln->part = b->part;
+		ln->fn = b->fn;
+	}
+
 	if (b && b->valid)
 		for (k = 0; k < b->len; k++)
 			if (!(b->dyn >> k & 1)) p->jcode[n][(a + k) >> 3] |= (uint8_t)(1u << ((a + k) & 7));
@@ -1358,55 +1396,105 @@ static int run_local(p8x32a *p, int n, uint64_t t, uint64_t lim, unsigned gen)
 	int idled = 0, done = 0;
 	uint64_t t2in = t2, hub = 0;
 	p8x32a_jst st;
+	unsigned px = 0, jc = 0;
+	p8x32a_jblk *lb = NULL;
 
 	st.ram = ram;
 	st.code = p->jcode[n];
 	st.tab = p->jblk[n];
+	st.link = p->jlink[n];
 	st.loop = l;
 	st.par = (c->ptr >> 14) << 2;
+	st.t = t;
+	st.lim = p->stop || l->state != LOOP_SEARCH ? 0 : lim;
+	st.dis = dis;
+	st.pgen = &p->sched_gen;
+	st.gen = gen;
+	st.n = (unsigned)n;
+	st.chip = p;
+	st.hubfn = jit_hub;
+	st.pnow = &p->now;
+#ifdef P8X32A_CHECK
+	st.chkfn = jit_chk;
+#else
+	st.chkfn = NULL;
+#endif
+	st.tl = tl;
+	st.slot = p->slot_base + 3 + 2 * (uint64_t)n;
+	st.hub = p->hub;
 
 	if (c->ev == EV_HUB) {
 		uint64_t m3 = c->latch + 4;
 		if (OP(c->i) > 2 || m3 + 1 >= dis) return 0;
+		done = 1;
+		/* the translated block that issued this hub read or write completes it and runs on */
+		if (p->jres[n] && p->jres_ep[n] == p->jep[n] && p->jres_i[n] == c->i && p->jres_px[n] == c->px && m3 + 3 <= tl &&
+		    !(p->lz_on && n == p->lz)) {
+			st.hs = c->s;
+			st.hd = c->d;
+			st.latch = c->latch;
+			st.nix = c->nix;
+			pc = c->px;
+			ix = c->i;
+			e = &dec[(pc - 1) & 511];
+			goto resume;
+		}
 		fl = hub_rw(p, n, c->i, c->s, c->d, t2, m3, fl);
 		nins++;
 		pc = (c->px + 1) & 511;
 		fl = (fl & 3) | (c->px == 511) << 2;
 		ix = c->nix;
 		t2 = m3 + 3;
-		done = 1;
 	}
 	if (t2 > tl || dis < 2) goto limit;
 	for (;;) {
 		uint32_t s, d, r, nix;
-		unsigned px = pc, jc = 0;
+		px = pc;
+		jc = 0;
+		lb = NULL;
 		e = &dec[(pc - 1) & 511];
-		if (e->word != ix) dec_fill(e, ix);
+		if (p->jit_build && !(fl & 4)) {
+			/* a block linked at this address for this word runs without the decode and lookup below */
+			const p8x32a_jlink *ln = &p->jlink[n][(pc - 1) & 511];
+			if (ln->len != ~0u && !ln->part && !((ix ^ ln->word) & ln->mask) && t2 + 4 * (uint64_t)(ln->len - 1) <= tl)
+				lb = p->jblk[n][(pc - 1) & 511];
+		}
+		if (!lb && e->word != ix) dec_fill(e, ix);
 		/* event instructions are never translated */
-		if (p->jit_build && !(fl & 4) && (e->kind != K_NL || ((e->fl & (F_OUTA | F_HUBRD)) && p->lz_on && n == p->lz)) && !(e->fl & F_INA)) {
+		if (lb || (p->jit_build && !(fl & 4) && (e->kind != K_NL || (p->lz_on && n == p->lz ? e->fl & (F_OUTA | F_HUBRD) : e->jh)) && !(e->fl & F_INA))) {
 			unsigned a = (pc - 1) & 511;
-			p8x32a_jblk *b = jit_get(p, n, a, ix);
+			p8x32a_jblk *b = lb ? lb : jit_get(p, n, a, ix);
 			unsigned k;
 			if (b && b->len && (b->part ? t2 <= tl : t2 + 4 * (uint64_t)(b->len - 1) <= tl)) {
+				if (0) {
+					/* a resume entry (b NULL) runs first */
+				resume:
+					b = NULL;
+				}
 				l->nins = (uint16_t)(l->nins + nins);
 				nins = 0;
 				st.t2 = t2;
-				st.budget = b->part ? 0x7FFFFFFFu : (uint32_t)((tl - t2) / 4 + 1);
+				st.budget = b && b->part ? 0x7FFFFFFFu : (uint32_t)((tl - t2) / 4 + 1);
 				st.ix = ix;
 				st.fl = fl & 3;
-				st.inv = st.edge = 0;
-				if (b->part) {
+				st.inv = st.edge = st.hiss = 0;
+				if (!b) {
+					k = p->jres[n](&st);
+					c->latch = st.latch;
+				} else if (b->part) {
 					st.ot = p->jot;
 					st.ov = p->jov;
 					st.on = 0;
-					st.tl = tl;
-					st.slot = p->slot_base + 3 + 2 * (uint64_t)n;
-					st.hub = p->hub;
 					st.jmap = p->jmap;
 					st.latch = 0;
+					k = b->fn(&st);
+				} else {
+					/* a hub read or write run in the block leaves its slot here */
+					st.latch = c->latch;
+					k = b->fn(&st);
+					c->latch = st.latch;
 				}
-				k = b->fn(&st);
-				if (b->part) {
+				if (b && b->part) {
 					unsigned j;
 					if (st.latch) c->latch = st.latch;
 					for (j = 0; j < st.on; j++) lazy_outa(p, st.ov[j], st.ot[j]);
@@ -1418,7 +1506,7 @@ static int run_local(p8x32a *p, int n, uint64_t t, uint64_t lim, unsigned gen)
 				if (st.inv == ~0u) {
 					unsigned j;
 					for (j = 0; j < 512; j++)
-						if (p->jblk[n][j]) p->jblk[n][j]->valid = 0;
+						if (p->jblk[n][j]) jit_void(p, n, j);
 					memset(p->jcode[n], 0, sizeof(p->jcode[n]));
 				} else if (st.inv)
 					jit_written(p, n, st.inv - 1, st.inv_old);
@@ -1441,6 +1529,22 @@ static int run_local(p8x32a *p, int n, uint64_t t, uint64_t lim, unsigned gen)
 				else pc = st.pc;
 				fl |= (jc || px == 511) << 2;
 				ix = nix;
+				if (st.hiss) {
+					/* the block stopped before a hub read or write that must wait: issued as exec issues it */
+					c->i = ix;
+					c->cond = 1;
+					c->s = st.hs;
+					c->d = st.hd;
+					c->px = (uint16_t)pc;
+					c->nix = ram[pc];
+					c->latch = st.hlatch;
+					hub = st.hlatch + 2;
+					p->jres[n] = st.hres;
+					p->jres_i[n] = ix;
+					p->jres_px[n] = pc;
+					p->jres_ep[n] = p->jep[n];
+					break;
+				}
 				if (t2 > tl) {
 					if (t2 - 2 >= dis) { idled = 1; break; }
 					goto limit;
@@ -1448,6 +1552,7 @@ static int run_local(p8x32a *p, int n, uint64_t t, uint64_t lim, unsigned gen)
 				continue;
 			}
 		}
+		if (lb && e->word != ix) dec_fill(e, ix);
 		if (e->kind == K_NL || (e->fl & F_INA)) {
 			if (!((e->cond >> fl) & 1)) {
 				if (e->fl & F_INA) break;
@@ -1654,7 +1759,7 @@ static void jit_drop(p8x32a *p, int n)
 {
 	unsigned j;
 	for (j = 0; j < 512; j++)
-		if (p->jblk[n][j]) p->jblk[n][j]->valid = 0;
+		if (p->jblk[n][j]) jit_void(p, n, j);
 	memset(p->jcode[n], 0, sizeof(p->jcode[n]));
 }
 
@@ -1739,25 +1844,28 @@ static uint64_t ev_key(const p8x32a_cog *c, int n)
 
 void p8x32a_run_until(p8x32a *p, uint64_t t)
 {
-	uint64_t key[8];
+	uint64_t key[9];
 	unsigned kgen = p->sched_gen - 1;
 	p->horizon = t;
 	for (;;) {
-		int n, best;
-		uint64_t bk = P8X32A_NEVER, bk2 = P8X32A_NEVER;
+		int n, j, best;
+		uint64_t bk, bk2;
 		unsigned gen;
 		p8x32a_cog *b;
-		/* the keys change only for the cog that ran, unless sched_gen counts a change to another cog's event */
+		/* the keys, in order (a key holds its cog), change only for the cog that ran, unless sched_gen counts a change
+		   to another cog's event */
 		if (kgen != p->sched_gen) {
-			for (n = 0; n < 8; n++) key[n] = ev_key(&p->cog[n], n);
+			for (n = 0; n < 8; n++) {
+				uint64_t k = ev_key(&p->cog[n], n);
+				for (j = n; j > 0 && key[j - 1] > k; j--) key[j] = key[j - 1];
+				key[j] = k;
+			}
+			key[8] = P8X32A_NEVER;
 			kgen = p->sched_gen;
 		}
 		/* the next event, and bk2 the one after it */
-		for (n = 0; n < 8; n++) {
-			uint64_t k = key[n];
-			if (k < bk) { bk2 = bk; bk = k; }
-			else if (k < bk2) bk2 = k;
-		}
+		bk = key[0];
+		bk2 = key[1];
 		if (bk == P8X32A_NEVER) break;
 		best = (int)(bk & 7);
 		if (p->cog[best].ev_t > t || p->stop) break;
@@ -1765,10 +1873,9 @@ void p8x32a_run_until(p8x32a *p, uint64_t t)
 		gen = p->sched_gen;
 	again:
 		p->now = b->ev_t;
-		switch (b->ev) {
-		case EV_HUB:
+		if (b->ev == EV_HUB) {
 			if (!b->run || p->loop[best].state != LOOP_SEARCH || !run_local(p, best, t, bk2, gen)) do_hub(p, best);
-			break;
+		} else switch (b->ev) {
 		case EV_EXEC:
 			if (!b->run || p->loop[best].state != LOOP_SEARCH || !run_local(p, best, t, bk2, gen)) exec(p, best);
 			break;
@@ -1789,7 +1896,12 @@ void p8x32a_run_until(p8x32a *p, uint64_t t)
 		}
 		/* while no other cog's next event has changed, this cog goes again if it is still the earliest */
 		if (gen == p->sched_gen && b->ev != EV_NONE && b->ev_t <= t && !p->stop && ev_key(b, best) < bk2) goto again;
-		key[best] = ev_key(b, best);
+		/* best's new key moves back to its place */
+		{
+			uint64_t k = ev_key(b, best);
+			for (j = 0; key[j + 1] < k; j++) key[j] = key[j + 1];
+			key[j] = k;
+		}
 	}
 	lazy_catch(p, t);
 	flush(p, t);
@@ -1846,6 +1958,9 @@ void p8x32a_init(p8x32a *p, const p8x32a_bus *bus)
 	int n;
 	memset(p, 0, sizeof(*p));
 	p->bus = *bus;
-	for (n = 0; n < 8 * 512; n++) dec_fill(&p->dec[0][0] + n, 0);
+	for (n = 0; n < 8 * 512; n++) {
+		dec_fill(&p->dec[0][0] + n, 0);
+		(&p->jlink[0][0] + n)->len = ~0u;
+	}
 	p8x32a_reset(p, 0);
 }

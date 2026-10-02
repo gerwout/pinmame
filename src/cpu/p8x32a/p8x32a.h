@@ -73,11 +73,21 @@ typedef struct p8x32a_loop {
 #define P8X32A_JDYN 0x3FFFFu /* the S and D fields: a slot whose words differ only here is read at run time */
 
 typedef struct p8x32a_jblk p8x32a_jblk;
+struct p8x32a_jst;
+
+/* what a block's exit needs of the block at a cog address: its entry for another block, the word it starts with
+   under mask (~P8X32A_JDYN when slot 0 is read at run time), and its length (~0: none to run) */
+typedef struct p8x32a_jlink {
+	const void *body;
+	uint32_t word, mask, len, part; /* part: a lazy cog's block */
+	uint32_t (*fn)(struct p8x32a_jst *st); /* its entry from run_local */
+} p8x32a_jlink;
 
 typedef struct p8x32a_jst {
 	uint32_t *ram;
 	const uint8_t *code; /* bit s: slot s is a fixed word of a block; a write that changes it is reported in inv */
 	p8x32a_jblk **tab;   /* the cog's blocks by address */
+	const p8x32a_jlink *link; /* and their links */
 	p8x32a_loop *loop;
 	uint64_t t2;
 	uint32_t budget, ix, fl, pc, px, nix, jmp, jc, edge, w, s, d; /* pc: of the last instruction run */
@@ -90,6 +100,19 @@ typedef struct p8x32a_jst {
 	const uint8_t *hub;
 	const uint8_t *jmap;   /* hub longs with a journal entry (p8x32a.jmap): a block stops before reading one */
 	uint32_t par;          /* the cog's PAR (CNT is the time) */
+	/* a block's last hub read or write (not a lazy cog's) runs at once while run_local's event_run would run it: its
+	   time h <= t, h's key below lim, latch + 5 < dis and *pgen == gen; hubfn runs it (st->latch its slot, hi the
+	   instruction, hs and hd its operands, fl the flags) and returns fl. Else the block stops before it with hiss = 1,
+	   hs and hd its operands and hlatch its slot. Blocks call C with st as the only argument */
+	uint64_t t, lim, dis, hlatch;
+	const unsigned *pgen;
+	unsigned gen, n, hiss, hs, hd, hi;
+	uint32_t (*hres)(struct p8x32a_jst *st); /* with hiss: the block's resume entry */
+	void *chip;
+	uint32_t (*hubfn)(struct p8x32a_jst *st);
+	uint64_t *pnow;        /* p8x32a.now, set to h by a block's hub read as event_run sets it */
+	uint32_t ca, csz;      /* test builds: chkfn checks a block's hub read of csz bytes at ca, at st->latch + 2 */
+	void (*chkfn)(struct p8x32a_jst *st);
 } p8x32a_jst;
 #define P8X32A_JOUT 256 /* the OUTA writes a run of blocks may leave */
 #define P8X32A_JN 64    /* journal entries */
@@ -113,7 +136,7 @@ typedef p8x32a_jblk *(*p8x32a_jit_fn)(void *jit, p8x32a_jblk *old, unsigned a, u
 typedef struct p8x32a_dec {
 	uint32_t word;
 	uint16_t src, dst;
-	uint8_t kind, fl, cond, pad;
+	uint8_t kind, fl, cond, jh; /* jh: a hub read or write a translated block may end with */
 } p8x32a_dec;
 
 typedef struct p8x32a {
@@ -157,6 +180,12 @@ typedef struct p8x32a {
 	p8x32a_jit_fn jit_build; /* NULL: no translation */
 	void *jit;
 	p8x32a_jblk *jblk[8][512];
+	p8x32a_jlink jlink[8][512];
+	/* the resume entry of the block that issued cog n's hub read or write jres_i at jres_px - 1, while jep[n] (counts the
+	   cog's blocks translated again, which frees their code) is jres_ep[n] */
+	uint32_t (*jres[8])(p8x32a_jst *st);
+	uint32_t jres_i[8];
+	unsigned jres_px[8], jres_ep[8], jep[8];
 	uint32_t jvar[8][512];
 	uint64_t jit_refused; /* block lookups left to the interpreter: the slot's word changed beyond its S and D fields */
 	uint8_t jcode[8][64];

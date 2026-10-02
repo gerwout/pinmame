@@ -95,6 +95,13 @@ rtl_case() {
 	./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args -quantum 400000 -dump "$o.qhub" > "$o.q" 2> "$o.qlog"
 	if cmp -s "$o.rtl" "$o.q" && cmp -s "$o.rtlhub" "$o.qhub" && ! grep -q "p8x32a: time order" "$o.qlog"; then pass=$((pass + 1))
 	else echo "RTL MISMATCH $1 (-quantum 400000)"; diff "$o.rtl" "$o.q" | head -6; grep "p8x32a: time order" "$o.qlog"; fail=$((fail + 1)); fi
+	# the same run from cycle 2^36: a time or a scheduling key cut to 32 bits shows
+	./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args -t0 68719476736 -dump "$o.thub" > "$o.t" 2> "$o.tlog"
+	if cmp -s "$o.rtl" "$o.t" && cmp -s "$o.rtlhub" "$o.thub" && ! grep -q "p8x32a: time order" "$o.tlog"; then pass=$((pass + 1))
+	else echo "RTL MISMATCH $1 (-t0 68719476736)"; diff "$o.rtl" "$o.t" | head -6; grep "p8x32a: time order" "$o.tlog"; fail=$((fail + 1)); fi
+	./$B/p8run -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args -t0 68719476736 -quantum 400000 -dump "$o.tqhub" > "$o.tq" 2> "$o.tqlog"
+	if cmp -s "$o.rtl" "$o.tq" && cmp -s "$o.rtlhub" "$o.tqhub" && ! grep -q "p8x32a: time order" "$o.tqlog"; then pass=$((pass + 1))
+	else echo "RTL MISMATCH $1 (-t0 68719476736 -quantum 400000)"; diff "$o.rtl" "$o.tq" | head -6; grep "p8x32a: time order" "$o.tqlog"; fail=$((fail + 1)); fi
 	# EXPECT-CLKSHIFT: d v = with CLKSET moving queued edges d cycles earlier, the long at $6000 is v
 	set -- "$1" $(sed -n "s/^' EXPECT-CLKSHIFT: //p" "$1")
 	[ $# -eq 3 ] || return
@@ -141,6 +148,46 @@ else pass=$((pass + 1)); fi
 TOOLS=$TOOLS ./mutate_lazy.sh || fail=$((fail + 1))
 # mutations of the time order, the scheduler's keys, the translator's restart and special sources
 TOOLS=$TOOLS ./mutate_core.sh || fail=$((fail + 1))
+
+# PINHECK_WINE=1: the chip and isa cases translated in a Windows x64 p8run under wine (the Win64 calling convention
+# of the blocks' calls into C); WIN_CC and WIN_CXX name a mingw-w64 C and C++ compiler
+if [ "${PINHECK_WINE:-0}" = 1 ]; then
+	WIN_CC=${WIN_CC:-x86_64-w64-mingw32-gcc} WIN_CXX=${WIN_CXX:-x86_64-w64-mingw32-g++}
+	W=$B/win ASMJIT=../../../ext/asmjit ZLIB=../../../ext/zlib
+	JF="-O2 -std=c++17 -DASMJIT_STATIC -DASMJIT_NO_FOREIGN -DASMJIT_NO_UJIT -I$ASMJIT"
+	mkdir -p $W/asmjit $W/zlib $W/obj
+	if [ ! -f $W/asmjit/libasmjit.a ]; then
+		for f in $ASMJIT/asmjit/core/*.cpp $ASMJIT/asmjit/x86/*.cpp $ASMJIT/asmjit/support/*.cpp; do
+			$WIN_CXX $JF -c "$f" -o $W/asmjit/$(basename "$f" .cpp).o || exit 2
+		done
+		x86_64-w64-mingw32-ar rcs $W/asmjit/libasmjit.a $W/asmjit/*.o || exit 2
+	fi
+	if [ ! -f $W/zlib/libz.a ]; then
+		for f in $ZLIB/*.c; do $WIN_CC -O2 -c "$f" -o $W/zlib/$(basename "$f" .c).o || exit 2; done
+		x86_64-w64-mingw32-ar rcs $W/zlib/libz.a $W/zlib/*.o || exit 2
+	fi
+	$WIN_CXX $JF -Wall -Wextra -Werror -I$CORE -c $CORE/p8x32ajit.cpp -o $W/obj/jit.o || exit 2
+	for f in run.c $CORE/p8x32a.c $DEV/eeprom.c $DEV/sd.c $DEV/vfat.c $DEV/zipsrc.c; do
+		$WIN_CC -O2 -std=c99 -DP8X32A_JIT -DP8X32A_CHECK -I$CORE -I$DEV -I$ZLIB -c "$f" -o $W/obj/$(basename "$f" .c).o || exit 2
+	done
+	$WIN_CXX -static -o $W/p8run.exe $W/obj/*.o $W/asmjit/libasmjit.a $W/zlib/libz.a || exit 2
+	# a private prefix; a crash ends the run (no debugger)
+	WP=$PWD/$W/pfx
+	rm -rf "${WP:?}"
+	for f in chip/*.spin isa/*.spin; do
+		o=$B/rtl/$(basename "$f" .spin)
+		args=$(sed -n "s/^' ARGS: //p" "$f")
+		for qa in "" "-quantum 400000 -t0 68719476736"; do
+			WINEPREFIX=$WP WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 5 120 wine $W/p8run.exe -rom "$o.rom" -ram "$o.ram" -halt -cycles 400000 $args $qa -dump "$o.whub" > "$o.wraw" 2> "$o.wlog"
+			tr -d '\r' < "$o.wraw" > "$o.w"
+			if cmp -s "$o.rtl" "$o.w" && cmp -s "$o.rtlhub" "$o.whub" && ! grep -q "time order" "$o.wlog"; then pass=$((pass + 1))
+			else echo "WINE MISMATCH $f ($qa): $(head -c 200 "$o.wlog")"; fail=$((fail + 1)); fi
+		done
+	done
+	WINEPREFIX=$WP wineserver -k > /dev/null 2>&1
+	rm -rf "${WP:?}"
+	echo "p8run.exe: translated under wine"
+fi
 
 boot_case() {
 	ext=$1
