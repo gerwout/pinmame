@@ -234,7 +234,8 @@ if [ "$1" = contention ]; then
 			[ $n -eq 0 ] || { echo "CONTENTION FAIL stall: \"$log\" logged"; fail=1; }
 			continue
 		fi
-		[ $n -gt 0 ] || { echo "CONTENTION FAIL $m: \"$log\" not logged"; fail=1; }
+		# busy: the worker may stay on where it is not 15% slower; the speed bound below decides
+		[ $n -gt 0 ] || [ $m = busy ] || { echo "CONTENTION FAIL $m: \"$log\" not logged"; fail=1; }
 		awk "BEGIN { exit !($s >= $need * $s0) }" || { echo "CONTENTION FAIL $m: slower than $need of the run without the worker thread"; fail=1; }
 	done
 	[ $fail -eq 0 ] && echo "contention: ok"
