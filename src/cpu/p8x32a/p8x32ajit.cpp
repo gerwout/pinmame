@@ -93,6 +93,7 @@ void parity_to_r11(x86::Assembler &a)
 struct Emit {
 	x86::Assembler &a;
 	const FuncFrame &frame;
+	const FuncDetail &func;
 	unsigned base;
 	uint64_t tail, tail_ret;
 	bool outa;
@@ -195,20 +196,11 @@ struct Emit {
 			// test builds: the time-order check of the read
 			a.cmp(x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, chkfn)), 0);
 			a.je(nochk);
-			a.push(x86::r8);
-			a.push(x86::r9);
-			a.push(x86::r10);
-			a.push(x86::rcx);
-			a.mov(x86::rdi, ST);
-			a.mov(x86::esi, x86::ecx);
-			a.mov(x86::edx, sz);
-			a.sub(x86::rsp, 8);
-			a.call(x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, chkfn)));
-			a.add(x86::rsp, 8);
-			a.pop(x86::rcx);
-			a.pop(x86::r10);
-			a.pop(x86::r9);
-			a.pop(x86::r8);
+			a.mov(stf(offsetof(p8x32a_jst, ca)), x86::ecx);
+			a.mov(stf(offsetof(p8x32a_jst, csz)), sz);
+			a.mov(stf(offsetof(p8x32a_jst, fl)), FL);
+			ccall(offsetof(p8x32a_jst, chkfn));
+			a.mov(x86::ecx, stf(offsetof(p8x32a_jst, ca)));
 			a.bind(nochk);
 			a.mov(x86::rdi, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, hub)));
 			if (op == 0) a.movzx(x86::eax, x86::byte_ptr(x86::rdi, x86::rcx));
@@ -243,20 +235,31 @@ struct Emit {
 		}
 		hub_call(i);
 	}
-	// hubfn(st, s = ecx, d = edx, i, FL) into FL; r8-r10 kept (the stack is 16-byte aligned after three pushes)
+	// hubfn for i with s = ecx, d = edx and FL, into FL
 	void hub_call(uint32_t i)
 	{
-		a.push(x86::r8);
-		a.push(x86::r9);
-		a.push(x86::r10);
-		a.mov(x86::rdi, ST);
-		a.mov(x86::esi, x86::ecx);
-		a.mov(x86::ecx, i);
-		a.call(x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, hubfn)));
-		a.pop(x86::r10);
-		a.pop(x86::r9);
-		a.pop(x86::r8);
+		a.mov(stf(offsetof(p8x32a_jst, hs)), x86::ecx);
+		a.mov(stf(offsetof(p8x32a_jst, hd)), x86::edx);
+		a.mov(stf(offsetof(p8x32a_jst, hi)), i);
+		a.mov(stf(offsetof(p8x32a_jst, fl)), FL);
+		ccall(offsetof(p8x32a_jst, hubfn));
 		a.mov(FL, x86::eax);
+	}
+	// a call of the C function at st + off with st its one argument, in the target's convention (its register,
+	// Win64's shadow space, the stack 16-byte aligned); ST, RAM and FL (from st.fl) kept, rax its result
+	void ccall(size_t off)
+	{
+		// the bytes pushed since the 16-byte aligned point before the block's own call: return address, frame, ST
+		uint32_t below = 8 + frame.push_pop_save_size() + frame.stack_adjustment() + 8;
+		uint32_t room = func.call_conv().spill_zone_size() + (16 - below % 16) % 16;
+		a.push(ST);
+		if (room) a.sub(x86::rsp, room);
+		a.mov(x86::gpq(func.arg(0).reg_id()), ST);
+		a.call(x86::qword_ptr(ST, (int)off));
+		if (room) a.add(x86::rsp, room);
+		a.pop(ST);
+		a.mov(RAM, x86::qword_ptr(ST, (int)offsetof(p8x32a_jst, ram)));
+		a.mov(FL, stf(offsetof(p8x32a_jst, fl)));
 	}
 	// k instructions ran in this block; the last one's exit state is in st
 	void leave(unsigned k)
@@ -860,7 +863,7 @@ extern "C" p8x32a_jblk *p8x32a_jit_build(void *jit, p8x32a_jblk *old, unsigned a
 	Label res = as.new_label();
 	bool writes = false;
 	for (k = 0; k < len; k++) writes = writes || fwr(b->words[k]) || (b->dyn >> k & 1);
-	Emit e = { as, frame, a, outa ? j->ltail : j->tail, outa ? j->ltail_ret : j->tail_ret, outa != 0, res, j->edge, writes };
+	Emit e = { as, frame, func, a, outa ? j->ltail : j->tail, outa ? j->ltail_ret : j->tail_ret, outa != 0, res, j->edge, writes };
 	for (k = 0; k < len; k++) {
 		bool last = k + 1 == len, next_dyn = !last && (b->dyn >> (k + 1) & 1);
 		if (outa) {

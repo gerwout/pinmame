@@ -1329,19 +1329,19 @@ static void jit_written(p8x32a *p, int n, unsigned s, uint32_t old)
 
 
 /* a translated block's hub read or write that event_run would run: as event_run runs it */
-static uint32_t jit_hub(p8x32a_jst *st, uint32_t s, uint32_t d, uint32_t i, uint32_t fl)
+static uint32_t jit_hub(p8x32a_jst *st)
 {
 	p8x32a *p = (p8x32a *)st->chip;
 	int n = (int)st->n;
 	p->now = st->latch + 2;
 	p->cog[n].latch = st->latch;
-	return hub_rw(p, n, i, s, d, st->latch + 2, st->latch + 4, fl);
+	return hub_rw(p, n, st->hi, st->hs, st->hd, st->latch + 2, st->latch + 4, st->fl);
 }
 
 #ifdef P8X32A_CHECK
-static void jit_chk(p8x32a_jst *st, uint32_t a, uint32_t sz)
+static void jit_chk(p8x32a_jst *st)
 {
-	CHK_READ(a, sz, st->latch + 2);
+	CHK_READ(st->ca, st->csz, st->latch + 2);
 }
 #endif
 

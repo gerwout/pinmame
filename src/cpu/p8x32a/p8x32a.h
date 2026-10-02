@@ -101,16 +101,18 @@ typedef struct p8x32a_jst {
 	const uint8_t *jmap;   /* hub longs with a journal entry (p8x32a.jmap): a block stops before reading one */
 	uint32_t par;          /* the cog's PAR (CNT is the time) */
 	/* a block's last hub read or write (not a lazy cog's) runs at once while run_local's event_run would run it: its
-	   time h <= t, h's key below lim, latch + 5 < dis and *pgen == gen; hubfn runs it (st->latch its slot) and returns
-	   fl. Else the block stops before it with hiss = 1, hs and hd its operands and hlatch its slot */
+	   time h <= t, h's key below lim, latch + 5 < dis and *pgen == gen; hubfn runs it (st->latch its slot, hi the
+	   instruction, hs and hd its operands, fl the flags) and returns fl. Else the block stops before it with hiss = 1,
+	   hs and hd its operands and hlatch its slot. Blocks call C with st as the only argument */
 	uint64_t t, lim, dis, hlatch;
 	const unsigned *pgen;
-	unsigned gen, n, hiss, hs, hd;
+	unsigned gen, n, hiss, hs, hd, hi;
 	uint32_t (*hres)(struct p8x32a_jst *st); /* with hiss: the block's resume entry */
 	void *chip;
-	uint32_t (*hubfn)(struct p8x32a_jst *st, uint32_t s, uint32_t d, uint32_t i, uint32_t fl);
+	uint32_t (*hubfn)(struct p8x32a_jst *st);
 	uint64_t *pnow;        /* p8x32a.now, set to h by a block's hub read as event_run sets it */
-	void (*chkfn)(struct p8x32a_jst *st, uint32_t a, uint32_t sz); /* test builds: a block's hub read at st->latch + 2 */
+	uint32_t ca, csz;      /* test builds: chkfn checks a block's hub read of csz bytes at ca, at st->latch + 2 */
+	void (*chkfn)(struct p8x32a_jst *st);
 } p8x32a_jst;
 #define P8X32A_JOUT 256 /* the OUTA writes a run of blocks may leave */
 #define P8X32A_JN 64    /* journal entries */
