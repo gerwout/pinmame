@@ -261,11 +261,10 @@ static uint64_t ctr_toggle(const p8x32a_cog *c, int k, uint64_t t)
 }
 
 /* the next counter pin change after t; cached, per counter and in all, until a counter changes or t reaches it */
-static uint64_t ctr_next(p8x32a *p, uint64_t t)
+P8_COLD uint64_t ctr_scan(p8x32a *p, uint64_t t)
 {
 	uint64_t nt = P8X32A_NEVER;
 	int k;
-	if (p->ctr_ok && t >= p->ctr_from && t < p->ctr_nt) return p->ctr_nt;
 	for (k = 0; k < p->nco_n; k++) {
 		int j = p->nco_list[k];
 		if (!(p->nco_ok >> j & 1) || t < p->nco_from[j] || t >= p->nco_nt[j]) {
@@ -279,6 +278,12 @@ static uint64_t ctr_next(p8x32a *p, uint64_t t)
 	p->ctr_from = t;
 	p->ctr_nt = nt;
 	return nt;
+}
+
+P8_INLINE uint64_t ctr_next(p8x32a *p, uint64_t t)
+{
+	if (p->ctr_ok && t >= p->ctr_from && t < p->ctr_nt) return p->ctr_nt;
+	return ctr_scan(p, t);
 }
 
 uint32_t p8x32a_pins(p8x32a *p, uint64_t t, uint32_t *dir)
@@ -319,7 +324,7 @@ static uint32_t pins_nco(p8x32a *p, uint64_t t, int full)
 
 /* pins_nco(p, when, 0) and the next ctr_next(p, when) in one pass: the counters that change at when flip and get
    their next change; when is ctr_next(p->flushed), so every listed counter's next change is cached */
-static uint64_t nco_step(p8x32a *p, uint64_t when, uint32_t *out)
+P8_INLINE uint64_t nco_step(p8x32a *p, uint64_t when, uint32_t *out)
 {
 	uint32_t o = p->reg_out;
 	uint64_t nt = P8X32A_NEVER;
@@ -359,7 +364,7 @@ static void pins_regs(p8x32a *p, uint64_t t)
 
 /* a pending point at t where only the registers in what change (the others keep their state since the last one):
    those cogs' OUTA and DIRA and those counters' levels are evaluated, the other counters flip if they change at t */
-static uint32_t pins_what(p8x32a *p, uint64_t t, uint32_t what)
+P8_INLINE uint32_t pins_what(p8x32a *p, uint64_t t, uint32_t what)
 {
 	uint32_t o, d = 0;
 	int k, n;
@@ -566,10 +571,10 @@ static void lazy_due(p8x32a *p, uint64_t t)
 	p->lz_nh = (uint8_t)(p->lz_nh - k);
 }
 
-static void special_write(p8x32a *p, int n, unsigned a, uint32_t v, uint64_t m3)
+/* the counter and video registers (and the lazy cog's cases) of special_write */
+P8_COLD void special_rare(p8x32a *p, int n, unsigned a, uint32_t v, uint64_t e)
 {
 	p8x32a_cog *c = &p->cog[n];
-	uint64_t e = m3 + 1;
 	int k = a & 1;
 	if (p->lz_on) {
 		if (n == p->lz && a == 0x1F4) { lazy_outa(p, v, e); return; }
@@ -585,6 +590,13 @@ static void special_write(p8x32a *p, int n, unsigned a, uint32_t v, uint64_t m3)
 	case 0x1FE: c->vcfg = v; break;
 	case 0x1FF: c->vscl = v; break;
 	}
+}
+
+P8_INLINE void special_write(p8x32a *p, int n, unsigned a, uint32_t v, uint64_t m3)
+{
+	p8x32a_cog *c = &p->cog[n];
+	if (a == 0x1F4 && (!p->lz_on || n != p->lz)) regset(p, n, &c->outa, v, m3 + 1);
+	else special_rare(p, n, a, v, m3 + 1);
 }
 
 static uint32_t sread(p8x32a *p, int n, unsigned a, uint64_t t)
