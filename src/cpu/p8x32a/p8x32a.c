@@ -1368,6 +1368,8 @@ P8_INLINE p8x32a_jblk *jit_get(p8x32a *p, int n, unsigned a, uint32_t ix)
 		ln->word = b->words[0];
 		ln->mask = (b->dyn & 1) ? ~P8X32A_JDYN : ~0u;
 		ln->len = b->valid && b->len && b->fn ? b->len : ~0u;
+		ln->part = b->part;
+		ln->fn = b->fn;
 	}
 
 	if (b && b->valid)
@@ -1395,6 +1397,7 @@ static int run_local(p8x32a *p, int n, uint64_t t, uint64_t lim, unsigned gen)
 	uint64_t t2in = t2, hub = 0;
 	p8x32a_jst st;
 	unsigned px = 0, jc = 0;
+	p8x32a_jblk *lb = NULL;
 
 	st.ram = ram;
 	st.code = p->jcode[n];
@@ -1449,12 +1452,19 @@ static int run_local(p8x32a *p, int n, uint64_t t, uint64_t lim, unsigned gen)
 		uint32_t s, d, r, nix;
 		px = pc;
 		jc = 0;
+		lb = NULL;
 		e = &dec[(pc - 1) & 511];
-		if (e->word != ix) dec_fill(e, ix);
+		if (p->jit_build && !(fl & 4)) {
+			/* a block linked at this address for this word runs without the decode and lookup below */
+			const p8x32a_jlink *ln = &p->jlink[n][(pc - 1) & 511];
+			if (ln->len != ~0u && !ln->part && !((ix ^ ln->word) & ln->mask) && t2 + 4 * (uint64_t)(ln->len - 1) <= tl)
+				lb = p->jblk[n][(pc - 1) & 511];
+		}
+		if (!lb && e->word != ix) dec_fill(e, ix);
 		/* event instructions are never translated */
-		if (p->jit_build && !(fl & 4) && (e->kind != K_NL || (p->lz_on && n == p->lz ? e->fl & (F_OUTA | F_HUBRD) : e->jh)) && !(e->fl & F_INA)) {
+		if (lb || (p->jit_build && !(fl & 4) && (e->kind != K_NL || (p->lz_on && n == p->lz ? e->fl & (F_OUTA | F_HUBRD) : e->jh)) && !(e->fl & F_INA))) {
 			unsigned a = (pc - 1) & 511;
-			p8x32a_jblk *b = jit_get(p, n, a, ix);
+			p8x32a_jblk *b = lb ? lb : jit_get(p, n, a, ix);
 			unsigned k;
 			if (b && b->len && (b->part ? t2 <= tl : t2 + 4 * (uint64_t)(b->len - 1) <= tl)) {
 				if (0) {
@@ -1543,6 +1553,7 @@ static int run_local(p8x32a *p, int n, uint64_t t, uint64_t lim, unsigned gen)
 				continue;
 			}
 		}
+		if (lb && e->word != ix) dec_fill(e, ix);
 		if (e->kind == K_NL || (e->fl & F_INA)) {
 			if (!((e->cond >> fl) & 1)) {
 				if (e->fl & F_INA) break;

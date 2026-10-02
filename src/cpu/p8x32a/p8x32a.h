@@ -73,13 +73,14 @@ typedef struct p8x32a_loop {
 #define P8X32A_JDYN 0x3FFFFu /* the S and D fields: a slot whose words differ only here is read at run time */
 
 typedef struct p8x32a_jblk p8x32a_jblk;
+struct p8x32a_jst;
 
 /* what a block's exit needs of the block at a cog address: its entry for another block, the word it starts with
    under mask (~P8X32A_JDYN when slot 0 is read at run time), and its length (~0: none to run) */
 typedef struct p8x32a_jlink {
 	const void *body;
-	uint32_t word, mask, len, pad;
-	uint64_t pad2;
+	uint32_t word, mask, len, part; /* part: a lazy cog's block */
+	uint32_t (*fn)(struct p8x32a_jst *st); /* its entry from run_local */
 } p8x32a_jlink;
 
 typedef struct p8x32a_jst {
