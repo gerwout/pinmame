@@ -102,7 +102,7 @@ mutant restart-drop p8x32a.c '		jit_drop(p, n);
 		memset(p->jvar[n]' '		memset(p->jvar[n]' 1
 # the scheduler's key of the cog that ran left as it was when its next event is a hub operation; another cog's
 # event moved without sched_gen counting it: by a system operation, a sleeper woken by a pin change or a hub write
-mutant keys-ran p8x32a.c '		key[best] = ev_key(b, best);' '		if (b->ev != EV_HUB) key[best] = ev_key(b, best);' 0
+mutant keys-ran p8x32a.c '			uint64_t k = ev_key(b, best);' '			uint64_t k = b->ev == EV_HUB ? bk : ev_key(b, best);' 0
 mutant gen-sys p8x32a.c '	p->sched_gen++;
 	while (newx' '	while (newx' 0
 mutant gen-notify p8x32a.c '(pins & p->loop[n].wake) && t < p->cog[n].ev_t) { p->cog[n].ev_t = t; p->sched_gen++; }' \

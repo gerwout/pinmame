@@ -1739,25 +1739,28 @@ static uint64_t ev_key(const p8x32a_cog *c, int n)
 
 void p8x32a_run_until(p8x32a *p, uint64_t t)
 {
-	uint64_t key[8];
+	uint64_t key[9];
 	unsigned kgen = p->sched_gen - 1;
 	p->horizon = t;
 	for (;;) {
-		int n, best;
-		uint64_t bk = P8X32A_NEVER, bk2 = P8X32A_NEVER;
+		int n, j, best;
+		uint64_t bk, bk2;
 		unsigned gen;
 		p8x32a_cog *b;
-		/* the keys change only for the cog that ran, unless sched_gen counts a change to another cog's event */
+		/* the keys, in order (a key holds its cog), change only for the cog that ran, unless sched_gen counts a change
+		   to another cog's event */
 		if (kgen != p->sched_gen) {
-			for (n = 0; n < 8; n++) key[n] = ev_key(&p->cog[n], n);
+			for (n = 0; n < 8; n++) {
+				uint64_t k = ev_key(&p->cog[n], n);
+				for (j = n; j > 0 && key[j - 1] > k; j--) key[j] = key[j - 1];
+				key[j] = k;
+			}
+			key[8] = P8X32A_NEVER;
 			kgen = p->sched_gen;
 		}
 		/* the next event, and bk2 the one after it */
-		for (n = 0; n < 8; n++) {
-			uint64_t k = key[n];
-			if (k < bk) { bk2 = bk; bk = k; }
-			else if (k < bk2) bk2 = k;
-		}
+		bk = key[0];
+		bk2 = key[1];
 		if (bk == P8X32A_NEVER) break;
 		best = (int)(bk & 7);
 		if (p->cog[best].ev_t > t || p->stop) break;
@@ -1765,10 +1768,9 @@ void p8x32a_run_until(p8x32a *p, uint64_t t)
 		gen = p->sched_gen;
 	again:
 		p->now = b->ev_t;
-		switch (b->ev) {
-		case EV_HUB:
+		if (b->ev == EV_HUB) {
 			if (!b->run || p->loop[best].state != LOOP_SEARCH || !run_local(p, best, t, bk2, gen)) do_hub(p, best);
-			break;
+		} else switch (b->ev) {
 		case EV_EXEC:
 			if (!b->run || p->loop[best].state != LOOP_SEARCH || !run_local(p, best, t, bk2, gen)) exec(p, best);
 			break;
@@ -1789,7 +1791,12 @@ void p8x32a_run_until(p8x32a *p, uint64_t t)
 		}
 		/* while no other cog's next event has changed, this cog goes again if it is still the earliest */
 		if (gen == p->sched_gen && b->ev != EV_NONE && b->ev_t <= t && !p->stop && ev_key(b, best) < bk2) goto again;
-		key[best] = ev_key(b, best);
+		/* best's new key moves back to its place */
+		{
+			uint64_t k = ev_key(b, best);
+			for (j = 0; key[j + 1] < k; j++) key[j] = key[j + 1];
+			key[j] = k;
+		}
 	}
 	lazy_catch(p, t);
 	flush(p, t);
