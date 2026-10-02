@@ -61,6 +61,22 @@ static uint32_t rd32(const p8x32a *p, uint32_t a)
 	return p->hub[a] | (uint32_t)p->hub[a + 1] << 8 | (uint32_t)p->hub[a + 2] << 16 | (uint32_t)p->hub[a + 3] << 24;
 }
 
+/* writes the low sz (1, 2 or 4) bytes of v at hub address a; nonzero if any byte changed */
+P8_INLINE int hub_store(p8x32a *p, unsigned a, unsigned sz, uint32_t v)
+{
+	uint8_t *h = p->hub + a;
+	int ch = h[0] != (uint8_t)v;
+	h[0] = (uint8_t)v;
+	if (sz == 1) return ch;
+	ch |= h[1] != (uint8_t)(v >> 8);
+	h[1] = (uint8_t)(v >> 8);
+	if (sz == 2) return ch;
+	ch |= h[2] != (uint8_t)(v >> 16) || h[3] != (uint8_t)(v >> 24);
+	h[2] = (uint8_t)(v >> 16);
+	h[3] = (uint8_t)(v >> 24);
+	return ch;
+}
+
 static uint32_t regval(const p8x32a_reg *r, uint64_t t) { return t >= r->at ? r->cur : r->prev; }
 
 #ifdef P8X32A_CHECK
@@ -1093,15 +1109,10 @@ static void do_hub(p8x32a *p, int n)
 		if (FWR(c->i) || !c->run) CHK_READ(c->run ? a & ~((op == 2 ? 4u : op == 1 ? 2u : 1u) - 1) : a & 0xFFFC, c->run ? (op == 2 ? 4 : op == 1 ? 2 : 1) : 4, h);
 		if (!FWR(c->i) && a < 0x8000) {
 			uint32_t v = c->d;
-			unsigned sz = op == 2 ? 4 : op == 1 ? 2 : 1, ha = a & ~(sz - 1), k;
-			int changed = 0;
+			unsigned sz = op == 2 ? 4 : op == 1 ? 2 : 1, ha = a & ~(sz - 1);
 			CHK_WRITE(ha, sz, h);
 			if (p->lz_on) lazy_write(p, ha, sz, v, h);
-			for (k = 0; k < sz; k++) {
-				changed |= p->hub[ha + k] != (uint8_t)(v >> (8 * k));
-				p->hub[ha + k] = (uint8_t)(v >> (8 * k));
-			}
-			if (changed) {
+			if (hub_store(p, ha, sz, v)) {
 				p->loop[n].dirty = 1;
 				if (p->sleepers) loop_hub_write(p, n, ha, sz, h);
 			}
@@ -1249,15 +1260,10 @@ static unsigned hub_rw(p8x32a *p, int n, uint32_t i, uint32_t s, uint32_t d, uin
 	unsigned op = OP(i), dst = DST(i);
 	if (FWR(i) && !(p->lz_on && n == p->lz)) CHK_READ(a & ~((op == 2 ? 4u : op == 1 ? 2u : 1u) - 1), op == 2 ? 4 : op == 1 ? 2 : 1, h);
 	if (!FWR(i) && a < 0x8000) {
-		unsigned sz = op == 2 ? 4 : op == 1 ? 2 : 1, ha = a & ~(sz - 1), k;
-		int changed = 0;
+		unsigned sz = op == 2 ? 4 : op == 1 ? 2 : 1, ha = a & ~(sz - 1);
 		CHK_WRITE(ha, sz, h);
 		if (p->lz_on) lazy_write(p, ha, sz, d, h);
-		for (k = 0; k < sz; k++) {
-			changed |= p->hub[ha + k] != (uint8_t)(d >> (8 * k));
-			p->hub[ha + k] = (uint8_t)(d >> (8 * k));
-		}
-		if (changed) {
+		if (hub_store(p, ha, sz, d)) {
 			l->dirty = 1;
 			if (p->sleepers) loop_hub_write(p, n, ha, sz, h);
 		}

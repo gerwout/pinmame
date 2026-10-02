@@ -653,7 +653,7 @@ static int fast_run(mips32_state *s, uint64_t lim)
 	uint32_t pc = s->pc, npc = s->npc, fva = s->fva, fsize = s->fsize;
 	const uint8_t *fptr = s->fptr;
 	uint64_t cyc = s->cycles;
-	int delay = s->delay, n = 0, kern = !USER(s), erl = (s->status & ST_ERL) != 0, ds = s->dslot;
+	int delay = s->delay, n = 0, kern = !USER(s), erl = (s->status & ST_ERL) != 0, ds = s->dslot, ws = -1;
 
 	if (!fsize) return 0;
 	while (cyc < lim) {
@@ -803,8 +803,10 @@ static int fast_run(mips32_state *s, uint64_t lim)
 			if (ea < 0x80000000u) pa = erl ? ea : ea + 0x40000000u;
 			else if (kern && ea < 0xC0000000u) pa = ea & 0x1FFFFFFFu;
 			else goto out;
-			k = direct_slot(s, pa, sz, 1);
-			if (k < 0) goto out;
+			/* the last store's region first */
+			if (ws >= 0 && pa - s->region[ws].base < s->region[ws].size && s->region[ws].size - (pa - s->region[ws].base) >= sz) k = ws;
+			else if ((k = direct_slot(s, pa, sz, 1)) < 0) goto out;
+			ws = k;
 			m = &s->region[k];
 			h = m->wr + (pa - m->base);
 			h[0] = (uint8_t)rt;
