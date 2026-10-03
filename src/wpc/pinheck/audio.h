@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #ifndef PINHECK_AUDIO_H
 #define PINHECK_AUDIO_H
 

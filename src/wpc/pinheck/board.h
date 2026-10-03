@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #ifndef PINHECK_BOARD_H
 #define PINHECK_BOARD_H
 

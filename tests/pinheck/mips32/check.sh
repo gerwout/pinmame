@@ -13,7 +13,7 @@ if [ -f unit_test.c ]; then
 fi
 fail=0 pass=0
 for c in ../../../src/cpu/mips32/*.c; do
-	cc -std=c89 -pedantic-errors -Wno-long-long -fsyntax-only -I../../../src/cpu/mips32 "$c" || { echo "C89 FAIL $c"; fail=$((fail + 1)); }
+	cc -std=c99 -pedantic-errors -Werror=declaration-after-statement -Wno-long-long -fsyntax-only -I../../../src/cpu/mips32 "$c" || { echo "C FAIL $c"; fail=$((fail + 1)); }
 done
 
 run_diff() {

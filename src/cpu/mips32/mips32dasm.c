@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #include "mips32.h"
 #include <stdarg.h>
 #include <stdio.h>

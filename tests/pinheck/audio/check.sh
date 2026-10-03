@@ -14,7 +14,7 @@ rm -f $B/duty.ctr
 ./$B/p8run -rom $B/duty.rom -ram $B/duty.ram -halt -cycles 400000 -ctrlog $B/duty.ctr > $B/duty.our 2> $B/duty.log
 if cmp -s duty.ctr.expect $B/duty.ctr; then echo "sink: ok"; else echo "SINK MISMATCH"; diff duty.ctr.expect $B/duty.ctr | head -6; fail=$((fail + 1)); fi
 if [ -f audio_test.c ]; then
-	cc -std=c89 -pedantic-errors -Wno-long-long -fsyntax-only -I$S/wpc/pinheck $S/wpc/pinheck/audio.c || { echo "C89 FAIL audio.c"; fail=$((fail + 1)); }
+	cc -std=c99 -pedantic-errors -Werror=declaration-after-statement -Wno-long-long -fsyntax-only -I$S/wpc/pinheck $S/wpc/pinheck/audio.c || { echo "C FAIL audio.c"; fail=$((fail + 1)); }
 	cc $CF -I$S/wpc/pinheck -o $B/audio_test audio_test.c $S/wpc/pinheck/audio.c -lm || exit 2
 	./$B/audio_test || fail=$((fail + 1))
 fi

@@ -1,10 +1,12 @@
+// license:BSD-3-Clause
+
 /* pinHeck games: switch, lamp and output names for table scripts, one section per game.
 
    Domino's Spectacular Pinball Adventure (pinheck_dominos_*).
    Sources: Dominos-Switch-Matrix.pdf, Dominos-Lamp-Matrix.pdf and Spooky_Pinball_Domino's_Solenoid_List.pdf
    (Ken Layton, 2019). Not in them: User (2) and Back (5), the board's USER_0 and BACK inputs in the firmware's
-   cabinet read order (design spec 2.2); the optos 95 (Center Ramp) and 96 (Oven Ramp), from the firmware's
-   switch handlers (Plan 8b, Ruling 5). Numbering of the pinHeck driver (src/wpc/pinheck.c):
+   cabinet read order; the optos 95 (Center Ramp) and 96 (Oven Ramp), from the firmware's switch handlers.
+   Numbering of the pinHeck driver (src/wpc/pinheck.c):
      matrix switch or lamp n (0-63)  (n / 8 + 1) * 10 + n % 8 + 1
      cabinet switch n                n (1-8), n + 82 (9-15)
      start button lamp               91

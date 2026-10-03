@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #ifndef PINHECK_VFAT_H
 #define PINHECK_VFAT_H
 

@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #include "pic32mx.h"
 #include <string.h>
 

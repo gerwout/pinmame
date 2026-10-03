@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #include "vfat.h"
 #include <stdlib.h>
 #include <string.h>

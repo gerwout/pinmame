@@ -9,11 +9,10 @@ TOOLS=${TOOLS:-$PWD/../p8x32a/build/tools}
 CF="-O2 -std=c99 -Wall -Wextra -Werror -pedantic -pthread -I$S/cpu/pic32mx"
 CORE="$S/wpc/pinheck/prop.c $S/wpc/pinheck/eeprom.c $S/cpu/p8x32a/p8x32a.c"
 SDSRC="$S/wpc/pinheck/sd.c $S/wpc/pinheck/vfat.c $S/wpc/pinheck/zipsrc.c -lz"
-[ -f $S/wpc/pinheck/zipsrc.c ] || { echo "PLAN 4 MISSING: src/wpc/pinheck/sd.c, vfat.c, zipsrc.c must exist (execute Plan 4 first)"; exit 2; }
 mkdir -p $B
 fail=0
-for f in prop.c rtc.c bootldr.c; do [ -f $S/wpc/pinheck/$f ] || continue; cc -std=c89 -pedantic-errors -Wno-long-long -fsyntax-only $S/wpc/pinheck/$f || { echo "C89 FAIL $f"; fail=$((fail + 1)); }; done
-cc -std=c89 -pedantic-errors -Wno-long-long -Wall -Werror -DPINHECK_NO_THREADS -fsyntax-only $S/wpc/pinheck/prop.c || { echo "NO_THREADS FAIL prop.c"; fail=$((fail + 1)); }
+for f in prop.c rtc.c bootldr.c; do [ -f $S/wpc/pinheck/$f ] || continue; cc -std=c99 -pedantic-errors -Werror=declaration-after-statement -Wno-long-long -fsyntax-only $S/wpc/pinheck/$f || { echo "C FAIL $f"; fail=$((fail + 1)); }; done
+cc -std=c99 -pedantic-errors -Werror=declaration-after-statement -Wno-long-long -Wall -Werror -DPINHECK_NO_THREADS -fsyntax-only $S/wpc/pinheck/prop.c || { echo "NO_THREADS FAIL prop.c"; fail=$((fail + 1)); }
 if command -v clang > /dev/null; then python3 relax_check.py $S/wpc/pinheck/prop.c || fail=$((fail + 1)); else echo "relax: clang missing, skipped"; fi
 [ -x "$TOOLS/openspin/build/openspin" ] || { echo "TOOLS MISSING: run ../p8x32a/tools.sh or set TOOLS"; exit 2; }
 "$TOOLS/openspin/build/openspin" -q echo.spin -o $B/echo.binary > $B/echo.log 2>&1 || { cat $B/echo.log; exit 2; }

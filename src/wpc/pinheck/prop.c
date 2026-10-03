@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE /* sched_getaffinity */
 #endif
@@ -351,8 +353,8 @@ int prop_p24(pinheck_prop *p, uint64_t pic_cycle)
    would inline, each with the PIC32 cycle at which it was made. The caller waits for the queue to drain before
    it reads Propeller state (prop_sync). */
 #define PROP_Q 4096
-/* a wait spins this long, then blocks; PINHECK_SPIN_US (1-100000) sets it at thread start. Windows' wake from a
-   blocked wait costs more: 200 us there is as fast as 1 ms for 6-11% less CPU (Threadripper 3970X) */
+/* a wait spins this long, then blocks; PINHECK_SPIN_US (1-100000) sets it at thread start. Windows wakes a blocked
+   thread slowly: a longer spin there keeps the handoff fast */
 #ifdef _WIN32
 #define PROP_SPIN_NS 200000
 #else

@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 // Translates runs of a cog's local instructions to x86-64 code with asmjit (see p8x32a.h, p8x32a_jblk). Each
 // instruction does exactly what run_local() does for it; a run leaves after a jump that runs, before a slot whose
 // word no longer fits, and ends before any instruction run_local() would not run and before cog address 511.

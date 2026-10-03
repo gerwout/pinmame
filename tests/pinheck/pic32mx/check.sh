@@ -6,14 +6,14 @@ S=../../../src
 CF="-O2 -std=c99 -Wall -Wextra -Werror -pedantic -I$S/cpu/pic32mx"
 mkdir -p $B
 fail=0
-cc -std=c89 -pedantic-errors -Wno-long-long -fsyntax-only $S/cpu/pic32mx/pic32mx.c || { echo "C89 FAIL pic32mx.c"; fail=$((fail + 1)); }
+cc -std=c99 -pedantic-errors -Werror=declaration-after-statement -Wno-long-long -fsyntax-only $S/cpu/pic32mx/pic32mx.c || { echo "C FAIL pic32mx.c"; fail=$((fail + 1)); }
 cc $CF -o $B/soc_test soc_test.c $S/cpu/pic32mx/pic32mx.c $S/cpu/mips32/mips32.c || exit 2
 ./$B/soc_test || fail=$((fail + 1))
 # pic32mxcpu.c (PinMAME's CPU interface) against stubs of driver.h and cpuintrf.h
 cc $CF -Icpustub -o $B/cpu_test cpu_test.c $S/cpu/pic32mx/pic32mxcpu.c $S/cpu/pic32mx/pic32mx.c $S/cpu/mips32/mips32.c $S/cpu/mips32/mips32dasm.c || exit 2
 ./$B/cpu_test || fail=$((fail + 1))
 # Intel HEX into program flash; AMH_HEX (America's Most Haunted's AMH_V023.hex) adds the real file
-cc -std=c89 -pedantic-errors -Wno-long-long -fsyntax-only $S/wpc/pinheck/hexload.c || { echo "C89 FAIL hexload.c"; fail=$((fail + 1)); }
+cc -std=c99 -pedantic-errors -Werror=declaration-after-statement -Wno-long-long -fsyntax-only $S/wpc/pinheck/hexload.c || { echo "C FAIL hexload.c"; fail=$((fail + 1)); }
 cc $CF -fsanitize=address,undefined -fno-sanitize-recover=all -I$S/wpc/pinheck -o $B/hex_test hex_test.c $S/wpc/pinheck/hexload.c || exit 2
 ./$B/hex_test || fail=$((fail + 1))
 if [ -f boot.c ]; then

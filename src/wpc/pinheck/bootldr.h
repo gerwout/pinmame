@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #ifndef PINHECK_BOOTLDR_H
 #define PINHECK_BOOTLDR_H
 

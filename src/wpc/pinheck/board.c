@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #include "board.h"
 #include <string.h>
 

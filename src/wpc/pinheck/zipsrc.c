@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #include "zipsrc.h"
 #include <ctype.h>
 #include <stdlib.h>

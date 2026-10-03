@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #include "audio.h"
 #include <math.h>
 #include <stdio.h>

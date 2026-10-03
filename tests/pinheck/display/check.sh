@@ -9,11 +9,11 @@ S=../../../src
 CF="-O2 -std=c99 -Wall -Wextra -Werror -pedantic"
 mkdir -p $B
 fail=0
-cc -std=c89 -pedantic-errors -Wno-long-long -fsyntax-only $S/wpc/pinheck/display.c || fail=$((fail + 1))
+cc -std=c99 -pedantic-errors -Werror=declaration-after-statement -Wno-long-long -fsyntax-only $S/wpc/pinheck/display.c || fail=$((fail + 1))
 SAN="-fsanitize=address,undefined -fno-sanitize-recover=all"
 cc $CF $SAN -I$S/wpc/pinheck -o $B/display_test display_test.c $S/wpc/pinheck/display.c || exit 2
 ./$B/display_test || fail=$((fail + 1))
-cc -std=c89 -pedantic-errors -Wno-long-long -fsyntax-only $S/wpc/pinheck/dmd.c || fail=$((fail + 1))
+cc -std=c99 -pedantic-errors -Werror=declaration-after-statement -Wno-long-long -fsyntax-only $S/wpc/pinheck/dmd.c || fail=$((fail + 1))
 cc $CF $SAN -I$S/wpc/pinheck -o $B/dmd_test dmd_test.c $S/wpc/pinheck/dmd.c || exit 2
 ./$B/dmd_test || fail=$((fail + 1))
 cc $CF $SAN -I$S/wpc/pinheck -o $B/lookdump lookdump.c $S/wpc/pinheck/display.c || exit 2

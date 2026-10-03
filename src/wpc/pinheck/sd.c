@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #include "sd.h"
 #include <string.h>
 

@@ -15,7 +15,7 @@ python3 names.py check $S jetsons || fail=$((fail + 1))
 python3 names.py check $S amh || fail=$((fail + 1))
 if command -v x86_64-w64-mingw32-gcc > /dev/null; then python3 mingw_check.py $S/libpinmame/libpinmame.cpp x86_64-w64-mingw32-gcc || fail=$((fail + 1)); else echo "vpx: MinGW compiler missing, strcasecmp check skipped"; fi
 printf '#include "pinheck_names.h"\nint main(void) { return pinheck_dominos_switch_names[0].num != 1 || pinheck_rzspook_switch_names[0].num != 1 || pinheck_jetsons_switch_names[0].num != 1 || pinheck_amh_switch_names[0].num != 1; }\n' > $B/names.c
-cc -std=c89 -pedantic-errors -Wall -Wextra -Werror -I$S/wpc $B/names.c -o $B/names && ./$B/names || { echo "NAMES FAIL: pinheck_names.h"; fail=$((fail + 1)); }
+cc -std=c99 -pedantic-errors -Werror=declaration-after-statement -Wall -Wextra -Werror -I$S/wpc $B/names.c -o $B/names && ./$B/names || { echo "NAMES FAIL: pinheck_names.h"; fail=$((fail + 1)); }
 # per-game data: Domino's values only for the system set and Domino's; every other game spells out its own
 dd=$(grep -l 'PINHECK_DOMINOS_DATA' $S/wpc/*.c $S/wpc/sims/pinheck/*.c | sed 's|.*/src/||' | tr '\n' ' ')
 if [ "$dd" = "wpc/pinheckgames.c wpc/sims/pinheck/dominos.c " ] && grep -q 'define INIT_PINHECK(name, balls, version, data)' $S/wpc/pinheckgames.c &&

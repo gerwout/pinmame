@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #ifndef MIPS32_H
 #define MIPS32_H
 

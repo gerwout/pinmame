@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #ifndef PINHECK_ZIPSRC_H
 #define PINHECK_ZIPSRC_H
 

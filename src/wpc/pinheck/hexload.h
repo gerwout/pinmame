@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #ifndef PINHECK_HEXLOAD_H
 #define PINHECK_HEXLOAD_H
 

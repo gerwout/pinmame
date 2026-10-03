@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #ifndef PINHECK_EEPROM_H
 #define PINHECK_EEPROM_H
 

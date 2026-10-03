@@ -13,9 +13,9 @@ fail=0 pass=0
 
 for c in $CORE/*.c $DEV/eeprom.c $DEV/sd.c $DEV/vfat.c $DEV/zipsrc.c; do
 	[ -e "$c" ] || continue
-	cc -std=c89 -pedantic-errors -Wno-long-long -fsyntax-only -I$CORE -I$DEV "$c" || { echo "C89 FAIL $c"; fail=$((fail + 1)); }
+	cc -std=c99 -pedantic-errors -Werror=declaration-after-statement -Wno-long-long -fsyntax-only -I$CORE -I$DEV "$c" || { echo "C FAIL $c"; fail=$((fail + 1)); }
 	# the xpinmame build lists split INLINE="static __inline__" (Linux) / "static __inline" (macOS) into macros
-	for std in c89 gnu99; do
+	for std in gnu89 gnu99; do
 		cc -std=$std -Wno-long-long -D__inline__ -fsyntax-only -I$CORE -I$DEV "$c" || { echo "XPINMAME FAIL $c ($std; __inline__ is a macro there)"; fail=$((fail + 1)); }
 	done
 	# macOS's list makes __inline a macro too (glibc's own headers use it, so it cannot be defined here): no such token

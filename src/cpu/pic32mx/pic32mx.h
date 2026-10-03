@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #ifndef PIC32MX_H
 #define PIC32MX_H
 

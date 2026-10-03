@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #include "bootldr.h"
 #include <stdio.h>
 #include <string.h>

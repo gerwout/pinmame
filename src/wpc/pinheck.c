@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #include "driver.h"
 #include <ctype.h>
 #include "core.h"
@@ -49,7 +51,7 @@ static struct {
 	int nlogged;
 } locals;
 
-/* board I/O: lamps, coils, switches, GI, RGB and servos (board.c), numbered as in spec 4.5 */
+/* board I/O: lamps, coils, switches, GI, RGB and servos (board.c) */
 #define PINHECK_SOL_GI0 24  /* GI 0-7: solenoids 25-32 */
 #define PINHECK_SOL_GI8 40  /* GI 8-15: solenoids 37-44 through core.c's S11 layout */
 #define PINHECK_SOL_RGB 50  /* on-board RGB left R,G,B, right R,G,B: 51-56 */

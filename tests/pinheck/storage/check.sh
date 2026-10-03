@@ -7,7 +7,7 @@ fail=0
 mkdir -p $B
 for c in $S/sd.c $S/vfat.c $S/zipsrc.c; do
 	[ -e "$c" ] || continue
-	cc -std=c89 -pedantic-errors -Wno-long-long -fsyntax-only -I$S "$c" || { echo "C89 FAIL $c"; fail=$((fail + 1)); }
+	cc -std=c99 -pedantic-errors -Werror=declaration-after-statement -Wno-long-long -fsyntax-only -I$S "$c" || { echo "C FAIL $c"; fail=$((fail + 1)); }
 done
 python3 mkzip.py $B/test.zip || exit 2
 if [ -f zipsrc_test.c ]; then

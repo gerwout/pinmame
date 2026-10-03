@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #include "p8x32a.h"
 #include <stdio.h>
 #include <string.h>

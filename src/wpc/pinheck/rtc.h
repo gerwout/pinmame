@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #ifndef PINHECK_RTC_H
 #define PINHECK_RTC_H
 

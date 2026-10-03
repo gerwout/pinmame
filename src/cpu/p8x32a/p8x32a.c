@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #include "p8x32a.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -497,7 +499,7 @@ static void ctr_check(p8x32a *p, uint32_t ctr)
 {
 	unsigned m = (ctr >> 26) & 31;
 	if ((m >= 8 && m <= 15) || (m >= 17 && m <= 30)) log_once(p, LOG_CTR_MODE, "p8x32a: pin-sensing counter mode not modelled");
-	if (m >= 2 && m <= 3) log_once(p, LOG_CTR_OUT, "p8x32a: counter PLL pin outputs not modelled (Plan 6)");
+	if (m >= 2 && m <= 3) log_once(p, LOG_CTR_OUT, "p8x32a: counter PLL pin outputs not modelled");
 }
 
 static void ctr_save(p8x32a *p, p8x32a_cog *c, int k, uint64_t e)

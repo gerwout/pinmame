@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #ifndef P8X32A_H
 #define P8X32A_H
 

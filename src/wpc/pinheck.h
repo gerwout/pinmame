@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #ifndef INC_PINHECK
 #define INC_PINHECK
 

@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #include "display.h"
 #include <stdio.h>
 #include <string.h>

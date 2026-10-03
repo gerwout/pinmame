@@ -1,3 +1,5 @@
+// license:BSD-3-Clause
+
 #ifndef PINHECK_DMD_H
 #define PINHECK_DMD_H
 
