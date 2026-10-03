@@ -1462,6 +1462,15 @@ DRIVERNV(topgame)       // 19?? - Top Game Laser L10 (Bingo)
 DRIVERNV(topgamet)      // 19?? - Top Game Turbo (Bingo)
 
 // ---------------
+// SPOOKY PINBALL
+// ---------------
+DRIVERNV(pinheck)       // 2014 - pinHeck System (not a game)
+DRIVERNV(amh)           // 2014 - America's Most Haunted (V23)
+DRIVERNV(dominos)       // 2016 - Domino's Spectacular Pinball Adventure (V6)
+DRIVERNV(rzspook)       // 2016 - Rob Zombie's Spookshow International (V26)
+DRIVERNV(jetsons)       // 2017 - The Jetsons (V4)
+
+// ---------------
 // SPORT MATIC
 // ---------------
 DRIVERNV(flashman)      // 1984 - Flashman
@@ -3643,15 +3652,5 @@ DRIVERNV(nstrphnx)      //08/87 New Star's Phoenix (same roms as strsphnx)
 DRIVERNV(nstrphnf)      //      New Star's Phoenix (French Speech)
 DRIVERNV(nstrphfp)      //      New Star's Phoenix (Free Play)
 DRIVERNV(nstrpffp)      //      New Star's Phoenix (French Speech Free Play)
-
-
-// ------------------
-// SPOOKY PINBALL GAMES
-// ------------------
-DRIVERNV(pinheck)       //pinHeck System (not a game)
-DRIVERNV(dominos)       //pinHeck 07/16 Domino's Spectacular Pinball Adventure
-DRIVERNV(rzspook)       //pinHeck 2016 Rob Zombie's Spookshow International (V26)
-DRIVERNV(jetsons)       //pinHeck 2017 The Jetsons (V4)
-DRIVERNV(amh)           //pinHeck 2014 America's Most Haunted (V23)
 
 #endif /* DRIVER_RECURSIVE */
