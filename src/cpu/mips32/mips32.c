@@ -663,19 +663,12 @@ static int fast_run(mips32_state *s, uint64_t lim)
 		const mips32_region *m;
 		if (off >= fsize || (off & 3)) break;
 		op = le32(fptr + off);
-		if (!op) {
-			/* NOP (sll $0, $0, 0): a quarter of some firmware's instructions, its delay slots */
-			pc = npc;
-			npc = tpc;
-			delay = 0;
-			cyc++;
-			n++;
-			continue;
-		}
 		rs = r[RS(op)];
 		rt = r[RT(op)];
 		switch (op >> 26) {
 		case 0x00:
+			/* NOP (sll $0, $0, 0), most of some firmware's delay slots: no funct dispatch */
+			if (!op) { v = 0; break; }
 			switch (FUNCT(op)) {
 			case 0x00: d = RD(op); v = rt << SA(op); break;
 			case 0x02: d = RD(op); v = (op & (1u << 21)) ? ror32(rt, SA(op)) : rt >> SA(op); break;
