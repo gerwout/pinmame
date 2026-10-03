@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Machine check 5: the firmware's console commands and service tests reach exactly the
-PinMAME lamps, solenoids and switches of spec 4.5.
+PinMAME lamps, solenoids and switches (src/wpc/pinheck_names.h).
   check5.py plan DIR      write DIR/send, send_at, send_gap, keys.txt, frames
   check5.py timing LOG    board edges in one CPU slice carry distinct PinMAME times
   check5.py verify DIR    check DIR/out2.log and DIR/frames2.bin against the plan

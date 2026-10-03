@@ -26,7 +26,7 @@ BALL = [('LCONTROL S', 3.0), ('Z', 1.2), ('X', 1.2), ('M', 1.2), ('Z', 1.2), ('L
         ('LCONTROL R', 1.5), ('RCONTROL R', 1.5), ('LCONTROL S', 3.0), ('V', 2.0), ('LCONTROL R', 1.5), ('RCONTROL R', 1.5),
         ('LCONTROL S', 3.0), ('LSHIFT', 1.0), ('RSHIFT', 1.0)]
 DRAIN = ['LCONTROL O', 'RCONTROL O', 'Q']      # left outlane, right outlane, between the flippers
-# the switch each key's shot closes first (Task 1's key table)
+# the switch each key's shot closes first
 SWITCH = {'LCONTROL S': 25, 'RCONTROL S': 48, 'Z': 28, 'X': 27, 'M': 26, 'LCONTROL N': 38, 'RCONTROL N': 37, 'LCONTROL R': 46,
           'RCONTROL R': 36, 'C': 95, 'V': 96, 'G': 47, 'LCONTROL L': 41, 'RCONTROL L': 42, 'B': 44, 'LCONTROL B': 45,
           'RCONTROL B': 43, 'LCONTROL MINUS': 22, 'RCONTROL MINUS': 16, 'LCONTROL I': 23, 'RCONTROL I': 17,

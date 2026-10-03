@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The display module's look (spec M8/M9 addendum 5): a model of display.c's config decoding and rendering,
+"""The display module's look: a model of display.c's config decoding and rendering,
 and the look check, which steps the service menu's display settings through every value.
   look.py crosscheck BIN   the model against display.c through BIN (lookdump)
   look.py plan DIR         write DIR/keys.txt and DIR/frames for launch 2
@@ -28,7 +28,7 @@ if GAME == 'rzspook':
     PROP_DEFAULT = '00 fa 01 cc 00 00 00 ff 00 80 00 20 00 3e'
     SAVED = '00 fa 01 cd -- -- 00 af 00 80 00 20 00 00'
     ALIGNED, TO_SHAPE = 460, 10
-# (PIXEL SHAPE: the stored block kept 1 in runs without the simulator and 0 with it; cause not established)
+# (PIXEL SHAPE in the stored block is not checked: it is 1 without the simulator and 0 with it, cause unknown)
 FPS = 60
 TOL = 7                   # 8 -> 5 bit -> 8 bit rounding of a 15 bpp screen
 

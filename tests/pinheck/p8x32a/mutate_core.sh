@@ -88,7 +88,7 @@ PY
 }
 mutant none-interpreted p8x32a.c '' '' 0
 mutant none-translated p8x32a.c '' '' 1
-# a pin read that sends the pins ahead of the other cogs (the cause of Plan 12b's lost bits)
+# a pin read that sends the pins ahead of the other cogs
 mutant ina-ahead p8x32a.c '	if (p->lz_on && (m & p->lz_pins)) return ina_lazy(p, t);
 	flush(p, t);' '	if (p->lz_on && (m & p->lz_pins)) return ina_lazy(p, t);
 	flush(p, t + 64);' 0

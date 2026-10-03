@@ -1,4 +1,4 @@
-/* The core's ALUs (alu, alu_run, bitrev) against the Milestone 3 ALU, kept here verbatim as the reference. */
+/* The core's ALUs (alu, alu_run, bitrev) against the reference ALU below (ref_alu, ref_bitrev). */
 #include "p8x32a.c"
 #include <stdlib.h>
 

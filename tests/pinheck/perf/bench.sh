@@ -1,5 +1,5 @@
 #!/bin/sh
-# Headless benchmark and determinism check (Milestone 9).
+# Headless benchmark and determinism check.
 #   bench.sh [attract] [video]     time each workload with $SDL3PINMAME; with $REFERENCE set, run it too
 #                                  and require byte-identical UART1, frame (a raw DMD's subframes too), sound and
 #                                  NVRAM output; each timing

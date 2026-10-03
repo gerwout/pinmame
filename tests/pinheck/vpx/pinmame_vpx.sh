@@ -1,5 +1,5 @@
 #!/bin/sh
-# Domino's through libpinmame (spec M10 4.1): display, sound, outputs, switches and mechanics as a host receives them;
+# Domino's through libpinmame: display, sound, outputs, switches and mechanics as a host receives them;
 # with PINHECK_GAME=jetsons The Jetsons' 128x64 display and its sound only; with amh America's Most Haunted's raw DMD
 : "${LIBPINMAME:?set LIBPINMAME to the built libpinmame.so}"
 : "${PINHECK_UPDATE_DIR:?set PINHECK_UPDATE_DIR to the game's unzipped update}"
