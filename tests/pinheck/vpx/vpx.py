@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""What a libpinmame host (VPX standalone's PinMAME plugin, or any other) receives (spec M10 4.1), from host's logs.
+"""What a libpinmame host (VPX standalone's PinMAME plugin, or any other) receives, from host's logs.
   vpx.py displays DIR...        every announced display index exists and gets updates
   vpx.py probe DIR...           lamps and solenoids 0, -1 and 100000 read 0 on the games run
   vpx.py plan DIR               the workloads: DIR/switches.txt, send, send_at, send_gap, frames; DIR/mech.txt
@@ -50,7 +50,9 @@ def displays(dirs):
         idx = sorted(int(a[1]) for a in avail)
         upd = {int(l.split()[1]): int(l.split()[7]) for l in other if l.startswith('display ')}
         n = counts.pop() if len(counts) == 1 else None
-        ok = n is not None and idx == list(range(n)) and all(upd.get(i, 0) > 0 for i in range(n))
+        # libpinmame reserves one slot more than it announces (the segment games' extra 128x32 DMD)
+        ok = n is not None and idx == list(range(len(idx))) and n in (len(idx), len(idx) + 1) and \
+            len(idx) > 0 and all(upd.get(i, 0) > 0 for i in idx)
         print('displays: %s announces %s display(s), indices %s, updates %s%s' % (
             os.path.basename(d), n if n is not None else sorted(counts), idx, [upd.get(i, 0) for i in idx], '' if ok else '  FAIL'))
         fail += not ok
