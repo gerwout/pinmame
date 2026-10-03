@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-#  Optional asmjit-based ARM7 JIT backend
+#  Optional asmjit-based ARM7 and Propeller (P8X32A) JIT backends
 #
 #  ARM7 JIT -> asmjit migration/generalization
 #
@@ -23,7 +23,7 @@
 #      pinmame_enable_asmjit(<target>)
 # ---------------------------------------------------------------------------
 
-option(PINMAME_JIT_ASMJIT "Build the asmjit-based ARM7 JIT backend (x86/x64 targets only)" ON)
+option(PINMAME_JIT_ASMJIT "Build the asmjit-based ARM7 and Propeller JIT backends (x86/x64 targets only)" ON)
 
 # Resolve the effective switch: option ON + x86/x64 target.
 set(PINMAME_JIT_ASMJIT_EFFECTIVE FALSE)
