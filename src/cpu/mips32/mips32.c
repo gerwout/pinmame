@@ -839,7 +839,9 @@ static int fast_run(mips32_state *s, uint64_t lim)
 		default: goto out;
 		}
 	set:
-		if (d) r[d] = v;
+		/* d is 0 for none: written and cleared again, without a branch */
+		r[d] = v;
+		r[0] = 0;
 		pc = npc;
 		npc = tpc;
 		delay = (int)nd;
